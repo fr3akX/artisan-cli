@@ -5,9 +5,11 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"unsafe"
 
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -18,9 +20,11 @@ func TestFileStoreCreatesAndVerifiesPrivateWindowsACL(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	path := filepath.Join(dir, credentialsFileName)
-	if err := verifyPrivatePermissions(path); err != nil {
-		t.Fatalf("verifyPrivatePermissions: %v", err)
+	file, err := securefile.OpenPrivate(path)
+	if err != nil {
+		t.Fatalf("OpenPrivate: %v", err)
 	}
+	file.Close()
 
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -91,6 +95,7 @@ func TestFileStoreRejectsWindowsACLGrantingEveryone(t *testing.T) {
 			TrusteeValue: windows.TrusteeValueFromSID(world),
 		},
 	}}, nil)
+	runtime.KeepAlive(world)
 	if err != nil {
 		t.Fatalf("ACLFromEntries: %v", err)
 	}

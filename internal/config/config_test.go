@@ -42,6 +42,25 @@ func TestNormalizeServerURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeServerURLErrorsNeverExposeEmbeddedSecrets(t *testing.T) {
+	t.Parallel()
+
+	const secret = "super-secret-token"
+	inputs := []string{
+		"https://user:" + secret + "@artisan.example:bad-port",
+		"https://user:" + secret + "@[::1",
+		"https://user:" + secret + "@artisan.example/api",
+		"ftp://user:" + secret + "@artisan.example",
+	}
+	for _, raw := range inputs {
+		if _, err := config.NormalizeServerURL(raw); err == nil {
+			t.Errorf("NormalizeServerURL(%q) succeeded, want error", raw)
+		} else if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), raw) {
+			t.Errorf("NormalizeServerURL error leaked input or secret: %q", err)
+		}
+	}
+}
+
 func TestNormalizeServerURLRejectsUnsafeOrNonOriginURLs(t *testing.T) {
 	t.Parallel()
 

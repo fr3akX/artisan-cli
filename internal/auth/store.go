@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 const credentialsFileName = "credentials.json"
@@ -42,34 +44,34 @@ func (s *fileStore) Save(token string) error {
 	if err != nil {
 		return err
 	}
-	if err := preparePrivateDirectory(dir); err != nil {
-		return fmt.Errorf("prepare credential directory: %w", err)
-	}
-
 	contents, err := json.Marshal(credentialsFile{Token: token})
 	if err != nil {
 		return fmt.Errorf("encode credentials: %w", err)
 	}
 	contents = append(contents, '\n')
-	if err := writeCredentialsAtomically(dir, contents); err != nil {
-		return err
+	if err := securefile.AtomicWrite(dir, credentialsFileName, contents); err != nil {
+		return fmt.Errorf("save credentials: %w", err)
 	}
 	return nil
 }
 
 func (s *fileStore) Load() (string, error) {
+	return s.load(securefile.OpenPrivate)
+}
+
+type privateOpener func(string) (*os.File, error)
+
+func (s *fileStore) load(opener privateOpener) (string, error) {
 	dir, err := resolveConfigDir(s.configDir)
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, credentialsFileName)
-	if err := verifyPrivatePermissions(path); err != nil {
-		return "", err
-	}
-
-	file, err := os.Open(path)
+	file, err := opener(filepath.Join(dir, credentialsFileName))
 	if err != nil {
-		return "", fmt.Errorf("open credentials: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		return "", fmt.Errorf("unsafe_credentials: %w", err)
 	}
 	defer file.Close()
 
@@ -95,45 +97,6 @@ func (s *fileStore) Remove() error {
 	}
 	if err := os.Remove(filepath.Join(dir, credentialsFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove credentials: %w", err)
-	}
-	return nil
-}
-
-func writeCredentialsAtomically(dir string, contents []byte) (err error) {
-	temporary, err := os.CreateTemp(dir, ".credentials.json.tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temporary credentials: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-
-	if _, err := temporary.Write(contents); err != nil {
-		return fmt.Errorf("write temporary credentials: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync temporary credentials: %w", err)
-	}
-	if err := applyPrivatePermissions(temporaryPath); err != nil {
-		return fmt.Errorf("secure temporary credentials: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary credentials: %w", err)
-	}
-	if err := verifyPrivatePermissions(temporaryPath); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, credentialsFileName)
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("replace credentials: %w", err)
-	}
-	if err := verifyPrivatePermissions(path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return fmt.Errorf("verify credentials: %v; remove unsafe credentials: %w", err, removeErr)
-		}
-		return err
 	}
 	return nil
 }

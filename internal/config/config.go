@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/fr3akX/artisan-cli/internal/auth"
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 const configFileName = "config.json"
@@ -48,7 +49,7 @@ type configFile struct {
 func NormalizeServerURL(raw string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("invalid_server_url: %w", err)
+		return "", errors.New("invalid_server_url: malformed URL")
 	}
 	if parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
 		return "", errors.New("invalid_server_url: an absolute URL with a host is required")
@@ -159,24 +160,30 @@ func SaveServer(configDir, serverURL string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create configuration directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("secure configuration directory: %w", err)
-	}
 	contents, err := json.Marshal(configFile{ServerURL: normalized})
 	if err != nil {
 		return fmt.Errorf("encode configuration: %w", err)
 	}
 	contents = append(contents, '\n')
-	return writeAtomically(dir, configFileName, contents)
+	if err := securefile.AtomicWrite(dir, configFileName, contents); err != nil {
+		return fmt.Errorf("save configuration: %w", err)
+	}
+	return nil
 }
 
+type privateOpener func(string) (*os.File, error)
+
 func loadStoredServer(configDir string) (string, error) {
-	file, err := os.Open(filepath.Join(configDir, configFileName))
+	return loadStoredServerWithOpener(configDir, securefile.OpenPrivate)
+}
+
+func loadStoredServerWithOpener(configDir string, opener privateOpener) (string, error) {
+	file, err := opener(filepath.Join(configDir, configFileName))
 	if err != nil {
-		return "", fmt.Errorf("open configuration: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		return "", fmt.Errorf("unsafe_configuration: %w", err)
 	}
 	defer file.Close()
 
@@ -194,35 +201,6 @@ func loadStoredServer(configDir string) (string, error) {
 		return "", err
 	}
 	return serverURL, nil
-}
-
-func writeAtomically(dir, name string, contents []byte) (err error) {
-	temporary, err := os.CreateTemp(dir, "."+name+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temporary configuration: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-
-	if _, err := temporary.Write(contents); err != nil {
-		return fmt.Errorf("write temporary configuration: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync temporary configuration: %w", err)
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("secure temporary configuration: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary configuration: %w", err)
-	}
-	if err := os.Rename(temporaryPath, filepath.Join(dir, name)); err != nil {
-		return fmt.Errorf("replace configuration: %w", err)
-	}
-	return nil
 }
 
 func resolveConfigDir(configDir string) (string, error) {
