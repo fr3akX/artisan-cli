@@ -25,6 +25,19 @@ func OpenPrivate(path string) (*os.File, error) {
 	return file, nil
 }
 
+func durableReplace(from, to string) error {
+	return os.Rename(from, to)
+}
+
+func syncParentDirectory(path string) error {
+	directory, err := openPrivateDirectory(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
 func openPrivateDirectory(path string) (*os.File, error) {
 	descriptor, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 	if err != nil {

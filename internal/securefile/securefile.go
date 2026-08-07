@@ -25,14 +25,18 @@ func EnsurePrivateDir(path string) error {
 	return nil
 }
 
-// AtomicWrite replaces name in dir using a protected same-directory temporary
-// file. The temporary file's protection is verified on its open handle before
-// it is renamed into place.
+// AtomicWrite durably replaces name in dir using a protected same-directory
+// temporary file. It syncs file contents and protection before replacement,
+// then establishes the platform-specific durable rename boundary.
 func AtomicWrite(dir, name string, contents []byte) error {
-	return atomicWriteWithRename(dir, name, contents, os.Rename)
+	return atomicWriteWithOperations(dir, name, contents, durableReplace, syncParentDirectory)
 }
 
 func atomicWriteWithRename(dir, name string, contents []byte, rename func(string, string) error) error {
+	return atomicWriteWithOperations(dir, name, contents, rename, syncParentDirectory)
+}
+
+func atomicWriteWithOperations(dir, name string, contents []byte, rename func(string, string) error, syncParent func(string) error) error {
 	if name == "" || filepath.Base(name) != name {
 		return errors.New("invalid private file name")
 	}
@@ -53,17 +57,20 @@ func atomicWriteWithRename(dir, name string, contents []byte, rename func(string
 	if _, err := temporary.Write(contents); err != nil {
 		return fmt.Errorf("write temporary private file: %w", err)
 	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync temporary private file: %w", err)
-	}
 	if err := protectPrivate(temporary, false); err != nil {
 		return fmt.Errorf("protect temporary private file: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync temporary private file: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary private file: %w", err)
 	}
 	if err := rename(temporaryPath, filepath.Join(dir, name)); err != nil {
 		return fmt.Errorf("replace private file: %w", err)
+	}
+	if err := syncParent(dir); err != nil {
+		return fmt.Errorf("sync private file directory: %w", err)
 	}
 	return nil
 }

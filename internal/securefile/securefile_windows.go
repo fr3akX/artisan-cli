@@ -18,6 +18,22 @@ func OpenPrivate(path string) (*os.File, error) {
 	return openWindowsObject(path, false, true)
 }
 
+func durableReplace(from, to string) error {
+	fromPointer, err := windows.UTF16PtrFromString(from)
+	if err != nil {
+		return err
+	}
+	toPointer, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(fromPointer, toPointer, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+// MoveFileEx with MOVEFILE_WRITE_THROUGH provides the Windows durability
+// boundary corresponding to syncing the parent directory after a Unix rename.
+func syncParentDirectory(string) error { return nil }
+
 func openPrivateDirectory(path string) (*os.File, error) {
 	return openWindowsObject(path, true, false)
 }
