@@ -18,8 +18,6 @@ const usageExitCode = 2
 
 // Run parses args, executes a command, and returns the process exit code.
 func Run(ctx context.Context, args []string, runtime Runtime) int {
-	_ = ctx
-
 	flags := flag.NewFlagSet("artisan", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	jsonMode := flags.Bool("json", false, "emit a JSON envelope")
@@ -32,9 +30,6 @@ func Run(ctx context.Context, args []string, runtime Runtime) int {
 			Message:  err.Error(),
 		})
 	}
-	_ = server
-	_ = timeout
-
 	remaining := flags.Args()
 	if len(remaining) == 0 {
 		return writeFailure(runtime, *jsonMode, output.Error{
@@ -45,6 +40,8 @@ func Run(ctx context.Context, args []string, runtime Runtime) int {
 	}
 
 	switch remaining[0] {
+	case "auth":
+		return runAuth(ctx, remaining[1:], runtime, *jsonMode, *server, *timeout)
 	case "version":
 		if len(remaining) != 1 {
 			return writeFailure(runtime, *jsonMode, output.Error{

@@ -155,3 +155,16 @@ func TestGlobalFlagsMustPrecedeCommand(t *testing.T) {
 		t.Fatal("stderr is empty, want usage diagnostic")
 	}
 }
+
+func TestGlobalFlagsAfterAuthCommandAreNotTreatedAsGlobal(t *testing.T) {
+	code, stdout, stderr := runCommand(t, "auth", "status", "--json")
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if want := "auth status does not accept arguments\n"; stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}
