@@ -70,6 +70,8 @@ func Run(ctx context.Context, args []string, runtime Runtime) int {
 		return runAuth(ctx, remaining[1:], runtime, *jsonMode, *server, *timeout)
 	case "inventory":
 		return runInventory(ctx, remaining[1:], runtime, *jsonMode, *server, *timeout)
+	case "skill":
+		return runSkill(ctx, remaining[1:], runtime, *jsonMode)
 	case "version":
 		if len(remaining) != 1 {
 			return writeFailure(runtime, *jsonMode, output.Error{
