@@ -1,0 +1,16 @@
+# Go build and test artifacts
+/artisan
+/artisan.exe
+*.test
+*.out
+/coverage/
+/dist/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Local credentials and configuration
+.env
+*.local
