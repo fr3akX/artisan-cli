@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
+	"golang.org/x/text/unicode/norm"
 )
 
 // BeanLotFields is the exact metadata object nested in BeanLotCreateManifest.
@@ -582,13 +583,14 @@ func normalizeRequestText(value string, codePoints, bytesLimit int, required, mu
 	if !utf8.ValidString(value) {
 		return "", false
 	}
+	// Match the server's normalization order: canonicalize line endings, apply
+	// Unicode NFC, trim surrounding whitespace, reject controls, then enforce
+	// bounds against the normalized wire value.
 	normalized := strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	normalized = norm.NFC.String(normalized)
 	normalized = strings.TrimSpace(normalized)
 	if normalized == "" {
 		return "", !required
-	}
-	if utf8.RuneCountInString(normalized) > codePoints || len(normalized) > bytesLimit {
-		return "", false
 	}
 	for _, character := range normalized {
 		point := uint32(character)
@@ -596,6 +598,9 @@ func normalizeRequestText(value string, codePoints, bytesLimit int, required, mu
 		if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)) && !permittedMultiline {
 			return "", false
 		}
+	}
+	if utf8.RuneCountInString(normalized) > codePoints || len(normalized) > bytesLimit {
+		return "", false
 	}
 	return normalized, true
 }

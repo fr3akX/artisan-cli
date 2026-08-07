@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
@@ -18,10 +20,19 @@ import (
 const reservationClientInstanceID = "77777777777747778777777777777777"
 const reservationRoastID = "66666666666646668666666666666666"
 
-func reservationMutationJSON(replay bool) string {
-	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"reserved","planned_grams":1250,"actual_grams":null,"reserved_at":"%s","completed_at":null,"created_at":"%s","updated_at":"%s","open_conflict_id":"%s"},"balance":{"lot_id":"%s","on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":1},"conflict":{"conflict_id":"%s","lot_id":"%s","source_ledger_entry_id":"%s","roast_uuid":"%s","reservation_id":"%s","trigger_operation":"reservation","available_grams_snapshot":-25,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"%s"},"idempotent_replay":%t}`,
-		inventoryReservationID, inventoryEntryID, inventoryLotID, reservationRoastID, reservationClientInstanceID, inventoryTimestamp, inventoryTimestamp, inventoryTimestamp, inventoryConflictID,
-		inventoryLotID, inventoryConflictID, inventoryLotID, inventoryEntryID, reservationRoastID, inventoryReservationID, inventoryTimestamp, replay)
+func reservationMutationJSON(state string, replay bool) string {
+	actual, completed := "null", "null"
+	onHand, reserved := int64(5000), int64(1250)
+	if state == "finalized" {
+		actual, completed = "1200", `"`+inventoryTimestamp+`"`
+		onHand, reserved = 3800, 0
+	} else if state == "released" {
+		completed = `"` + inventoryTimestamp + `"`
+		reserved = 0
+	}
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":"%s"},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":1},"conflict":{"conflict_id":"%s","lot_id":"%s","source_ledger_entry_id":"%s","roast_uuid":"%s","reservation_id":"%s","trigger_operation":"reservation","available_grams_snapshot":-25,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"%s"},"idempotent_replay":%t}`,
+		inventoryReservationID, inventoryEntryID, inventoryLotID, reservationRoastID, reservationClientInstanceID, state, actual, inventoryTimestamp, completed, inventoryTimestamp, inventoryTimestamp, inventoryConflictID,
+		inventoryLotID, onHand, reserved, onHand-reserved, inventoryConflictID, inventoryLotID, inventoryEntryID, reservationRoastID, inventoryReservationID, inventoryTimestamp, replay)
 }
 
 func TestReservationMethodsUseMemberCompatibleRoutesExactBodiesStatusesAndOneKey(t *testing.T) {
@@ -34,7 +45,7 @@ func TestReservationMethodsUseMemberCompatibleRoutesExactBodiesStatusesAndOneKey
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
 		bodies = append(bodies, string(contents))
 		w.WriteHeader(statuses[len(paths)-1])
-		_, _ = io.WriteString(w, reservationMutationJSON(false))
+		_, _ = io.WriteString(w, reservationMutationJSON([]string{"reserved", "finalized", "released"}[len(paths)-1], false))
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "member-token", time.Second)
@@ -82,7 +93,7 @@ func TestReservationFinalizePreservesOmittedActualWeightAsNull(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
-		_, _ = io.WriteString(w, reservationMutationJSON(false))
+		_, _ = io.WriteString(w, reservationMutationJSON("finalized", false))
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "token", time.Second)
@@ -96,7 +107,7 @@ func TestReservationFinalizePreservesOmittedActualWeightAsNull(t *testing.T) {
 
 func TestReservationMutationProjectionRequiresAndValidatesEveryConsumedField(t *testing.T) {
 	var response ReservationMutationResponse
-	if err := decodeOneJSON([]byte(reservationMutationJSON(true)), &response); err != nil {
+	if err := decodeOneJSON([]byte(reservationMutationJSON("reserved", true)), &response); err != nil {
 		t.Fatal(err)
 	}
 	if !response.IdempotentReplay || response.Reservation.PlannedGrams != 1250 || response.Balance.AvailableGrams != 3750 || response.Conflict == nil || response.Conflict.ConflictID != inventoryConflictID {
@@ -110,7 +121,7 @@ func TestReservationMutationProjectionRequiresAndValidatesEveryConsumedField(t *
 		{inventoryReservationID, "not-a-uuid"},
 		{inventoryTimestamp, "2026-08-04T12:00:00Z"},
 	} {
-		mutated := strings.Replace(reservationMutationJSON(true), replacement.old, replacement.new, 1)
+		mutated := strings.Replace(reservationMutationJSON("reserved", true), replacement.old, replacement.new, 1)
 		if err := decodeOneJSON([]byte(mutated), &ReservationMutationResponse{}); err == nil {
 			t.Errorf("accepted mutation %q => %q", replacement.old, replacement.new)
 		}
@@ -172,7 +183,7 @@ func TestReservationMethodsRequireExactStatusesAndReplayIdentically(t *testing.T
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(test.status)
 				if test.status != http.StatusNoContent {
-					_, _ = io.WriteString(w, reservationMutationJSON(false))
+					_, _ = io.WriteString(w, reservationMutationJSON("reserved", false))
 				}
 			}))
 			defer server.Close()
@@ -194,7 +205,7 @@ func TestReservationMethodsRequireExactStatusesAndReplayIdentically(t *testing.T
 			_, _ = io.WriteString(w, `{"error":{"code":"busy","message":"Busy","details":null}}`)
 			return
 		}
-		_, _ = io.WriteString(w, reservationMutationJSON(true))
+		_, _ = io.WriteString(w, reservationMutationJSON("released", true))
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "token", time.Second)
@@ -213,7 +224,7 @@ func TestConflictResolutionUsesAdminRouteExactNormalizedNoteAndStatus(t *testing
 		key = r.Header.Get("Idempotency-Key")
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
-		_, _ = io.WriteString(w, validConflictJSON())
+		_, _ = io.WriteString(w, resolvedConflictJSON("counted\nagain"))
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "admin-token", time.Second)
@@ -248,5 +259,150 @@ func TestConflictResolutionRejectsInvalidNoteBeforeNetworkAndRequires200(t *test
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests=%d", requests.Load())
+	}
+}
+
+func resolvedConflictJSON(note string) string {
+	encoded, _ := json.Marshal(note)
+	return strings.ReplaceAll(validConflictJSON(), `"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null`, `"state":"resolved","resolution_note":`+string(encoded)+`,"resolved_by_user_id":"`+inventoryImageID+`","resolved_at":"`+inventoryTimestamp+`"`)
+}
+
+func TestReservationMutationResponsesAreBoundToEachRequest(t *testing.T) {
+	create := ReservationCreate{ClientReservationUUID: inventoryEntryID, ClientInstanceUUID: reservationClientInstanceID, RoastUUID: reservationRoastID, LotID: inventoryLotID, PlannedGrams: 1250, OccurredAt: inventoryTimestamp}
+	actual := int64(1200)
+	tests := []struct {
+		name, response string
+		status         int
+		call           func(*Client) *output.Error
+	}{
+		{name: "create client reservation", status: http.StatusCreated, response: strings.Replace(reservationMutationJSON("reserved", false), inventoryEntryID, inventoryImageID, 1), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create client instance", status: http.StatusCreated, response: strings.Replace(reservationMutationJSON("reserved", false), reservationClientInstanceID, inventoryImageID, 1), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create roast", status: http.StatusCreated, response: strings.Replace(reservationMutationJSON("reserved", false), reservationRoastID, inventoryImageID, 1), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create lot", status: http.StatusCreated, response: strings.ReplaceAll(reservationMutationJSON("reserved", false), inventoryLotID, inventoryImageID), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create planned", status: http.StatusCreated, response: strings.Replace(reservationMutationJSON("reserved", false), `"planned_grams":1250`, `"planned_grams":1249`, 1), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create occurred", status: http.StatusCreated, response: strings.Replace(reservationMutationJSON("reserved", false), `"reserved_at":"`+inventoryTimestamp+`"`, `"reserved_at":"2026-08-04T12:00:01.000000Z"`, 1), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "create state", status: http.StatusCreated, response: reservationMutationJSON("finalized", false), call: func(c *Client) *output.Error {
+			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
+			return f
+		}},
+		{name: "finalize client reservation", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("finalized", false), inventoryEntryID, inventoryImageID, 1), call: func(c *Client) *output.Error {
+			_, f := c.FinalizeInventoryReservation(context.Background(), inventoryEntryID, ReservationFinalize{ActualGrams: &actual, OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "finalize state", status: http.StatusOK, response: reservationMutationJSON("released", false), call: func(c *Client) *output.Error {
+			_, f := c.FinalizeInventoryReservation(context.Background(), inventoryEntryID, ReservationFinalize{ActualGrams: &actual, OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "finalize actual", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("finalized", false), `"actual_grams":1200`, `"actual_grams":1199`, 1), call: func(c *Client) *output.Error {
+			_, f := c.FinalizeInventoryReservation(context.Background(), inventoryEntryID, ReservationFinalize{ActualGrams: &actual, OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "finalize occurred", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("finalized", false), `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":"2026-08-04T12:00:01.000000Z"`, 1), call: func(c *Client) *output.Error {
+			_, f := c.FinalizeInventoryReservation(context.Background(), inventoryEntryID, ReservationFinalize{ActualGrams: &actual, OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "release client reservation", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("released", false), inventoryEntryID, inventoryImageID, 1), call: func(c *Client) *output.Error {
+			_, f := c.ReleaseInventoryReservation(context.Background(), inventoryEntryID, ReservationRelease{OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "release state", status: http.StatusOK, response: reservationMutationJSON("finalized", false), call: func(c *Client) *output.Error {
+			_, f := c.ReleaseInventoryReservation(context.Background(), inventoryEntryID, ReservationRelease{OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+		{name: "release occurred", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("released", false), `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":"2026-08-04T12:00:01.000000Z"`, 1), call: func(c *Client) *output.Error {
+			_, f := c.ReleaseInventoryReservation(context.Background(), inventoryEntryID, ReservationRelease{OccurredAt: inventoryTimestamp}, "key")
+			return f
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.response)
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "token", time.Second)
+			if failure := test.call(client); failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestConflictResolutionResponseIsBoundToIDStateAndNormalizedNote(t *testing.T) {
+	tests := []string{
+		strings.Replace(resolvedConflictJSON("Café"), inventoryConflictID, inventoryImageID, 1),
+		validConflictJSON(),
+		resolvedConflictJSON("wrong"),
+	}
+	for index, response := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, response) }))
+		client, _ := NewClient(server.URL, "token", time.Second)
+		_, failure := client.ResolveInventoryConflict(context.Background(), inventoryConflictID, InventoryConflictResolutionWrite{ResolutionNote: " Cafe\u0301 "}, "key")
+		server.Close()
+		if failure == nil || failure.Code != "invalid_server_response" {
+			t.Errorf("response[%d] failure = %#v", index, failure)
+		}
+	}
+}
+
+func TestInventoryTextNormalizationUsesNFCBeforePostNormalizationBounds(t *testing.T) {
+	request, failure := NormalizeInventoryConflictResolution(InventoryConflictResolutionWrite{ResolutionNote: " Cafe\u0301\r\nagain "})
+	if failure != nil || request.ResolutionNote != "Café\nagain" {
+		t.Fatalf("request=%#v failure=%#v", request, failure)
+	}
+	composable := strings.Repeat("\u1100\u1161\u11A8", 2000)
+	request, failure = NormalizeInventoryConflictResolution(InventoryConflictResolutionWrite{ResolutionNote: composable})
+	if failure != nil || utf8.RuneCountInString(request.ResolutionNote) != 2000 || len(request.ResolutionNote) != 6000 {
+		t.Fatalf("post-NFC boundary: runes=%d bytes=%d failure=%#v", utf8.RuneCountInString(request.ResolutionNote), len(request.ResolutionNote), failure)
+	}
+	if _, failure = NormalizeInventoryConflictResolution(InventoryConflictResolutionWrite{ResolutionNote: composable + "x"}); failure == nil {
+		t.Fatal("accepted post-NFC rune overflow")
+	}
+	fourByteBoundary := strings.Repeat("😀", 2000)
+	request, failure = NormalizeInventoryConflictResolution(InventoryConflictResolutionWrite{ResolutionNote: fourByteBoundary})
+	if failure != nil || utf8.RuneCountInString(request.ResolutionNote) != 2000 || len(request.ResolutionNote) != 8000 {
+		t.Fatalf("byte boundary: runes=%d bytes=%d failure=%#v", utf8.RuneCountInString(request.ResolutionNote), len(request.ResolutionNote), failure)
+	}
+	if _, failure = NormalizeInventoryConflictResolution(InventoryConflictResolutionWrite{ResolutionNote: fourByteBoundary + "😀"}); failure == nil {
+		t.Fatal("accepted post-NFC byte and rune overflow")
+	}
+}
+
+func TestReservationMutationProjectionRejectsNestedNullStateTimestampViolations(t *testing.T) {
+	finalized := reservationMutationJSON("finalized", false)
+	released := reservationMutationJSON("released", false)
+	reserved := reservationMutationJSON("reserved", false)
+	invalid := []string{
+		strings.Replace(finalized, `"actual_grams":1200`, `"actual_grams":null`, 1),
+		strings.Replace(finalized, `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":null`, 1),
+		strings.Replace(finalized, `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":"2026-08-04T11:59:59.000000Z"`, 1),
+		strings.Replace(released, `"actual_grams":null`, `"actual_grams":1`, 1),
+		strings.Replace(released, `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":null`, 1),
+		strings.Replace(reserved, `"available_grams_snapshot":-25`, `"available_grams_snapshot":0`, 1),
+		strings.Replace(reserved, `"resolution_note":null`, `"resolution_note":"counted"`, 1),
+	}
+	for index, payload := range invalid {
+		if err := decodeOneJSON([]byte(payload), &ReservationMutationResponse{}); err == nil {
+			t.Errorf("accepted invalid nested projection[%d]: %s", index, payload)
+		}
 	}
 }

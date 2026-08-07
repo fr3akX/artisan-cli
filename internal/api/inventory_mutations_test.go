@@ -267,21 +267,28 @@ func TestCreateEnforcesEncodedManifestCapAtExactWireBoundary(t *testing.T) {
 	}
 }
 
-func TestCreateSendsDecomposedUnicodeSafelyAndReturnsValidatedAPIRejection(t *testing.T) {
+func TestCreateNormalizesDecomposedUnicodeToNFCAndRejectsCanonicalDuplicateVarietals(t *testing.T) {
 	decomposed := "Cafe\u0301"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(rawMutationManifest(t, string(body), r.Header.Get("Content-Type")), decomposed) {
-			t.Fatal("decomposed Unicode was lost or unsafely rewritten")
+		manifest := rawMutationManifest(t, string(body), r.Header.Get("Content-Type"))
+		if strings.Contains(manifest, decomposed) || !strings.Contains(manifest, "Café") {
+			t.Fatalf("manifest is not NFC: %q", manifest)
 		}
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = io.WriteString(w, `{"error":{"code":"normalization_rejected","message":"Normalization rejected","details":null}}`)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, mutationLotJSON(0))
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "secret", time.Second)
-	_, failure := client.CreateBeanLot(context.Background(), BeanLotCreateManifest{Fields: BeanLotFields{Name: decomposed, Varietals: []string{}}, Images: []ImageUploadManifest{}}, "key")
-	if failure == nil || failure.Code != "normalization_rejected" || failure.ExitCode != 7 {
-		t.Fatalf("failure = %#v", failure)
+	if _, failure := client.CreateBeanLot(context.Background(), BeanLotCreateManifest{Fields: BeanLotFields{Name: decomposed, Varietals: []string{}}, Images: []ImageUploadManifest{}}, "key"); failure != nil {
+		t.Fatal(failure)
+	}
+	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{"Café", decomposed}}, Images: []ImageUploadManifest{}}
+	if failure := ValidateBeanLotCreateManifest(manifest); failure == nil || failure.Code != "invalid_varietals" {
+		t.Fatalf("canonical duplicate failure = %#v", failure)
+	}
+	if _, failure := NewBeanLotPatch(map[string]any{"varietals": []any{"Café", decomposed}}); failure == nil || failure.Code != "invalid_patch_value" {
+		t.Fatalf("canonical patch duplicate failure = %#v", failure)
 	}
 }
 

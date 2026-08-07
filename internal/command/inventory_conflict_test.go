@@ -34,6 +34,15 @@ func TestInventoryConflictReadsNeverPromptAndUseAdminNamespace(t *testing.T) {
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths=%#v want=%#v", paths, want)
 	}
+	wantList := "CONFLICT ID                       LOT ID                            SOURCE ENTRY ID                   ROAST UUID  RESERVATION ID  TRIGGER            AVAILABLE GRAMS  STATE  RESOLUTION NOTE  RESOLVED BY USER ID  RESOLVED AT  CREATED AT\n" +
+		"55555555555545558555555555555555  11111111111141118111111111111111  33333333333343338333333333333333  -           -               manual_adjustment  -1               open   -                -                    -            2026-08-04T12:00:00.000000Z\n"
+	wantShow := "Conflict ID: 55555555555545558555555555555555\n" +
+		"Lot ID: 11111111111141118111111111111111\n" +
+		"Source ledger entry ID: 33333333333343338333333333333333\n" +
+		"Roast UUID: -\nReservation ID: -\nTrigger operation: manual_adjustment\nAvailable grams snapshot: -1\nState: open\nResolution note: -\nResolved by user ID: -\nResolved at: -\nCreated at: 2026-08-04T12:00:00.000000Z\n"
+	if listed.stdout != wantList || shown.stdout != wantShow {
+		t.Fatalf("listed=%q shown=%q", listed.stdout, shown.stdout)
+	}
 }
 
 func TestInventoryConflictResolveConfirmsExactTargetAndNoteAndUsesOneKey(t *testing.T) {
@@ -43,23 +52,34 @@ func TestInventoryConflictResolveConfirmsExactTargetAndNoteAndUsesOneKey(t *test
 		key = r.Header.Get("Idempotency-Key")
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
-		_, _ = fmt.Fprint(w, commandResolvedConflictJSON())
+		_, _ = fmt.Fprint(w, commandResolvedConflictJSONWithNote("Café\nagain\tcolumn"))
 	}))
 	defer server.Close()
 	runtime := inventoryRuntime(t, server.URL)
 	runtime.In = strings.NewReader("yes\n")
 	runtime.IsTerminal = func(int) bool { return true }
-	result := runAuthCommand(t, runtime, "inventory", "conflict", "resolve", "55555555-5555-4555-8555-555555555555", "--note", " physical\r\ncount ", "--idempotency-key", "resolve-key")
-	if result.code != 0 || !strings.Contains(result.stderr, commandConflictID) || !strings.Contains(result.stderr, "physical\ncount") {
-		t.Fatalf("result=%#v", result)
+	result := runAuthCommand(t, runtime, "inventory", "conflict", "resolve", "55555555-5555-4555-8555-555555555555", "--note", " Cafe\u0301\r\nagain\tcolumn ", "--idempotency-key", "resolve-key")
+	wantPrompt := "Resolve conflict " + commandConflictID + ` with note: Café\nagain\tcolumn? Type yes to continue: `
+	if result.code != 0 || result.stderr != wantPrompt || strings.Count(result.stderr, "\n") != 0 {
+		t.Fatalf("result=%#v want prompt=%q", result, wantPrompt)
 	}
-	if path != "/api/v1/inventory/admin/conflicts/"+commandConflictID+"/resolve" || body != `{"resolution_note":"physical\ncount"}` || key != "resolve-key" {
+	if path != "/api/v1/inventory/admin/conflicts/"+commandConflictID+"/resolve" || body != `{"resolution_note":"Café\nagain\tcolumn"}` || key != "resolve-key" {
 		t.Fatalf("path=%q body=%q key=%q", path, body, key)
 	}
-	for _, exact := range []string{commandConflictID, "resolved", "counted"} {
-		if !strings.Contains(result.stdout, exact) {
-			t.Fatalf("stdout %q missing %q", result.stdout, exact)
-		}
+	wantOutput := "Conflict ID: " + commandConflictID + "\n" +
+		"Lot ID: " + commandLotID + "\n" +
+		"Source ledger entry ID: " + commandEntryID + "\n" +
+		"Roast UUID: " + commandRoastID + "\n" +
+		"Reservation ID: " + commandReservationID + "\n" +
+		"Trigger operation: consumption\n" +
+		"Available grams snapshot: -25\n" +
+		"State: resolved\n" +
+		`Resolution note: Café\nagain\tcolumn` + "\n" +
+		"Resolved by user ID: " + commandUserID + "\n" +
+		"Resolved at: " + commandTimestamp + "\n" +
+		"Created at: " + commandTimestamp + "\n"
+	if result.stdout != wantOutput {
+		t.Fatalf("stdout=%q want=%q", result.stdout, wantOutput)
 	}
 }
 
@@ -129,5 +149,17 @@ func TestInventoryConflictResolveRejectsMissingBlankOversizedNoteIDAndKeyLocally
 		if result.code != 2 {
 			t.Errorf("args=%q result=%#v", args, result)
 		}
+	}
+}
+
+func TestInventoryConflictResolveJSONEnvelopeIsExact(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, commandResolvedConflictJSON())
+	}))
+	defer server.Close()
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "conflict", "resolve", commandConflictID, "--note", "counted", "--yes")
+	want := `{"ok":true,"data":` + commandResolvedConflictJSON() + "}\n"
+	if result.code != 0 || result.stderr != "" || result.stdout != want {
+		t.Fatalf("result=%#v want=%q", result, want)
 	}
 }

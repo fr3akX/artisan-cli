@@ -436,12 +436,42 @@ func (value InventoryReservation) validate() error {
 	if !validUUID(value.ReservationID) || !validUUID(value.ClientReservationUUID) || !validUUID(value.LotID) || !validUUID(value.RoastUUID) || !validUUID(value.ClientInstanceUUID) || !validOptionalUUID(value.OpenConflictID) || !oneOf(value.State, "reserved", "finalized", "released") || !between(value.PlannedGrams, 1, maxInventoryGrams) || (value.ActualGrams != nil && !between(*value.ActualGrams, 1, maxInventoryGrams)) || !validTimestamp(value.ReservedAt) || !validTimestamp(value.CreatedAt) || !validTimestamp(value.UpdatedAt) || (value.CompletedAt != nil && !validTimestamp(*value.CompletedAt)) {
 		return errors.New("invalid inventory reservation")
 	}
+	switch value.State {
+	case "reserved":
+		if value.ActualGrams != nil || value.CompletedAt != nil {
+			return errors.New("invalid reserved reservation")
+		}
+	case "finalized":
+		if value.ActualGrams == nil || value.CompletedAt == nil {
+			return errors.New("invalid finalized reservation")
+		}
+	case "released":
+		if value.ActualGrams != nil || value.CompletedAt == nil {
+			return errors.New("invalid released reservation")
+		}
+	}
+	if value.CompletedAt != nil && !timestampNotBefore(*value.CompletedAt, value.ReservedAt) {
+		return errors.New("reservation completed before it was reserved")
+	}
 	return nil
 }
 
 func (value InventoryConflict) validate() error {
-	if !validUUID(value.ConflictID) || !validUUID(value.LotID) || !validUUID(value.SourceLedgerEntryID) || !validOptionalUUID(value.RoastUUID) || !validOptionalUUID(value.ReservationID) || !validOptionalUUID(value.ResolvedByUserID) || !oneOf(value.TriggerOperation, "opening_balance", "manual_adjustment", "reservation", "reservation_release", "consumption") || !oneOf(value.State, "open", "resolved") || !validGrams(value.AvailableGramsSnapshot) || !validTimestamp(value.CreatedAt) || (value.ResolvedAt != nil && !validTimestamp(*value.ResolvedAt)) {
+	if !validUUID(value.ConflictID) || !validUUID(value.LotID) || !validUUID(value.SourceLedgerEntryID) || !validOptionalUUID(value.RoastUUID) || !validOptionalUUID(value.ReservationID) || !validOptionalUUID(value.ResolvedByUserID) || !oneOf(value.TriggerOperation, "opening_balance", "manual_adjustment", "reservation", "reservation_release", "consumption") || !oneOf(value.State, "open", "resolved") || !between(value.AvailableGramsSnapshot, -maxInventoryGrams, -1) || !validTimestamp(value.CreatedAt) || (value.ResolvedAt != nil && !validTimestamp(*value.ResolvedAt)) {
 		return errors.New("invalid inventory conflict")
+	}
+	if value.State == "open" {
+		if value.ResolutionNote != nil || value.ResolvedByUserID != nil || value.ResolvedAt != nil {
+			return errors.New("invalid open inventory conflict")
+		}
+		return nil
+	}
+	if value.ResolutionNote == nil || value.ResolvedByUserID == nil || value.ResolvedAt == nil {
+		return errors.New("invalid resolved inventory conflict")
+	}
+	note, valid := normalizeRequestText(*value.ResolutionNote, 2000, 8000, true, true)
+	if !valid || note != *value.ResolutionNote || !timestampNotBefore(*value.ResolvedAt, value.CreatedAt) {
+		return errors.New("invalid resolved inventory conflict")
 	}
 	return nil
 }
@@ -486,6 +516,12 @@ func validTimestamp(value string) bool {
 	parsed, err := time.Parse("2006-01-02T15:04:05.000000Z", value)
 	return err == nil && parsed.Year() >= 1 && parsed.Format("2006-01-02T15:04:05.000000Z") == value
 }
+func timestampNotBefore(value, minimum string) bool {
+	parsedValue, valueErr := time.Parse("2006-01-02T15:04:05.000000Z", value)
+	parsedMinimum, minimumErr := time.Parse("2006-01-02T15:04:05.000000Z", minimum)
+	return valueErr == nil && minimumErr == nil && !parsedValue.Before(parsedMinimum)
+}
+
 func validDate(value string) bool {
 	if !canonicalDate.MatchString(value) {
 		return false

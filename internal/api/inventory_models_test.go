@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -280,6 +281,75 @@ func validReservationJSON() string {
 func validConflictJSON() string {
 	return `{"conflict_id":"` + inventoryConflictID + `","lot_id":"` + inventoryLotID + `","source_ledger_entry_id":"` + inventoryEntryID + `","roast_uuid":null,"reservation_id":null,"trigger_operation":"manual_adjustment","available_grams_snapshot":-1,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"` + inventoryTimestamp + `"}`
 }
+
+func TestInventoryReservationStateNullAndTimestampInvariants(t *testing.T) {
+	completed := "2026-08-04T12:00:01.000000Z"
+	valid := []string{
+		validReservationJSON(),
+		reservationStateJSON("finalized", int64Pointer(1200), &completed),
+		reservationStateJSON("released", nil, &completed),
+	}
+	for index, payload := range valid {
+		if err := json.Unmarshal([]byte(payload), &InventoryReservation{}); err != nil {
+			t.Errorf("valid[%d]: %v", index, err)
+		}
+	}
+	invalid := []string{
+		reservationStateJSON("reserved", int64Pointer(1200), nil),
+		reservationStateJSON("reserved", nil, &completed),
+		reservationStateJSON("finalized", nil, &completed),
+		reservationStateJSON("finalized", int64Pointer(1200), nil),
+		reservationStateJSON("released", int64Pointer(1200), &completed),
+		reservationStateJSON("released", nil, nil),
+		reservationStateJSON("finalized", int64Pointer(1200), stringPointer("2026-08-04T11:59:59.000000Z")),
+	}
+	for index, payload := range invalid {
+		if err := json.Unmarshal([]byte(payload), &InventoryReservation{}); err == nil {
+			t.Errorf("accepted invalid reservation[%d]: %s", index, payload)
+		}
+	}
+}
+
+func TestInventoryConflictStateSnapshotAndTimestampInvariants(t *testing.T) {
+	resolved := strings.ReplaceAll(validConflictJSON(), `"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null`, `"state":"resolved","resolution_note":"counted","resolved_by_user_id":"`+inventoryImageID+`","resolved_at":"2026-08-04T12:00:01.000000Z"`)
+	if err := json.Unmarshal([]byte(resolved), &InventoryConflict{}); err != nil {
+		t.Fatalf("valid resolved conflict: %v", err)
+	}
+	minimum := strings.Replace(validConflictJSON(), `"available_grams_snapshot":-1`, `"available_grams_snapshot":-2147483647`, 1)
+	if err := json.Unmarshal([]byte(minimum), &InventoryConflict{}); err != nil {
+		t.Fatalf("valid minimum conflict snapshot: %v", err)
+	}
+	invalid := []string{
+		strings.Replace(validConflictJSON(), `"available_grams_snapshot":-1`, `"available_grams_snapshot":0`, 1),
+		strings.Replace(validConflictJSON(), `"available_grams_snapshot":-1`, `"available_grams_snapshot":-2147483648`, 1),
+		strings.Replace(validConflictJSON(), `"resolution_note":null`, `"resolution_note":"counted"`, 1),
+		strings.Replace(validConflictJSON(), `"resolved_by_user_id":null`, `"resolved_by_user_id":"`+inventoryImageID+`"`, 1),
+		strings.Replace(validConflictJSON(), `"resolved_at":null`, `"resolved_at":"`+inventoryTimestamp+`"`, 1),
+		strings.Replace(resolved, `"resolution_note":"counted"`, `"resolution_note":null`, 1),
+		strings.Replace(resolved, `"resolved_by_user_id":"`+inventoryImageID+`"`, `"resolved_by_user_id":null`, 1),
+		strings.Replace(resolved, `"resolved_at":"2026-08-04T12:00:01.000000Z"`, `"resolved_at":null`, 1),
+		strings.Replace(resolved, `"resolved_at":"2026-08-04T12:00:01.000000Z"`, `"resolved_at":"2026-08-04T11:59:59.000000Z"`, 1),
+	}
+	for index, payload := range invalid {
+		if err := json.Unmarshal([]byte(payload), &InventoryConflict{}); err == nil {
+			t.Errorf("accepted invalid conflict[%d]: %s", index, payload)
+		}
+	}
+}
+
+func reservationStateJSON(state string, actual *int64, completed *string) string {
+	payload := validReservationJSON()
+	payload = strings.Replace(payload, `"state":"reserved"`, `"state":"`+state+`"`, 1)
+	if actual != nil {
+		payload = strings.Replace(payload, `"actual_grams":null`, `"actual_grams":`+fmt.Sprint(*actual), 1)
+	}
+	if completed != nil {
+		payload = strings.Replace(payload, `"completed_at":null`, `"completed_at":"`+*completed+`"`, 1)
+	}
+	return payload
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestInventoryPagesRequireItemsAndCursorWhileToleratingUnknownFields(t *testing.T) {
 	var page BeanLotPage

@@ -41,11 +41,14 @@ func commandLedgerJSON() string {
 }
 
 func commandReservationJSON() string {
-	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"reserved_at":"` + commandTimestamp + `","completed_at":null,"created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
+	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"reserved_at":"` + commandTimestamp + `","completed_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
 }
 
-func commandResolvedConflictJSON() string {
-	return `{"conflict_id":"` + commandConflictID + `","lot_id":"` + commandLotID + `","source_ledger_entry_id":"` + commandEntryID + `","roast_uuid":"` + commandRoastID + `","reservation_id":"` + commandReservationID + `","trigger_operation":"consumption","available_grams_snapshot":-25,"state":"resolved","resolution_note":"counted","resolved_by_user_id":"` + commandUserID + `","resolved_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `"}`
+func commandResolvedConflictJSON() string { return commandResolvedConflictJSONWithNote("counted") }
+
+func commandResolvedConflictJSONWithNote(note string) string {
+	encoded, _ := json.Marshal(note)
+	return `{"conflict_id":"` + commandConflictID + `","lot_id":"` + commandLotID + `","source_ledger_entry_id":"` + commandEntryID + `","roast_uuid":"` + commandRoastID + `","reservation_id":"` + commandReservationID + `","trigger_operation":"consumption","available_grams_snapshot":-25,"state":"resolved","resolution_note":` + string(encoded) + `,"resolved_by_user_id":"` + commandUserID + `","resolved_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `"}`
 }
 
 func inventoryRuntime(t *testing.T, serverURL string) Runtime {
@@ -331,7 +334,7 @@ func inventoryExpectedReservation() map[string]any {
 		"reservation_id": commandReservationID, "client_reservation_uuid": commandEntryID,
 		"lot_id": commandLotID, "roast_uuid": commandRoastID, "client_instance_uuid": commandClientID,
 		"state": "finalized", "planned_grams": json.Number("1250"), "actual_grams": json.Number("1200"),
-		"reserved_at": commandTimestamp, "completed_at": nil, "created_at": commandTimestamp,
+		"reserved_at": commandTimestamp, "completed_at": commandTimestamp, "created_at": commandTimestamp,
 		"updated_at": commandTimestamp, "open_conflict_id": commandConflictID,
 	}
 }

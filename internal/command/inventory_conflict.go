@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fr3akX/artisan-cli/internal/api"
+	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
 func runInventoryConflictResolve(ctx context.Context, conflictID string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -35,7 +36,7 @@ func runInventoryConflictResolve(ctx context.Context, conflictID string, args []
 		}
 	}
 	canonicalConflictID, _ := api.NormalizeInventoryUUID(conflictID)
-	approved, code := confirmMutation(runtime, jsonMode, *yes, "Resolve conflict "+canonicalConflictID+" with note: "+request.ResolutionNote+"?")
+	approved, code := confirmMutation(runtime, jsonMode, *yes, "Resolve conflict "+canonicalConflictID+" with note: "+output.EscapeVisible(request.ResolutionNote)+"?")
 	if !approved {
 		return code
 	}

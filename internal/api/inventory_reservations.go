@@ -171,7 +171,15 @@ func (c *Client) CreateInventoryReservation(ctx context.Context, request Reserva
 	if failure != nil {
 		return ReservationMutationResponse{}, failure
 	}
-	return c.doReservationMutation(ctx, inventoryReservationsRoot, request, key, http.StatusCreated)
+	response, failure := c.doReservationMutation(ctx, inventoryReservationsRoot, request, key, http.StatusCreated)
+	if failure != nil {
+		return ReservationMutationResponse{}, failure
+	}
+	reservation := response.Reservation
+	if reservation.ClientReservationUUID != request.ClientReservationUUID || reservation.ClientInstanceUUID != request.ClientInstanceUUID || reservation.RoastUUID != request.RoastUUID || reservation.LotID != request.LotID || reservation.PlannedGrams != request.PlannedGrams || reservation.ReservedAt != request.OccurredAt || reservation.State != "reserved" {
+		return ReservationMutationResponse{}, invalidServerResponse(http.StatusCreated)
+	}
+	return response, nil
 }
 
 func (c *Client) FinalizeInventoryReservation(ctx context.Context, rawClientReservationUUID string, request ReservationFinalize, key string) (ReservationMutationResponse, *output.Error) {
@@ -183,7 +191,15 @@ func (c *Client) FinalizeInventoryReservation(ctx context.Context, rawClientRese
 	if failure != nil {
 		return ReservationMutationResponse{}, failure
 	}
-	return c.doReservationMutation(ctx, inventoryReservationsRoot+"/"+clientReservationUUID+"/finalize", request, key, http.StatusOK)
+	response, failure := c.doReservationMutation(ctx, inventoryReservationsRoot+"/"+clientReservationUUID+"/finalize", request, key, http.StatusOK)
+	if failure != nil {
+		return ReservationMutationResponse{}, failure
+	}
+	reservation := response.Reservation
+	if reservation.ClientReservationUUID != clientReservationUUID || reservation.State != "finalized" || reservation.CompletedAt == nil || *reservation.CompletedAt != request.OccurredAt || (request.ActualGrams != nil && (reservation.ActualGrams == nil || *reservation.ActualGrams != *request.ActualGrams)) {
+		return ReservationMutationResponse{}, invalidServerResponse(http.StatusOK)
+	}
+	return response, nil
 }
 
 func (c *Client) ReleaseInventoryReservation(ctx context.Context, rawClientReservationUUID string, request ReservationRelease, key string) (ReservationMutationResponse, *output.Error) {
@@ -194,7 +210,15 @@ func (c *Client) ReleaseInventoryReservation(ctx context.Context, rawClientReser
 	if failure = ValidateReservationRelease(request); failure != nil {
 		return ReservationMutationResponse{}, failure
 	}
-	return c.doReservationMutation(ctx, inventoryReservationsRoot+"/"+clientReservationUUID+"/release", request, key, http.StatusOK)
+	response, failure := c.doReservationMutation(ctx, inventoryReservationsRoot+"/"+clientReservationUUID+"/release", request, key, http.StatusOK)
+	if failure != nil {
+		return ReservationMutationResponse{}, failure
+	}
+	reservation := response.Reservation
+	if reservation.ClientReservationUUID != clientReservationUUID || reservation.State != "released" || reservation.CompletedAt == nil || *reservation.CompletedAt != request.OccurredAt {
+		return ReservationMutationResponse{}, invalidServerResponse(http.StatusOK)
+	}
+	return response, nil
 }
 
 func (c *Client) doReservationMutation(ctx context.Context, path string, request any, key string, status int) (ReservationMutationResponse, *output.Error) {
@@ -222,5 +246,11 @@ func (c *Client) ResolveInventoryConflict(ctx context.Context, rawConflictID str
 	}
 	var conflict InventoryConflict
 	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/conflicts/" + conflictID + "/resolve", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &conflict)
-	return conflict, failure
+	if failure != nil {
+		return InventoryConflict{}, failure
+	}
+	if conflict.ConflictID != conflictID || conflict.State != "resolved" || conflict.ResolutionNote == nil || *conflict.ResolutionNote != request.ResolutionNote {
+		return InventoryConflict{}, invalidServerResponse(http.StatusOK)
+	}
+	return conflict, nil
 }

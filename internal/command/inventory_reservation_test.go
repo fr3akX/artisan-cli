@@ -10,9 +10,18 @@ import (
 	"testing"
 )
 
-func commandReservationMutationJSON(replay bool) string {
-	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"reserved","planned_grams":1250,"actual_grams":null,"reserved_at":"%s","completed_at":null,"created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":%t}`,
-		commandReservationID, commandEntryID, commandLotID, commandRoastID, commandClientID, commandTimestamp, commandTimestamp, commandTimestamp, commandLotID, replay)
+func commandReservationMutationJSON(state string, replay bool) string {
+	actual, completed := "null", "null"
+	onHand, reserved := int64(5000), int64(1250)
+	if state == "finalized" {
+		actual, completed = "1200", `"`+commandTimestamp+`"`
+		onHand, reserved = 3800, 0
+	} else if state == "released" {
+		completed = `"` + commandTimestamp + `"`
+		reserved = 0
+	}
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":%t}`,
+		commandReservationID, commandEntryID, commandLotID, commandRoastID, commandClientID, state, actual, commandTimestamp, completed, commandTimestamp, commandTimestamp, commandLotID, onHand, reserved, onHand-reserved, replay)
 }
 
 func TestInventoryReservationCommandsSendEveryExactFieldWithoutPrompt(t *testing.T) {
@@ -24,7 +33,7 @@ func TestInventoryReservationCommandsSendEveryExactFieldWithoutPrompt(t *testing
 		bodies = append(bodies, string(contents))
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
 		w.WriteHeader(statuses[len(paths)-1])
-		_, _ = fmt.Fprint(w, commandReservationMutationJSON(len(paths) == 2))
+		_, _ = fmt.Fprint(w, commandReservationMutationJSON([]string{"reserved", "finalized", "released"}[len(paths)-1], len(paths) == 2))
 	}))
 	defer server.Close()
 	runtime := inventoryRuntime(t, server.URL)
@@ -51,16 +60,48 @@ func TestInventoryReservationCommandsSendEveryExactFieldWithoutPrompt(t *testing
 	if !reflect.DeepEqual(paths, wantPaths) || !reflect.DeepEqual(bodies, wantBodies) || !reflect.DeepEqual(keys, []string{"create-key", "finalize-key", "release-key"}) {
 		t.Fatalf("paths=%#v bodies=%q keys=%#v", paths, bodies, keys)
 	}
-	for _, exact := range []string{`"idempotent_replay":false`, `"planned_grams":1250`, `"available_grams":3750`, `"conflict":null`} {
-		if !strings.Contains(create.stdout, exact) {
-			t.Fatalf("create JSON %q missing %q", create.stdout, exact)
-		}
+	wantCreate := `{"ok":true,"data":` + commandReservationMutationJSON("reserved", false) + "}\n"
+	if create.stdout != wantCreate {
+		t.Fatalf("create JSON=%q want=%q", create.stdout, wantCreate)
 	}
-	for _, exact := range []string{"Reservation ID", commandReservationID, "Idempotent replay", "true"} {
-		if !strings.Contains(finalize.stdout, exact) {
-			t.Fatalf("finalize output %q missing %q", finalize.stdout, exact)
-		}
+	if finalize.stdout != commandReservationHumanOutput("finalized", true) {
+		t.Fatalf("finalize output=%q want=%q", finalize.stdout, commandReservationHumanOutput("finalized", true))
 	}
+	if release.stdout != commandReservationHumanOutput("released", false) {
+		t.Fatalf("release output=%q want=%q", release.stdout, commandReservationHumanOutput("released", false))
+	}
+}
+
+func commandReservationHumanOutput(state string, replay bool) string {
+	actual, completed := "-", "-"
+	onHand, reserved := "5000", "1250"
+	if state == "finalized" {
+		actual, completed, onHand, reserved = "1200", commandTimestamp, "3800", "0"
+	} else if state == "released" {
+		completed, reserved = commandTimestamp, "0"
+	}
+	available := onHand
+	if state == "reserved" {
+		available = "3750"
+	}
+	return "Reservation ID: " + commandReservationID + "\n" +
+		"Client reservation UUID: " + commandEntryID + "\n" +
+		"Lot ID: " + commandLotID + "\n" +
+		"Roast UUID: " + commandRoastID + "\n" +
+		"Client instance UUID: " + commandClientID + "\n" +
+		"State: " + state + "\n" +
+		"Planned grams: 1250\n" +
+		"Actual grams: " + actual + "\n" +
+		"Reserved at: " + commandTimestamp + "\n" +
+		"Completed at: " + completed + "\n" +
+		"Created at: " + commandTimestamp + "\n" +
+		"Updated at: " + commandTimestamp + "\n" +
+		"Open conflict ID: -\n" +
+		"On hand grams: " + onHand + "\n" +
+		"Reserved grams: " + reserved + "\n" +
+		"Available grams: " + available + "\n" +
+		"Unresolved conflicts: 0\n" +
+		fmt.Sprintf("Idempotent replay: %t\n", replay)
 }
 
 func TestInventoryReservationFinalizeDoesNotInferActualGrams(t *testing.T) {
@@ -68,7 +109,7 @@ func TestInventoryReservationFinalizeDoesNotInferActualGrams(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
-		_, _ = fmt.Fprint(w, commandReservationMutationJSON(false))
+		_, _ = fmt.Fprint(w, commandReservationMutationJSON("finalized", false))
 	}))
 	defer server.Close()
 	runtime := inventoryRuntime(t, server.URL)
@@ -111,5 +152,44 @@ func TestInventoryReservationPreservesServerConflictResponseWithoutAdjustment(t 
 	}
 	if !reflect.DeepEqual(paths, []string{"/api/v1/inventory/reservations/" + commandEntryID + "/release"}) {
 		t.Fatalf("paths=%#v", paths)
+	}
+}
+
+func TestInventoryReservationMutationJSONEnvelopesAreExact(t *testing.T) {
+	tests := []struct {
+		name, state string
+		status      int
+		args        []string
+	}{
+		{name: "create", state: "reserved", status: http.StatusCreated, args: []string{"inventory", "reservation", "create", "--client-reservation-uuid", commandEntryID, "--client-instance-uuid", commandClientID, "--roast-uuid", commandRoastID, "--lot-id", commandLotID, "--planned-grams", "1250", "--occurred-at", commandTimestamp}},
+		{name: "finalize", state: "finalized", status: http.StatusOK, args: []string{"inventory", "reservation", "finalize", commandEntryID, "--actual-grams", "1200", "--occurred-at", commandTimestamp}},
+		{name: "release", state: "released", status: http.StatusOK, args: []string{"inventory", "reservation", "release", commandEntryID, "--occurred-at", commandTimestamp}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = fmt.Fprint(w, commandReservationMutationJSON(test.state, false))
+			}))
+			defer server.Close()
+			args := append([]string{"--json"}, test.args...)
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+			want := `{"ok":true,"data":` + commandReservationMutationJSON(test.state, false) + "}\n"
+			if result.code != 0 || result.stderr != "" || result.stdout != want {
+				t.Fatalf("result=%#v want=%q", result, want)
+			}
+		})
+	}
+}
+
+func TestInventoryReservationCreateHumanOutputIsExact(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprint(w, commandReservationMutationJSON("reserved", false))
+	}))
+	defer server.Close()
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "reservation", "create", "--client-reservation-uuid", commandEntryID, "--client-instance-uuid", commandClientID, "--roast-uuid", commandRoastID, "--lot-id", commandLotID, "--planned-grams", "1250", "--occurred-at", commandTimestamp)
+	if result.code != 0 || result.stderr != "" || result.stdout != commandReservationHumanOutput("reserved", false) {
+		t.Fatalf("result=%#v", result)
 	}
 }
