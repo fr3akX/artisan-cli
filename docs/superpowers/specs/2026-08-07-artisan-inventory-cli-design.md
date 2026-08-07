@@ -164,7 +164,7 @@ organization, and current role for `artisan auth login` validation and
 
 ## Local configuration and credential storage
 
-`artisan auth login --server URL` reads the token from a no-echo terminal prompt.
+`artisan --server URL auth login` reads the token from a no-echo terminal prompt.
 `--token-stdin` explicitly reads one line from standard input for controlled
 automation. The token is never accepted as a command-line value because command
 arguments may appear in process listings and shell history.
@@ -460,7 +460,7 @@ skill content.
 
 The skill instructs an agent to:
 
-- verify `artisan version` and `artisan auth status --json` first;
+- verify `artisan version` and `artisan --json auth status` first;
 - use `--json` and stable exit codes for machine interaction;
 - never request, inspect, print, persist, or pass the bearer token;
 - never perform login for the user;
@@ -501,7 +501,7 @@ Tags matching `v*` produce `CGO_ENABLED=0` executables for:
 Unix artifacts use `.tar.gz`; Windows artifacts use `.zip`. Release assets
 include the binary, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, and the portable skill.
 GitHub publishes SHA-256 checksums and build provenance. Build flags embed the
-version and commit; `artisan version --json` reports both without build paths or
+version and commit; `artisan --json version` reports both without build paths or
 host-specific data.
 
 Platform code signing and notarization are deferred until signing identities are
