@@ -18,7 +18,7 @@ import (
 
 const (
 	loginTransactionFileName = ".login-transaction.json"
-	maxLoginJournalBytes     = 512 * 1024
+	maxLoginJournalBytes     = 1024 * 1024
 
 	loginStageJournalWritten = "journal-written"
 	loginStageTokenSaved     = "token-saved"
@@ -37,12 +37,16 @@ const (
 var errSimulatedLoginCrash = errors.New("simulated login crash")
 
 type loginTransactionJournal struct {
-	State         loginTransactionState `json:"state"`
-	Version       int                   `json:"version"`
-	ServerPresent bool                  `json:"server_present"`
-	ServerURL     string                `json:"server_url"`
-	TokenPresent  bool                  `json:"token_present"`
-	Token         string                `json:"token"`
+	State                 loginTransactionState `json:"state"`
+	Version               int                   `json:"version"`
+	ServerPresent         bool                  `json:"server_present"`
+	ServerURL             string                `json:"server_url"`
+	TokenPresent          bool                  `json:"token_present"`
+	Token                 string                `json:"token"`
+	IntendedServerPresent bool                  `json:"intended_server_present"`
+	IntendedServerURL     string                `json:"intended_server_url"`
+	IntendedTokenPresent  bool                  `json:"intended_token_present"`
+	IntendedToken         string                `json:"intended_token"`
 }
 
 type loginStageHook func(stage string) error
@@ -50,10 +54,19 @@ type loginStageHook func(stage string) error
 type loginTransactionOperations struct {
 	writeJournal  func(string, loginTransactionJournal) error
 	removeJournal func(string) error
+	saveToken     func(string, string) error
+	saveServer    func(string, string) error
 }
 
 func defaultLoginTransactionOperations() loginTransactionOperations {
-	return loginTransactionOperations{writeJournal: writeLoginJournal, removeJournal: removeLoginJournal}
+	return loginTransactionOperations{
+		writeJournal:  writeLoginJournal,
+		removeJournal: removeLoginJournal,
+		saveToken: func(configDir, token string) error {
+			return auth.NewFileStore(configDir).Save(token)
+		},
+		saveServer: config.SaveServer,
+	}
 }
 
 func persistExplicitLogin(configDir, token, serverURL string, hook loginStageHook) *output.Error {
@@ -61,7 +74,7 @@ func persistExplicitLogin(configDir, token, serverURL string, hook loginStageHoo
 }
 
 func persistExplicitLoginWithOperations(configDir, token, serverURL string, hook loginStageHook, operations loginTransactionOperations) *output.Error {
-	journal, err := snapshotLoginState(configDir)
+	journal, err := snapshotLoginState(configDir, token, serverURL)
 	if err != nil {
 		return transactionConfigurationFailure()
 	}
@@ -72,15 +85,20 @@ func persistExplicitLoginWithOperations(configDir, token, serverURL string, hook
 		return failure
 	}
 
-	store := auth.NewFileStore(configDir)
-	if err := store.Save(token); err != nil {
+	if err := operations.saveToken(configDir, token); err != nil {
+		if securefile.ReplacementVisible(err) {
+			return transactionConfigurationFailure()
+		}
 		return failAndRestoreLoginTransaction(configDir, journal, operations)
 	}
 	if failure := interruptPendingLoginTransaction(configDir, journal, hook, loginStageTokenSaved, operations); failure != nil {
 		return failure
 	}
 
-	if err := config.SaveServer(configDir, serverURL); err != nil {
+	if err := operations.saveServer(configDir, serverURL); err != nil {
+		if securefile.ReplacementVisible(err) {
+			return transactionConfigurationFailure()
+		}
 		return failAndRestoreLoginTransaction(configDir, journal, operations)
 	}
 	if failure := interruptPendingLoginTransaction(configDir, journal, hook, loginStageServerSaved, operations); failure != nil {
@@ -92,6 +110,9 @@ func persistExplicitLoginWithOperations(configDir, token, serverURL string, hook
 
 	journal.State = loginTransactionCommitted
 	if err := operations.writeJournal(configDir, journal); err != nil {
+		if securefile.ReplacementVisible(err) {
+			return transactionConfigurationFailure()
+		}
 		return failAndRestoreLoginTransaction(configDir, journal, operations)
 	}
 	if hook != nil {
@@ -118,8 +139,15 @@ func interruptPendingLoginTransaction(configDir string, journal loginTransaction
 	return nil
 }
 
-func snapshotLoginState(configDir string) (loginTransactionJournal, error) {
-	journal := loginTransactionJournal{State: loginTransactionPending, Version: 1}
+func snapshotLoginState(configDir, intendedToken, intendedServerURL string) (loginTransactionJournal, error) {
+	journal := loginTransactionJournal{
+		State:                 loginTransactionPending,
+		Version:               1,
+		IntendedServerPresent: true,
+		IntendedServerURL:     intendedServerURL,
+		IntendedTokenPresent:  true,
+		IntendedToken:         intendedToken,
+	}
 	serverURL, err := config.LoadStoredServer(configDir)
 	if err == nil {
 		journal.ServerPresent = true
@@ -190,6 +218,8 @@ func decodeLoginJournal(contents []byte) (loginTransactionJournal, error) {
 	required := map[string]bool{
 		"state": false, "version": false, "server_present": false,
 		"server_url": false, "token_present": false, "token": false,
+		"intended_server_present": false, "intended_server_url": false,
+		"intended_token_present": false, "intended_token": false,
 	}
 	values := make(map[string]json.RawMessage, len(required))
 	for decoder.More() {
@@ -229,7 +259,11 @@ func decodeLoginJournal(contents []byte) (loginTransactionJournal, error) {
 		!decodeJournalBoolean(values["server_present"], &journal.ServerPresent) ||
 		!decodeJournalString(values["server_url"], &journal.ServerURL) ||
 		!decodeJournalBoolean(values["token_present"], &journal.TokenPresent) ||
-		!decodeJournalString(values["token"], &journal.Token) {
+		!decodeJournalString(values["token"], &journal.Token) ||
+		!decodeJournalBoolean(values["intended_server_present"], &journal.IntendedServerPresent) ||
+		!decodeJournalString(values["intended_server_url"], &journal.IntendedServerURL) ||
+		!decodeJournalBoolean(values["intended_token_present"], &journal.IntendedTokenPresent) ||
+		!decodeJournalString(values["intended_token"], &journal.IntendedToken) {
 		return loginTransactionJournal{}, errors.New("invalid login transaction journal")
 	}
 	return journal, nil
@@ -263,25 +297,42 @@ func validateLoginJournal(journal loginTransactionJournal) error {
 	if journal.Version != 1 {
 		return errors.New("invalid login transaction journal")
 	}
-	if journal.ServerPresent {
-		if len(journal.ServerURL) > 4096 {
+	if err := validateJournalPair(journal.ServerPresent, journal.ServerURL, journal.TokenPresent, journal.Token); err != nil {
+		return err
+	}
+	if err := validateJournalPair(journal.IntendedServerPresent, journal.IntendedServerURL, journal.IntendedTokenPresent, journal.IntendedToken); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateJournalPair(serverPresent bool, serverURL string, tokenPresent bool, token string) error {
+	if serverPresent {
+		if len(serverURL) > 4096 {
 			return errors.New("invalid login transaction journal")
 		}
-		normalized, err := config.NormalizeServerURL(journal.ServerURL)
-		if err != nil || normalized != journal.ServerURL {
+		normalized, err := config.NormalizeServerURL(serverURL)
+		if err != nil || normalized != serverURL {
 			return errors.New("invalid login transaction journal")
 		}
-	} else if journal.ServerURL != "" {
+	} else if serverURL != "" {
 		return errors.New("invalid login transaction journal")
 	}
-	if journal.TokenPresent {
-		if strings.TrimSpace(journal.Token) == "" || strings.ContainsAny(journal.Token, "\r\n") || len(journal.Token) > maxTokenInputBytes {
+	if tokenPresent {
+		if strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") || len(token) > maxTokenInputBytes {
 			return errors.New("invalid login transaction journal")
 		}
-	} else if journal.Token != "" {
+	} else if token != "" {
 		return errors.New("invalid login transaction journal")
 	}
 	return nil
+}
+
+type storedLoginPair struct {
+	ServerPresent bool
+	ServerURL     string
+	TokenPresent  bool
+	Token         string
 }
 
 func recoverLoginTransaction(configDir string) error {
@@ -292,18 +343,72 @@ func recoverLoginTransaction(configDir string) error {
 	if err != nil {
 		return err
 	}
-	if journal.State == loginTransactionCommitted {
-		// The new state was durably committed. Cleanup must never roll it back.
+
+	current, currentErr := readStoredLoginPair(configDir)
+	intended := storedLoginPair{
+		ServerPresent: journal.IntendedServerPresent,
+		ServerURL:     journal.IntendedServerURL,
+		TokenPresent:  journal.IntendedTokenPresent,
+		Token:         journal.IntendedToken,
+	}
+	if currentErr == nil && current == intended {
+		// Both intended values are visible. Rewrite them durably before marking
+		// committed so any earlier post-rename error is resolved by roll-forward.
+		if err := applyStoredLoginPair(configDir, intended); err != nil {
+			return fmt.Errorf("roll forward login transaction: %w", err)
+		}
+		journal.State = loginTransactionCommitted
+		if err := writeLoginJournal(configDir, journal); err != nil {
+			return fmt.Errorf("commit recovered login transaction: %w", err)
+		}
 		_ = removeLoginJournal(configDir)
 		return nil
 	}
-	if err := restoreLoginState(configDir, journal); err != nil {
+
+	// Prior, mixed, and unreadable states all resolve to the exact prior pair.
+	// A committed marker cannot bypass this actual-state validation.
+	prior := storedLoginPair{
+		ServerPresent: journal.ServerPresent,
+		ServerURL:     journal.ServerURL,
+		TokenPresent:  journal.TokenPresent,
+		Token:         journal.Token,
+	}
+	if err := applyStoredLoginPair(configDir, prior); err != nil {
 		return fmt.Errorf("restore login transaction: %w", err)
 	}
 	if err := removeLoginJournal(configDir); err != nil {
 		return fmt.Errorf("complete login transaction recovery: %w", err)
 	}
 	return nil
+}
+
+func readStoredLoginPair(configDir string) (storedLoginPair, error) {
+	var pair storedLoginPair
+	serverURL, err := config.LoadStoredServer(configDir)
+	if err == nil {
+		pair.ServerPresent = true
+		pair.ServerURL = serverURL
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return storedLoginPair{}, err
+	}
+	token, err := auth.NewFileStore(configDir).Load()
+	if err == nil {
+		pair.TokenPresent = true
+		pair.Token = token
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return storedLoginPair{}, err
+	}
+	return pair, nil
+}
+
+func applyStoredLoginPair(configDir string, pair storedLoginPair) error {
+	journal := loginTransactionJournal{
+		ServerPresent: pair.ServerPresent,
+		ServerURL:     pair.ServerURL,
+		TokenPresent:  pair.TokenPresent,
+		Token:         pair.Token,
+	}
+	return restoreLoginState(configDir, journal)
 }
 
 func failAndRestoreLoginTransaction(configDir string, journal loginTransactionJournal, operations loginTransactionOperations) *output.Error {

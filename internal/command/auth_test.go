@@ -734,7 +734,11 @@ func TestExplicitLoginTransactionRecoversCrashAtEveryStage(t *testing.T) {
 			if err := recoverLoginTransaction(dir); err != nil {
 				t.Fatalf("recoverLoginTransaction() error = %v", err)
 			}
-			assertStoredAuthState(t, dir, oldServer, oldToken)
+			if stage == loginStageServerSaved || stage == loginStageBeforeCommit {
+				assertStoredAuthState(t, dir, "http://127.0.0.1:42002", commandTestToken)
+			} else {
+				assertStoredAuthState(t, dir, oldServer, oldToken)
+			}
 			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("recovery did not remove journal")
 			}
@@ -900,7 +904,7 @@ func TestAuthRejectsUnknownSubcommandsAndArguments(t *testing.T) {
 }
 
 func TestLoginTransactionRejectsMalformedJournalWithoutDestructiveRecovery(t *testing.T) {
-	valid := `{"state":"pending","version":1,"server_present":true,"server_url":"http://127.0.0.1:45101","token_present":true,"token":"prior-token"}`
+	valid := `{"state":"pending","version":1,"server_present":true,"server_url":"http://127.0.0.1:45101","token_present":true,"token":"prior-token","intended_server_present":true,"intended_server_url":"http://127.0.0.1:45102","intended_token_present":true,"intended_token":"intended-token"}`
 	cases := []struct {
 		name string
 		raw  string
@@ -911,13 +915,21 @@ func TestLoginTransactionRejectsMalformedJournalWithoutDestructiveRecovery(t *te
 		{name: "missing server presence", raw: `{"state":"pending","version":1,"server_url":"http://127.0.0.1:45101","token_present":true,"token":"prior-token"}`},
 		{name: "missing server value", raw: `{"state":"pending","version":1,"server_present":true,"token_present":true,"token":"prior-token"}`},
 		{name: "missing token presence", raw: `{"state":"pending","version":1,"server_present":true,"server_url":"http://127.0.0.1:45101","token":"prior-token"}`},
-		{name: "missing token value", raw: `{"state":"pending","version":1,"server_present":true,"server_url":"http://127.0.0.1:45101","token_present":true}`},
+		{name: "missing token value", raw: strings.Replace(valid, `,"token":"prior-token"`, "", 1)},
+		{name: "missing intended server presence", raw: strings.Replace(valid, `,"intended_server_present":true`, "", 1)},
+		{name: "missing intended server value", raw: strings.Replace(valid, `,"intended_server_url":"http://127.0.0.1:45102"`, "", 1)},
+		{name: "missing intended token presence", raw: strings.Replace(valid, `,"intended_token_present":true`, "", 1)},
+		{name: "missing intended token value", raw: strings.Replace(valid, `,"intended_token":"intended-token"`, "", 1)},
 		{name: "duplicate state", raw: strings.Replace(valid, `"state":"pending"`, `"state":"pending","state":"pending"`, 1)},
 		{name: "duplicate version", raw: strings.Replace(valid, `"version":1`, `"version":1,"version":1`, 1)},
 		{name: "duplicate server presence", raw: strings.Replace(valid, `"server_present":true`, `"server_present":true,"server_present":true`, 1)},
 		{name: "duplicate server value", raw: strings.Replace(valid, `"server_url":"http://127.0.0.1:45101"`, `"server_url":"http://127.0.0.1:45101","server_url":"http://127.0.0.1:45101"`, 1)},
 		{name: "duplicate token presence", raw: strings.Replace(valid, `"token_present":true`, `"token_present":true,"token_present":true`, 1)},
 		{name: "duplicate token value", raw: strings.Replace(valid, `"token":"prior-token"`, `"token":"prior-token","token":"prior-token"`, 1)},
+		{name: "duplicate intended server presence", raw: strings.Replace(valid, `"intended_server_present":true`, `"intended_server_present":true,"intended_server_present":true`, 1)},
+		{name: "duplicate intended server value", raw: strings.Replace(valid, `"intended_server_url":"http://127.0.0.1:45102"`, `"intended_server_url":"http://127.0.0.1:45102","intended_server_url":"http://127.0.0.1:45102"`, 1)},
+		{name: "duplicate intended token presence", raw: strings.Replace(valid, `"intended_token_present":true`, `"intended_token_present":true,"intended_token_present":true`, 1)},
+		{name: "duplicate intended token value", raw: strings.Replace(valid, `"intended_token":"intended-token"`, `"intended_token":"intended-token","intended_token":"intended-token"`, 1)},
 		{name: "unknown field", raw: strings.TrimSuffix(valid, "}") + `,"unknown":true}`},
 		{name: "wrong state type", raw: strings.Replace(valid, `"state":"pending"`, `"state":1`, 1)},
 		{name: "wrong version type", raw: strings.Replace(valid, `"version":1`, `"version":"1"`, 1)},
@@ -925,12 +937,20 @@ func TestLoginTransactionRejectsMalformedJournalWithoutDestructiveRecovery(t *te
 		{name: "wrong server value type", raw: strings.Replace(valid, `"server_url":"http://127.0.0.1:45101"`, `"server_url":false`, 1)},
 		{name: "wrong token presence type", raw: strings.Replace(valid, `"token_present":true`, `"token_present":1`, 1)},
 		{name: "wrong token value type", raw: strings.Replace(valid, `"token":"prior-token"`, `"token":null`, 1)},
+		{name: "wrong intended server presence type", raw: strings.Replace(valid, `"intended_server_present":true`, `"intended_server_present":1`, 1)},
+		{name: "wrong intended server value type", raw: strings.Replace(valid, `"intended_server_url":"http://127.0.0.1:45102"`, `"intended_server_url":null`, 1)},
+		{name: "wrong intended token presence type", raw: strings.Replace(valid, `"intended_token_present":true`, `"intended_token_present":"true"`, 1)},
+		{name: "wrong intended token value type", raw: strings.Replace(valid, `"intended_token":"intended-token"`, `"intended_token":false`, 1)},
 		{name: "trailing value", raw: valid + ` {}`},
 		{name: "invalid state", raw: strings.Replace(valid, `"state":"pending"`, `"state":"unknown"`, 1)},
 		{name: "absent server with value", raw: strings.Replace(valid, `"server_present":true`, `"server_present":false`, 1)},
 		{name: "present server without value", raw: strings.Replace(valid, `"server_url":"http://127.0.0.1:45101"`, `"server_url":""`, 1)},
 		{name: "absent token with value", raw: strings.Replace(valid, `"token_present":true`, `"token_present":false`, 1)},
 		{name: "present token without value", raw: strings.Replace(valid, `"token":"prior-token"`, `"token":""`, 1)},
+		{name: "absent intended server with value", raw: strings.Replace(valid, `"intended_server_present":true`, `"intended_server_present":false`, 1)},
+		{name: "present intended server without value", raw: strings.Replace(valid, `"intended_server_url":"http://127.0.0.1:45102"`, `"intended_server_url":""`, 1)},
+		{name: "absent intended token with value", raw: strings.Replace(valid, `"intended_token_present":true`, `"intended_token_present":false`, 1)},
+		{name: "present intended token without value", raw: strings.Replace(valid, `"intended_token":"intended-token"`, `"intended_token":""`, 1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1063,4 +1083,176 @@ func TestCommittedJournalRemovalFailureDoesNotRollbackSuccessfulLogin(t *testing
 		t.Fatalf("recoverLoginTransaction() error = %v", err)
 	}
 	assertStoredAuthState(t, dir, newServer, commandTestToken)
+}
+
+func TestPostRenameSyncFailureAtEveryTransactionWriteRecoversDeterministically(t *testing.T) {
+	const oldServer = "http://127.0.0.1:45601"
+	const oldToken = "old-token"
+	const newServer = "http://127.0.0.1:45602"
+	tests := []struct {
+		name    string
+		stage   string
+		wantNew bool
+	}{
+		{name: "pending journal", stage: "pending-journal", wantNew: false},
+		{name: "token", stage: "token", wantNew: false},
+		{name: "server", stage: "server", wantNew: true},
+		{name: "committed marker", stage: "committed-journal", wantNew: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := config.SaveServer(dir, oldServer); err != nil {
+				t.Fatalf("SaveServer() error = %v", err)
+			}
+			if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			ops := defaultLoginTransactionOperations()
+			writeJournal := ops.writeJournal
+			saveToken := ops.saveToken
+			saveServer := ops.saveServer
+			journalWrites := 0
+			ops.writeJournal = func(configDir string, journal loginTransactionJournal) error {
+				journalWrites++
+				if err := writeJournal(configDir, journal); err != nil {
+					return err
+				}
+				if (tc.stage == "pending-journal" && journalWrites == 1) || (tc.stage == "committed-journal" && journalWrites == 2) {
+					return fmt.Errorf("journal write: %w", &securefile.ReplacementError{Err: errors.New("injected post-rename journal sync failure")})
+				}
+				return nil
+			}
+			ops.saveToken = func(configDir, token string) error {
+				if err := saveToken(configDir, token); err != nil {
+					return err
+				}
+				if tc.stage == "token" {
+					return fmt.Errorf("token write: %w", &securefile.ReplacementError{Err: errors.New("injected post-rename token sync failure")})
+				}
+				return nil
+			}
+			ops.saveServer = func(configDir, serverURL string) error {
+				if err := saveServer(configDir, serverURL); err != nil {
+					return err
+				}
+				if tc.stage == "server" {
+					return fmt.Errorf("server write: %w", &securefile.ReplacementError{Err: errors.New("injected post-rename server sync failure")})
+				}
+				return nil
+			}
+
+			failure := persistExplicitLoginWithOperations(dir, commandTestToken, newServer, nil, ops)
+			if failure == nil {
+				t.Fatal("persistExplicitLoginWithOperations() succeeded, want ambiguous durability failure")
+			}
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); err != nil {
+				t.Fatal("ambiguous failure removed the only recovery record")
+			}
+			recoverThroughFreshAuthOperation(t, dir)
+			if tc.wantNew {
+				assertStoredAuthState(t, dir, newServer, commandTestToken)
+			} else {
+				assertStoredAuthState(t, dir, oldServer, oldToken)
+			}
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("resolved transaction left recovery record")
+			}
+		})
+	}
+}
+
+func recoverThroughFreshAuthOperation(t *testing.T, dir string) {
+	t.Helper()
+	result := runAuthCommand(t, Runtime{ConfigDir: dir}, "--timeout", "100ms", "auth", "status")
+	if result.code == 3 {
+		t.Fatalf("fresh auth operation failed transaction recovery: %#v", result)
+	}
+}
+
+func TestCommittedMarkerCannotMaskCrashedPartialRollback(t *testing.T) {
+	const oldServer = "http://127.0.0.1:45701"
+	const oldToken = "old-token"
+	const newServer = "http://127.0.0.1:45702"
+	tests := []struct {
+		name            string
+		interruptServer bool
+	}{
+		{name: "token restored before rollback crash"},
+		{name: "server restored before rollback crash", interruptServer: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := config.SaveServer(dir, oldServer); err != nil {
+				t.Fatalf("SaveServer() error = %v", err)
+			}
+			if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			ops := defaultLoginTransactionOperations()
+			writeJournal := ops.writeJournal
+			writes := 0
+			ops.writeJournal = func(configDir string, journal loginTransactionJournal) error {
+				writes++
+				if err := writeJournal(configDir, journal); err != nil {
+					return err
+				}
+				if writes == 2 {
+					return fmt.Errorf("committed journal write: %w", &securefile.ReplacementError{Err: errors.New("injected committed-marker sync failure")})
+				}
+				return nil
+			}
+			if failure := persistExplicitLoginWithOperations(dir, commandTestToken, newServer, nil, ops); failure == nil {
+				t.Fatal("persistExplicitLoginWithOperations() succeeded")
+			}
+
+			// Simulate rollback restoring one file and crashing before the other.
+			if tc.interruptServer {
+				if err := config.SaveServer(dir, oldServer); err != nil {
+					t.Fatalf("partial server rollback error = %v", err)
+				}
+			} else if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+				t.Fatalf("partial token rollback error = %v", err)
+			}
+			journal, err := readLoginJournal(dir)
+			if err != nil || journal.State != loginTransactionCommitted {
+				t.Fatalf("ambiguous committed journal = %#v, %v", journal, err)
+			}
+			recoverThroughFreshAuthOperation(t, dir)
+			assertStoredAuthState(t, dir, oldServer, oldToken)
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("resolved rollback left journal")
+			}
+		})
+	}
+}
+
+func TestTransactionRecoveryRestoresPriorPairWhenCurrentStateIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	const oldServer = "http://127.0.0.1:45801"
+	const oldToken = "old-token"
+	if err := config.SaveServer(dir, oldServer); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
+	}
+	if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:45802", func(stage string) error {
+		if stage == loginStageJournalWritten {
+			return errSimulatedLoginCrash
+		}
+		return nil
+	})
+	if failure == nil {
+		t.Fatal("persistExplicitLogin() succeeded, want simulated crash")
+	}
+	if err := securefile.AtomicWrite(dir, "credentials.json", []byte("{malformed\n")); err != nil {
+		t.Fatalf("AtomicWrite malformed credentials error = %v", err)
+	}
+	recoverThroughFreshAuthOperation(t, dir)
+	assertStoredAuthState(t, dir, oldServer, oldToken)
+	if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("resolved unreadable state left journal")
+	}
 }

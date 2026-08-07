@@ -75,6 +75,9 @@ func TestAtomicWriteReportsParentSyncFailureAfterRename(t *testing.T) {
 	if !errors.Is(err, injected) {
 		t.Fatalf("atomicWriteWithOperations() error = %v, want injected failure", err)
 	}
+	if !ReplacementVisible(err) {
+		t.Fatal("parent-sync failure did not report that replacement became visible")
+	}
 	contents, readErr := os.ReadFile(filepath.Join(dir, "journal.json"))
 	if readErr != nil || string(contents) != "pending" {
 		t.Fatal("rename did not occur before injected parent sync failure")

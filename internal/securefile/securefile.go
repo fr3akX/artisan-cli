@@ -8,6 +8,21 @@ import (
 	"path/filepath"
 )
 
+// ReplacementError reports an error after the destination replacement became
+// visible. Callers must treat the destination's durability as ambiguous.
+type ReplacementError struct {
+	Err error
+}
+
+func (e *ReplacementError) Error() string { return "replacement became visible: " + e.Err.Error() }
+func (e *ReplacementError) Unwrap() error { return e.Err }
+
+// ReplacementVisible reports whether err occurred after destination replacement.
+func ReplacementVisible(err error) bool {
+	var replacementError *ReplacementError
+	return errors.As(err, &replacementError)
+}
+
 // EnsurePrivateDir creates path when needed and applies and verifies the
 // platform's private-directory protection on the exact opened directory.
 func EnsurePrivateDir(path string) error {
@@ -70,7 +85,7 @@ func atomicWriteWithOperations(dir, name string, contents []byte, rename func(st
 		return fmt.Errorf("replace private file: %w", err)
 	}
 	if err := syncParent(dir); err != nil {
-		return fmt.Errorf("sync private file directory: %w", err)
+		return &ReplacementError{Err: fmt.Errorf("sync private file directory: %w", err)}
 	}
 	return nil
 }
