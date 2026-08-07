@@ -101,7 +101,25 @@ output goes to stdout; human errors and prompts go to stderr. Do not enable
 shell command tracing around token input, and redact business data according to
 the deployment's policy.
 
-## Release authenticity
+## Release build threat model and authenticity
+
+The release builders require a trusted, quiescent checkout and no concurrently
+malicious process running under the same OS account. Tagged release CI uses an
+isolated GitHub-hosted runner for this reason. Builder validation covers
+untrusted version, commit, destination, and tool-path environment values;
+pre-existing symlinks/reparse points; traversal; stale or pre-existing final
+destinations; ordinary concurrent builder competitors; interrupted or failed
+builds; and accidental source, binary, archive, or workflow drift.
+
+Filesystem identity and content checks are point-in-time checks. They do not
+promise protection from an attacker with the same UID/SID who can mutate held
+files or directories between arbitrary system calls or after the builder
+returns. Read-only payload modes reduce accidental changes but are not a
+security boundary against the owning account or an administrator. Likewise,
+bounded process-group/Job Object cleanup prevents ordinary helper-child leaks;
+a malicious executable deliberately escaping its group/session or otherwise
+attacking the runner is outside the trusted-built-binary contract and is not a
+complete descendant sandbox.
 
 Release executables are static but currently unsigned and not notarized.
 SHA-256 checksums and GitHub build provenance support integrity/provenance

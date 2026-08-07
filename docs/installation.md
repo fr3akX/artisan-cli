@@ -6,6 +6,13 @@ server before releasing or installing this CLI.
 
 ## Release downloads
 
+Tagged release CI runs the builder in an isolated runner from a trusted,
+quiescent checkout. Its path, archive, checksum, and identity validations are
+point-in-time checks: they address unsafe inputs, stale paths, ordinary
+concurrent builders, failures, and accidental drift, not a malicious process
+under the same UID/SID mutating files between system calls or after completion.
+See the bounded [release build threat model](security.md#release-build-threat-model-and-authenticity).
+
 A tagged release publishes six archives. Select the row matching the operating
 system and CPU reported by `uname -s`/`uname -m`, Windows **System type**, or
 `go env GOOS GOARCH`:
@@ -73,7 +80,9 @@ artisan --json version
 
 ## Build from source
 
-Go 1.23.x is required. From a trusted source checkout:
+Go 1.23.x is required. Build only from a trusted, quiescent source checkout;
+do not run a release builder concurrently with untrusted same-account
+processes. From that checkout:
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -o artisan ./cmd/artisan

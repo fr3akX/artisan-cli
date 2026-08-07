@@ -26,6 +26,10 @@ func processGroupGone(pid int) bool {
 	err := syscall.Kill(-pid, 0)
 	return errors.Is(err, syscall.ESRCH)
 }
+
+// startContainedProcess cleans up the direct process group. A trusted helper
+// must not deliberately setsid/setpgid away; this is leak containment, not a
+// complete descendant sandbox.
 func startContainedProcess(command *exec.Cmd) (func() error, error) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {

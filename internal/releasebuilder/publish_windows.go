@@ -17,10 +17,11 @@ type heldDist struct {
 	path   string
 }
 type heldStage struct {
-	handle, payload   windows.Handle
-	info, payloadInfo windows.ByHandleFileInformation
-	name, path        string
-	ambiguous         bool
+	handle, payload      windows.Handle
+	info, payloadInfo    windows.ByHandleFileInformation
+	name, path           string
+	ambiguous            bool
+	injectCleanupFailure func() error
 }
 type fileRenameInformation struct {
 	ReplaceIfExists uint32
@@ -130,17 +131,36 @@ func (s *heldStage) preparePayload() error {
 	s.payloadInfo = info
 	return nil
 }
-func (s *heldStage) close() error {
-	if s.payload != windows.InvalidHandle {
-		_ = windows.CloseHandle(s.payload)
-		s.payload = windows.InvalidHandle
+func (s *heldStage) closePayload() error {
+	if s.payload == windows.InvalidHandle {
+		return nil
 	}
+	err := windows.CloseHandle(s.payload)
+	s.payload = windows.InvalidHandle
+	return err
+}
+func (s *heldStage) closeStage() error {
 	if s.handle == windows.InvalidHandle {
 		return nil
 	}
 	err := windows.CloseHandle(s.handle)
 	s.handle = windows.InvalidHandle
 	return err
+}
+func (s *heldStage) close() error { return errors.Join(s.closePayload(), s.closeStage()) }
+func (s *heldStage) handlesClosed() bool {
+	return s.handle == windows.InvalidHandle && s.payload == windows.InvalidHandle
+}
+func (s *heldStage) payloadPath() string {
+	if s.payload == windows.InvalidHandle {
+		return ""
+	}
+	buffer := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetFinalPathNameByHandle(s.payload, &buffer[0], uint32(len(buffer)), 0)
+	if err != nil || n == 0 || n >= uint32(len(buffer)) {
+		return ""
+	}
+	return windows.UTF16ToString(buffer[:n])
 }
 func openMatchingDirectory(path string, want windows.ByHandleFileInformation) bool {
 	handle, err := openDirectoryHandle(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
@@ -203,19 +223,22 @@ func (d *heldDist) publish(s *heldStage, leaf string, before, after func() error
 	return nil
 }
 func (d *heldDist) stageMatches(s *heldStage) bool { return openMatchingDirectory(s.path, s.info) }
-func (d *heldDist) cleanup(s *heldStage) error {
+func (d *heldDist) cleanup(s *heldStage, keepPayload bool) (returnErr error) {
 	if s.ambiguous {
-		_ = s.close()
-		return errors.New("cleanup skipped because publication identity is ambiguous; safe staging residue retained")
+		return errors.Join(s.close(), errors.New("cleanup skipped because publication identity is ambiguous; safe staging residue retained"))
 	}
+	if !keepPayload {
+		returnErr = errors.Join(returnErr, s.closePayload())
+	}
+	defer func() { returnErr = errors.Join(returnErr, s.closeStage()) }()
 	if !d.stageMatches(s) {
 		s.ambiguous = true
-		_ = s.close()
 		return errors.New("cleanup skipped because staging name no longer matches held staging identity")
 	}
-	if s.payload != windows.InvalidHandle {
-		_ = windows.CloseHandle(s.payload)
-		s.payload = windows.InvalidHandle
+	if s.injectCleanupFailure != nil {
+		if err := s.injectCleanupFailure(); err != nil {
+			return err
+		}
 	}
 	entries, err := os.ReadDir(s.path)
 	if err != nil {
@@ -228,14 +251,13 @@ func (d *heldDist) cleanup(s *heldStage) error {
 	}
 	if !d.stageMatches(s) {
 		s.ambiguous = true
-		_ = s.close()
 		return errors.New("cleanup skipped after staging identity changed")
 	}
 	deleteOnClose := byte(1)
 	if err := windows.SetFileInformationByHandle(s.handle, windows.FileDispositionInfo, &deleteOnClose, 1); err != nil {
 		return err
 	}
-	return s.close()
+	return returnErr
 }
 func isAlreadyExists(err error) bool {
 	return errors.Is(err, windows.ERROR_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_FILE_EXISTS)

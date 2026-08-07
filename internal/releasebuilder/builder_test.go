@@ -221,6 +221,32 @@ func TestBuildRejectsPayloadFinalAndStageIdentitySwaps(t *testing.T) {
 			t.Fatalf("verified payload was deleted: %v", statErr)
 		}
 	})
+	t.Run("archive changed in place after native rename", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		archive := filepath.Join(root, "dist", "release", "artisan-"+contractVersion+"-linux-amd64.tar.gz")
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), AfterNativeRename: func() error {
+			if err := os.Chmod(archive, 0o644); err != nil {
+				return err
+			}
+			return os.WriteFile(archive, []byte("changed archive"), 0o644)
+		}})
+		if err == nil {
+			t.Fatal("mutated published archive reported success")
+		}
+	})
+	t.Run("checksums changed in place after native rename", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		checksums := filepath.Join(root, "dist", "release", "checksums.txt")
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), AfterNativeRename: func() error {
+			if err := os.Chmod(checksums, 0o644); err != nil {
+				return err
+			}
+			return os.WriteFile(checksums, []byte("changed checksums\n"), 0o644)
+		}})
+		if err == nil {
+			t.Fatal("mutated published checksums reported success")
+		}
+	})
 	t.Run("requested dist after verified publish", func(t *testing.T) {
 		root := copyBuildRoot(t)
 		external := t.TempDir()
@@ -308,7 +334,7 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer dist.cleanup(stage)
+		defer dist.cleanup(stage, false)
 		if err := os.Mkdir(filepath.Join(stage.path, "payload"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -327,6 +353,31 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 			t.Fatal("atomic no-replace publish overwrote competitor")
 		}
 		assertFileContents(t, sentinel, "keep")
+	})
+	t.Run("injected cleanup failure closes handles", func(t *testing.T) {
+		root := fakeRoot(t)
+		dist, err := openHeldDist(filepath.Join(root, "dist"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dist.close()
+		stage, err := dist.createStaging()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(stage.path, "payload"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := stage.preparePayload(); err != nil {
+			t.Fatal(err)
+		}
+		stage.injectCleanupFailure = func() error { return errors.New("injected cleanup failure") }
+		if err := dist.cleanup(stage, false); err == nil {
+			t.Fatal("cleanup failure was ignored")
+		}
+		if !stage.handlesClosed() {
+			t.Fatal("cleanup failure leaked held handles")
+		}
 	})
 	t.Run("dist swap before publish", func(t *testing.T) {
 		root := fakeRoot(t)
@@ -365,7 +416,7 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(external, "release")); !os.IsNotExist(err) {
 			t.Fatalf("wrote outside held dist: %v", err)
 		}
-		if err := dist.cleanup(stage); err != nil {
+		if err := dist.cleanup(stage, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(distPath); err != nil {
@@ -419,7 +470,7 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 			t.Fatalf("post-publish path escaped: %v", err)
 		}
 		assertFileContents(t, filepath.Join(oldPath, "release", "complete"), "yes")
-		if err := dist.cleanup(stage); err != nil {
+		if err := dist.cleanup(stage, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(distPath); err != nil {
@@ -568,6 +619,25 @@ func TestNativeSmokeIsBoundedAndParsesOneExactEnvelope(t *testing.T) {
 	if processExists(pid) {
 		t.Fatalf("child %d remained after helper", pid)
 	}
+	pipePIDFile := filepath.Join(t.TempDir(), "pipe-child.pid")
+	body = "sleep 30 & child=$!; echo $child > '" + pipePIDFile + "'; printf '%s\\n' '" + valid + "'"
+	script = writeScript(t, body)
+	started := time.Now()
+	_ = runNativeSmoke(script, contractVersion, contractCommit, 5*time.Second)
+	if time.Since(started) > 3*time.Second {
+		t.Fatal("inherited-pipe containment was not bounded")
+	}
+	pidBytes, err = os.ReadFile(pipePIDFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processExists(pid) {
+		t.Fatalf("inherited-pipe child %d remained", pid)
+	}
 	marker := filepath.Join(t.TempDir(), "leaked-child")
 	script = writeScript(t, "(sleep 0.2; echo leaked > '"+marker+"') & wait")
 	if err := runNativeSmoke(script, contractVersion, contractCommit, 50*time.Millisecond); err == nil {
@@ -651,6 +721,22 @@ func copyBuildRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if entry.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			} else {
+				_ = os.Chmod(path, 0o644)
+			}
+			return nil
+		})
+	})
 	for _, relative := range []string{"cmd", "internal", "skills", "go.mod", "go.sum", "LICENSE", "THIRD_PARTY_NOTICES.txt"} {
 		sourcePath := filepath.Join(source, relative)
 		err := filepath.WalkDir(sourcePath, func(path string, entry os.DirEntry, walkErr error) error {

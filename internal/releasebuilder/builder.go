@@ -66,6 +66,16 @@ type payloadSnapshot struct {
 	digest [sha256.Size]byte
 }
 
+type archiveExpectation struct {
+	name, goos, goarch string
+	file               payloadSnapshot
+	payloadDigests     map[string][sha256.Size]byte
+}
+
+// Build requires a trusted, quiescent checkout without a malicious process
+// under the same OS account. Its path, identity, and content checks are
+// point-in-time defenses against unsafe inputs, stale state, ordinary competing
+// builders, failures, and accidental drift—not a same-account race sandbox.
 func Build(options Options) (returnErr error) {
 	if !versionPattern.MatchString(options.Version) {
 		return errors.New("VERSION must be a safe v-prefixed tag value")
@@ -141,15 +151,19 @@ func Build(options Options) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("create private held staging directory: %w", err)
 	}
+	cleanupDone := false
 	defer func() {
-		if options.BeforeCleanup != nil {
-			if err := options.BeforeCleanup(stage.name); err != nil {
-				returnErr = errors.Join(returnErr, fmt.Errorf("before cleanup: %w", err))
+		if !cleanupDone {
+			if options.BeforeCleanup != nil {
+				if err := options.BeforeCleanup(stage.name); err != nil {
+					returnErr = errors.Join(returnErr, fmt.Errorf("before cleanup: %w", err))
+				}
+			}
+			if err := dist.cleanup(stage, false); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("held staging cleanup: %w", err))
 			}
 		}
-		if err := dist.cleanup(stage); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("identity-safe held staging cleanup: %w", err))
-		}
+		_ = stage.close()
 	}()
 	publishPath := filepath.Join(stage.path, "payload")
 	workPath := filepath.Join(stage.path, "build-work")
@@ -163,21 +177,19 @@ func Build(options Options) (returnErr error) {
 		return err
 	}
 
-	archives := make([]string, 0, len(releaseTargets))
+	archives := make([]archiveExpectation, 0, len(releaseTargets))
+	archiveNames := make([]string, 0, len(releaseTargets))
 	for _, releaseTarget := range releaseTargets {
-		name, err := buildTarget(root, workPath, publishPath, options, releaseTarget, sources)
+		expectation, err := buildTarget(root, workPath, publishPath, options, releaseTarget, sources)
 		if err != nil {
 			return err
 		}
-		archives = append(archives, name)
+		archives = append(archives, expectation)
+		archiveNames = append(archiveNames, expectation.name)
 	}
 	var manifest strings.Builder
-	for _, name := range archives {
-		contents, err := os.ReadFile(filepath.Join(publishPath, name))
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(&manifest, "%x  %s\n", sha256.Sum256(contents), name)
+	for _, archive := range archives {
+		fmt.Fprintf(&manifest, "%x  %s\n", archive.file.digest, archive.name)
 	}
 	if len(archives) != 6 {
 		return errors.New("checksum manifest must contain exactly six archives")
@@ -189,11 +201,17 @@ func Build(options Options) (returnErr error) {
 	if err := os.Chmod(checksumPath, 0o644); err != nil {
 		return err
 	}
-	if err := verifyChecksums(publishPath, archives); err != nil {
+	manifestSnapshot := payloadSnapshot{bytes: []byte(manifest.String()), digest: sha256.Sum256([]byte(manifest.String()))}
+	if err := verifyChecksums(publishPath, archiveNames); err != nil {
 		return err
 	}
 	if err := stage.preparePayload(); err != nil {
 		return fmt.Errorf("hold completed payload: %w", err)
+	}
+	for _, name := range append(append([]string(nil), archiveNames...), "checksums.txt") {
+		if err := os.Chmod(filepath.Join(publishPath, name), 0o444); err != nil {
+			return fmt.Errorf("make payload file read-only: %w", err)
+		}
 	}
 	if options.BeforePublish != nil {
 		if err := options.BeforePublish(); err != nil {
@@ -209,6 +227,10 @@ func Build(options Options) (returnErr error) {
 		}
 		return fmt.Errorf("atomic no-replace publish: %w", err)
 	}
+	if err := os.Chmod(stage.payloadPath(), 0o555); err != nil {
+		stage.ambiguous = true
+		return fmt.Errorf("make published payload directory non-writable: %w", err)
+	}
 	if options.AfterPublish != nil {
 		if err := options.AfterPublish(); err != nil {
 			stage.ambiguous = true
@@ -217,14 +239,81 @@ func Build(options Options) (returnErr error) {
 	}
 	if !dist.pathMatches() || !dist.publishedMatches(stage, options.Destination) {
 		stage.ambiguous = true
-		return errors.New("publication is visible only in the held original dist or final identity is ambiguous; no rollback or deletion attempted")
+		return errors.New("published-visible ambiguity at point-in-time identity check; no rollback or deletion attempted")
 	}
-	// Do not print lexical paths: the held directory is authoritative, while the
-	// requested path can be renamed by another process after the final check.
+	if options.BeforeCleanup != nil {
+		if err := options.BeforeCleanup(stage.name); err != nil {
+			return fmt.Errorf("before cleanup: %w", err)
+		}
+	}
+	cleanupDone = true
+	if err := dist.cleanup(stage, true); err != nil {
+		return fmt.Errorf("cleanup before final validation: %w", err)
+	}
+	if !dist.pathMatches() || !dist.publishedMatches(stage, options.Destination) {
+		stage.ambiguous = true
+		return errors.New("published-visible ambiguity immediately before held-payload validation")
+	}
+	if err := validatePublishedPayload(stage.payloadPath(), options.Version, archives, manifestSnapshot); err != nil {
+		stage.ambiguous = true
+		return fmt.Errorf("published-visible ambiguity: point-in-time held-payload validation failed: %w", err)
+	}
 	return nil
 }
 
-func buildTarget(root, work, publish string, options Options, releaseTarget target, sources map[string]payloadSnapshot) (string, error) {
+func validatePublishedPayload(heldPath, version string, archives []archiveExpectation, manifest payloadSnapshot) error {
+	info, err := os.Stat(heldPath)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o555 {
+		return fmt.Errorf("held payload directory is not canonical read-only directory: %v", err)
+	}
+	want := make(map[string]payloadSnapshot, len(archives)+1)
+	for _, archive := range archives {
+		want[archive.name] = archive.file
+	}
+	want["checksums.txt"] = manifest
+	entries, err := os.ReadDir(heldPath)
+	if err != nil {
+		return err
+	}
+	if len(entries) != len(want) {
+		return fmt.Errorf("held payload has %d entries, want %d", len(entries), len(want))
+	}
+	for _, entry := range entries {
+		expected, ok := want[entry.Name()]
+		if !ok {
+			return fmt.Errorf("unexpected held payload entry %q", entry.Name())
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !entryInfo.Mode().IsRegular() || entryInfo.Mode().Perm() != 0o444 {
+			return fmt.Errorf("held payload entry %q is not canonical read-only regular file", entry.Name())
+		}
+		contents, err := readRegularSnapshot(filepath.Join(heldPath, entry.Name()), maximumBinarySize)
+		if err != nil {
+			return err
+		}
+		if sha256.Sum256(contents) != expected.digest || !bytes.Equal(contents, expected.bytes) {
+			return fmt.Errorf("held payload entry %q differs from retained generated bytes", entry.Name())
+		}
+	}
+	for _, archive := range archives {
+		if err := InspectArchivePayloads(filepath.Join(heldPath, archive.name), version, archive.goos, archive.goarch, archive.payloadDigests); err != nil {
+			return fmt.Errorf("reinspect held archive %s: %w", archive.name, err)
+		}
+	}
+	names := make([]string, 0, len(archives))
+	for _, archive := range archives {
+		names = append(names, archive.name)
+	}
+	if err := verifyChecksums(heldPath, names); err != nil {
+		return fmt.Errorf("reverify held checksums: %w", err)
+	}
+	return nil
+}
+
+func buildTarget(root, work, publish string, options Options, releaseTarget target, sources map[string]payloadSnapshot) (archiveExpectation, error) {
 	top := fmt.Sprintf("artisan-%s-%s-%s", options.Version, releaseTarget.goos, releaseTarget.goarch)
 	binary := "artisan"
 	extension := ".tar.gz"
@@ -239,31 +328,31 @@ func buildTarget(root, work, publish string, options Options, releaseTarget targ
 	command.Dir = root
 	command.Env = replaceEnv(os.Environ(), map[string]string{"CGO_ENABLED": "0", "GOOS": releaseTarget.goos, "GOARCH": releaseTarget.goarch})
 	if output, err := command.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("build %s/%s: %w\n%s", releaseTarget.goos, releaseTarget.goarch, err, output)
+		return archiveExpectation{}, fmt.Errorf("build %s/%s: %w\n%s", releaseTarget.goos, releaseTarget.goarch, err, output)
 	}
 	if err := os.Chmod(binaryPath, 0o755); err != nil {
-		return "", err
+		return archiveExpectation{}, err
 	}
 	if releaseTarget.goos == runtime.GOOS && releaseTarget.goarch == runtime.GOARCH {
 		if err := runNativeSmoke(binaryPath, options.Version, options.Commit, options.CommandTimeout); err != nil {
-			return "", err
+			return archiveExpectation{}, err
 		}
 	}
 	if runtime.GOOS == "linux" && releaseTarget.goos == "linux" && releaseTarget.goarch == "amd64" {
 		if err := verifyNativeLinuxTools(binaryPath, options.FileTool, options.LDDTool, options.CommandTimeout); err != nil {
-			return "", err
+			return archiveExpectation{}, err
 		}
 	}
 	binaryBytes, err := readRegularSnapshot(binaryPath, maximumBinarySize)
 	if err != nil {
-		return "", fmt.Errorf("snapshot built binary %s/%s: %w", releaseTarget.goos, releaseTarget.goarch, err)
+		return archiveExpectation{}, fmt.Errorf("snapshot built binary %s/%s: %w", releaseTarget.goos, releaseTarget.goarch, err)
 	}
 	if err := InspectBinaryBytes(binaryBytes, releaseTarget.goos, releaseTarget.goarch, options.Version, options.Commit); err != nil {
-		return "", fmt.Errorf("inspect %s/%s snapshot: %w", releaseTarget.goos, releaseTarget.goarch, err)
+		return archiveExpectation{}, fmt.Errorf("inspect %s/%s snapshot: %w", releaseTarget.goos, releaseTarget.goarch, err)
 	}
 	if options.AfterBinarySnapshot != nil {
 		if err := options.AfterBinarySnapshot(releaseTarget.goos, releaseTarget.goarch, binaryPath); err != nil {
-			return "", err
+			return archiveExpectation{}, err
 		}
 	}
 	payloads := make(map[string]payloadSnapshot, len(sources)+1)
@@ -279,7 +368,7 @@ func buildTarget(root, work, publish string, options Options, releaseTarget targ
 		err = writeTarGzip(archivePath, top, binary, payloads)
 	}
 	if err != nil {
-		return "", err
+		return archiveExpectation{}, err
 	}
 	expected := make(map[string][sha256.Size]byte)
 	for _, entry := range archiveEntries(top, binary, payloads) {
@@ -288,9 +377,13 @@ func buildTarget(root, work, publish string, options Options, releaseTarget targ
 		}
 	}
 	if err := InspectArchivePayloads(archivePath, options.Version, releaseTarget.goos, releaseTarget.goarch, expected); err != nil {
-		return "", fmt.Errorf("inspect archive %s: %w", archiveName, err)
+		return archiveExpectation{}, fmt.Errorf("inspect archive %s: %w", archiveName, err)
 	}
-	return archiveName, nil
+	archiveBytes, err := readRegularSnapshot(archivePath, maximumBinarySize)
+	if err != nil {
+		return archiveExpectation{}, err
+	}
+	return archiveExpectation{name: archiveName, goos: releaseTarget.goos, goarch: releaseTarget.goarch, file: payloadSnapshot{bytes: archiveBytes, digest: sha256.Sum256(archiveBytes)}, payloadDigests: expected}, nil
 }
 
 func InspectBinary(path, goos, goarch, version, commit string) error {

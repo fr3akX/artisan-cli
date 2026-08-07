@@ -128,8 +128,8 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 func TestReleaseScriptsAreExactThinWrappers(t *testing.T) {
 	root := repositoryRoot(t)
 	expected := map[string]string{
-		"scripts/build-release.sh":  "#!/usr/bin/env bash\nset -euo pipefail\n\n[[ $# -ge 2 && $# -le 3 ]] || {\n  echo \"Usage: scripts/build-release.sh VERSION COMMIT [DESTINATION_LEAF]\" >&2\n  exit 2\n}\n\nROOT=$(CDPATH= cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")/..\" && pwd -P)\nGO_BIN=${GO:-go}\ncd \"$ROOT\"\nexec \"$GO_BIN\" run ./internal/releasebuilder/cmd \"$1\" \"$2\" \"${3:-release}\"\n",
-		"scripts/build-release.ps1": "[CmdletBinding()]\nparam(\n    [Parameter(Mandatory = $true)][string]$Version,\n    [Parameter(Mandatory = $true)][string]$Commit,\n    [string]$Destination = \"release\"\n)\n\n$ErrorActionPreference = \"Stop\"\nSet-StrictMode -Version Latest\n$root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot \"..\"))\n$go = if ($env:GO) { $env:GO } else { \"go\" }\nSet-Location $root\n& $go run ./internal/releasebuilder/cmd $Version $Commit $Destination\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+		"scripts/build-release.sh":  "#!/usr/bin/env bash\n# Threat model: run only in a trusted, quiescent checkout with no malicious\n# same-account process. Builder filesystem/content checks are point-in-time.\nset -euo pipefail\n\n[[ $# -ge 2 && $# -le 3 ]] || {\n  echo \"Usage: scripts/build-release.sh VERSION COMMIT [DESTINATION_LEAF]\" >&2\n  exit 2\n}\n\nROOT=$(CDPATH= cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")/..\" && pwd -P)\nGO_BIN=${GO:-go}\ncd \"$ROOT\"\nexec \"$GO_BIN\" run ./internal/releasebuilder/cmd \"$1\" \"$2\" \"${3:-release}\"\n",
+		"scripts/build-release.ps1": "# Threat model: run only in a trusted, quiescent checkout with no malicious\n# same-account process. Builder filesystem/content checks are point-in-time.\n[CmdletBinding()]\nparam(\n    [Parameter(Mandatory = $true)][string]$Version,\n    [Parameter(Mandatory = $true)][string]$Commit,\n    [string]$Destination = \"release\"\n)\n\n$ErrorActionPreference = \"Stop\"\nSet-StrictMode -Version Latest\n$root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot \"..\"))\n$go = if ($env:GO) { $env:GO } else { \"go\" }\nSet-Location $root\n& $go run ./internal/releasebuilder/cmd $Version $Commit $Destination\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
 	}
 	for path, want := range expected {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
@@ -175,11 +175,27 @@ func TestReleaseArchives(t *testing.T) {
 	output := filepath.Join(root, "dist", leafA)
 	outputB := filepath.Join(root, "dist", leafB)
 	for _, path := range []string{output, outputB} {
-		_ = os.RemoveAll(path)
+		removeReleaseTree(path)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(output); _ = os.RemoveAll(outputB) })
+	t.Cleanup(func() { removeReleaseTree(output); removeReleaseTree(outputB) })
 	runReleaseBuilder(t, root, leafA, "077")
 	runReleaseBuilder(t, root, leafB, "022")
+	for _, directory := range []string{output, outputB} {
+		info, err := os.Stat(directory)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o555 {
+			t.Fatalf("payload directory mode: %v %v", info, err)
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o444 {
+				t.Fatalf("payload file %s mode: %v %v", entry.Name(), info, err)
+			}
+		}
+	}
 
 	wantArchives := make([]string, 0, 6)
 	for _, target := range []struct{ goos, goarch, extension string }{
@@ -253,10 +269,10 @@ func TestReleaseArchives(t *testing.T) {
 func TestDocumentationContract(t *testing.T) {
 	root := repositoryRoot(t)
 	required := map[string][]string{
-		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "skills/artisan-inventory/SKILL.md"},
+		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
 		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres"},
 		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1"},
-		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token"},
+		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox"},
 		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens"},
 	}
 	for path, snippets := range required {
@@ -287,6 +303,24 @@ func runReleaseBuilder(t *testing.T, root, leaf, umask string) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("release builder (%s) failed: %v\n%s", umask, err, output)
 	}
+}
+
+func removeReleaseTree(path string) {
+	_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			_ = os.Chmod(current, 0o755)
+		} else {
+			_ = os.Chmod(current, 0o644)
+		}
+		return nil
+	})
+	_ = os.RemoveAll(path)
 }
 
 func repositoryRoot(t *testing.T) string {

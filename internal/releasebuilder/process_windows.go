@@ -55,6 +55,9 @@ func activeJobProcesses(job windows.Handle) (uint32, error) {
 	err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
 	return info.ActiveProcesses, err
 }
+
+// startContainedProcess assigns the trusted helper to a kill-on-close Job.
+// This is bounded leak containment, not a complete hostile-process sandbox.
 func startContainedProcess(command *exec.Cmd) (func() error, error) {
 	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	job, err := windows.CreateJobObject(nil, nil)

@@ -17,12 +17,13 @@ type heldDist struct {
 	path string
 }
 type heldStage struct {
-	file        *os.File
-	info        os.FileInfo
-	payload     *os.File
-	payloadInfo os.FileInfo
-	name, path  string
-	ambiguous   bool
+	file                 *os.File
+	info                 os.FileInfo
+	payload              *os.File
+	payloadInfo          os.FileInfo
+	name, path           string
+	ambiguous            bool
+	injectCleanupFailure func() error
 }
 
 func openHeldDist(path string) (*heldDist, error) {
@@ -114,12 +115,29 @@ func (s *heldStage) preparePayload() error {
 	s.payloadInfo = info
 	return nil
 }
-func (s *heldStage) close() error {
-	if s.payload != nil {
-		_ = s.payload.Close()
-		s.payload = nil
+func (s *heldStage) closePayload() error {
+	if s.payload == nil {
+		return nil
 	}
-	return s.file.Close()
+	err := s.payload.Close()
+	s.payload = nil
+	return err
+}
+func (s *heldStage) closeStage() error {
+	if s.file == nil {
+		return nil
+	}
+	err := s.file.Close()
+	s.file = nil
+	return err
+}
+func (s *heldStage) close() error        { return errors.Join(s.closePayload(), s.closeStage()) }
+func (s *heldStage) handlesClosed() bool { return s.file == nil && s.payload == nil }
+func (s *heldStage) payloadPath() string {
+	if s.payload == nil {
+		return ""
+	}
+	return directoryHandlePath(int(s.payload.Fd()))
 }
 func relativeMatches(parent int, name string, want os.FileInfo) bool {
 	file, info, err := openRelativeDirectory(parent, name)
@@ -167,32 +185,34 @@ func (d *heldDist) publish(s *heldStage, leaf string, before, after func() error
 func (d *heldDist) stageMatches(s *heldStage) bool {
 	return relativeMatches(int(d.file.Fd()), s.name, s.info)
 }
-func (d *heldDist) cleanup(s *heldStage) error {
+func (d *heldDist) cleanup(s *heldStage, keepPayload bool) (returnErr error) {
 	if s.ambiguous {
-		_ = s.close()
-		return errors.New("cleanup skipped because publication identity is ambiguous; safe staging residue retained")
+		return errors.Join(s.close(), errors.New("cleanup skipped because publication identity is ambiguous; safe staging residue retained"))
 	}
+	if !keepPayload {
+		returnErr = errors.Join(returnErr, s.closePayload())
+	}
+	defer func() { returnErr = errors.Join(returnErr, s.closeStage()) }()
 	if !d.stageMatches(s) {
 		s.ambiguous = true
-		_ = s.close()
 		return errors.New("cleanup skipped because staging name no longer matches held staging identity")
 	}
-	if s.payload != nil {
-		_ = s.payload.Close()
-		s.payload = nil
+	if s.injectCleanupFailure != nil {
+		if err := s.injectCleanupFailure(); err != nil {
+			return err
+		}
 	}
 	if err := removeContentsAt(int(s.file.Fd())); err != nil {
 		return err
 	}
 	if !d.stageMatches(s) {
 		s.ambiguous = true
-		_ = s.close()
 		return errors.New("cleanup skipped after staging identity changed; held residue retained")
 	}
 	if err := unix.Unlinkat(int(d.file.Fd()), s.name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("remove held staging directory: %w", err)
 	}
-	return s.close()
+	return returnErr
 }
 func removeContentsAt(parent int) error {
 	duplicate, err := unix.Openat(parent, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
