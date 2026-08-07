@@ -216,6 +216,10 @@ func openRequestBody(request Request) (io.ReadCloser, string, *output.Error) {
 		if body != nil {
 			_ = body.Close()
 		}
+		var fileFailure *multipartFileError
+		if errors.As(err, &fileFailure) && fileFailure.changed {
+			return nil, "", localFailure("image_file_changed", "An image file changed after upload preparation")
+		}
 		return nil, "", localFailure("request_body_error", "Unable to prepare the request body")
 	}
 	if body == nil {

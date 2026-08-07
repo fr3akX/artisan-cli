@@ -40,6 +40,15 @@ func EnsurePrivateDir(path string) error {
 	return nil
 }
 
+// ProtectPrivateFile applies and verifies the platform's private-file
+// protection on the exact opened regular file.
+func ProtectPrivateFile(file *os.File) error {
+	if file == nil {
+		return errors.New("private file is required")
+	}
+	return protectPrivate(file, false)
+}
+
 // AtomicWrite durably replaces name in dir using a protected same-directory
 // temporary file. It syncs file contents and protection before replacement,
 // then establishes the platform-specific durable rename boundary.

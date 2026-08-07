@@ -33,7 +33,7 @@ type BeanLotFields struct {
 	Notes             *string  `json:"notes"`
 }
 
-// ImageUploadManifest reserves the create seam extended with file bodies in Task 8.
+// ImageUploadManifest binds zero-based upload order to per-image metadata.
 type ImageUploadManifest struct {
 	UploadIndex int64   `json:"upload_index"`
 	Caption     *string `json:"caption"`
@@ -252,9 +252,11 @@ func normalizeBeanLotCreateManifest(manifest BeanLotCreateManifest) (BeanLotCrea
 	if !between(manifest.OpeningGrams, 0, maxInventoryGrams) || (manifest.OpeningGrams > 0 && manifest.OpeningReason == nil) {
 		return manifest, mutationUsage("invalid_opening_balance", "Positive opening grams require an opening reason")
 	}
-	if manifest.Images == nil || len(manifest.Images) != 0 {
-		return manifest, mutationUsage("invalid_images", "Lot creation supports zero images at this command boundary")
+	images, imageFailure := normalizeImageUploadManifest(manifest.Images, false)
+	if imageFailure != nil {
+		return manifest, imageFailure
 	}
+	manifest.Images = images
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		return manifest, mutationUsage("invalid_manifest", "Unable to encode bean lot manifest")
@@ -292,17 +294,25 @@ func normalizeInventoryAdjustment(adjustment InventoryAdjustmentWrite) (Inventor
 }
 
 func (c *Client) CreateBeanLot(ctx context.Context, manifest BeanLotCreateManifest, key string) (BeanLotDetail, *output.Error) {
+	return c.CreateBeanLotWithImages(ctx, manifest, nil, key)
+}
+
+// CreateBeanLotWithImages creates a lot with ordered replayable image files.
+func (c *Client) CreateBeanLotWithImages(ctx context.Context, manifest BeanLotCreateManifest, imagePaths []string, key string) (BeanLotDetail, *output.Error) {
 	manifest, failure := normalizeBeanLotCreateManifest(manifest)
 	if failure != nil {
 		return BeanLotDetail{}, failure
+	}
+	if len(imagePaths) != len(manifest.Images) {
+		return BeanLotDetail{}, mutationUsage("invalid_images", "Every image declaration must have exactly one file")
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		return BeanLotDetail{}, mutationUsage("invalid_manifest", "Unable to encode bean lot manifest")
 	}
-	body, err := NewManifestMultipartBody(encoded)
+	body, err := NewManifestMultipartBody(encoded, imagePaths...)
 	if err != nil {
-		return BeanLotDetail{}, &output.Error{ExitCode: 1, Code: "request_body_error", Message: "Unable to prepare the request body"}
+		return BeanLotDetail{}, multipartPreparationFailure(err)
 	}
 	var lot BeanLotDetail
 	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated}, &lot)

@@ -48,10 +48,17 @@ func addLotFieldFlags(flags *flag.FlagSet, values *lotFieldFlags) {
 }
 
 func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return writeCommandHelp(runtime, jsonMode, lotCreateImageUsage)
+	}
 	flags := flag.NewFlagSet("artisan inventory lot create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var values lotFieldFlags
 	addLotFieldFlags(flags, &values)
+	var imagePaths repeatedStringFlag
+	var imageMetadata imageMetadataFlags
+	flags.Var(&imagePaths, "image", "JPEG/PNG image file (repeatable)")
+	addImageMetadataFlags(flags, "image-", &imageMetadata)
 	openingGrams := flags.Int64("opening-grams", 0, "opening grams")
 	openingReason := flags.String("opening-reason", "", "opening reason")
 	openingReference := flags.String("opening-reference", "", "opening reference")
@@ -61,8 +68,8 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 		return inventoryUsageFailure(runtime, jsonMode, "Invalid inventory lot create option")
 	}
 	visited := visitedFlagNames(flags)
-	if visited["from-json"] && hasAnyOther(visited, "from-json", "idempotency-key") {
-		return inventoryUsageFailure(runtime, jsonMode, "--from-json cannot be combined with lot field flags")
+	if visited["from-json"] && hasAnyOther(visited, "from-json", "idempotency-key", "image") {
+		return inventoryUsageFailure(runtime, jsonMode, "--from-json cannot be combined with lot field or image metadata flags")
 	}
 	if visited["from-json"] && *fromJSON == "" {
 		return inventoryUsageFailure(runtime, jsonMode, "--from-json requires a file path or -")
@@ -77,12 +84,24 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 		if failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		if len(manifest.Images) != 0 {
-			return inventoryUsageFailure(runtime, jsonMode, "Lot create does not accept images yet")
+		if len(manifest.Images) != len(imagePaths) {
+			return inventoryUsageFailure(runtime, jsonMode, "--from-json image metadata must match repeated --image files")
 		}
 	} else {
 		manifest = createManifestFromFlags(values, visited, *openingGrams, *openingReason, *openingReference)
+		if len(imagePaths) != 0 || visited["image-caption"] || visited["image-alt-text"] || visited["image-cover"] {
+			images, imageFailure := imageManifestFromFlags(len(imagePaths), imageMetadata)
+			if imageFailure != nil {
+				return writeFailure(runtime, jsonMode, *imageFailure)
+			}
+			manifest.Images = images
+		}
 		if failure := api.ValidateBeanLotCreateManifest(manifest); failure != nil {
+			return writeFailure(runtime, jsonMode, *failure)
+		}
+	}
+	if len(imagePaths) != 0 {
+		if failure := api.ValidateImageUploadFiles(imagePaths); failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
 	}
@@ -94,7 +113,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 	if client == nil {
 		return code
 	}
-	lot, apiFailure := client.CreateBeanLot(ctx, manifest, key)
+	lot, apiFailure := client.CreateBeanLotWithImages(ctx, manifest, imagePaths, key)
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
