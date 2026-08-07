@@ -15,9 +15,10 @@ const (
 )
 
 var (
-	ErrInvalidDirectory = errors.New("invalid skill directory")
-	ErrDifferentContent = errors.New("installed skill differs")
-	ErrUnsafeTarget     = errors.New("unsafe skill target")
+	ErrInvalidDirectory       = errors.New("invalid skill directory")
+	ErrDifferentContent       = errors.New("installed skill differs")
+	ErrUnsafeTarget           = errors.New("unsafe skill target")
+	ErrInstallLocationChanged = errors.New("skill install location changed")
 )
 
 // InstallResult describes an installation without exposing platform-specific details.
@@ -50,10 +51,12 @@ func installWithHooks(root string, force bool, hooks installHooks) (InstallResul
 		return InstallResult{}, err
 	}
 	result, err := installPlatform(rootPath, force, hooks)
-	if result.Path == "" {
-		result.Path = filepath.Join(rootPath, Name, FileName)
+	if err != nil {
+		result.Path = ""
+		return result, err
 	}
-	return result, err
+	result.Path = filepath.Join(rootPath, Name, FileName)
+	return result, nil
 }
 
 // InstallVisible reports whether an install error occurred after the canonical
@@ -85,6 +88,13 @@ func runHook(hook func() error) error {
 		return nil
 	}
 	return hook()
+}
+
+func installLocationChanged(installed bool) error {
+	if installed {
+		return &securefile.ReplacementError{Err: ErrInstallLocationChanged}
+	}
+	return ErrInstallLocationChanged
 }
 
 func event(hooks installHooks, name string) {

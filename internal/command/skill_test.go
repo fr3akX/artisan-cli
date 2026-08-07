@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/fr3akX/artisan-cli/internal/securefile"
+	embeddedskill "github.com/fr3akX/artisan-cli/internal/skill"
 )
 
 func TestSkillShowHumanAndJSON(t *testing.T) {
@@ -132,6 +133,25 @@ func TestSkillInstallRefusalForceAndStableJSONError(t *testing.T) {
 	got, _ = os.ReadFile(path)
 	if !strings.HasPrefix(string(got), "---\nname: artisan-inventory\n") {
 		t.Fatal("force did not install embedded content")
+	}
+}
+
+func TestSkillInstallLocationSwapNeverPrintsStalePathHumanOrJSON(t *testing.T) {
+	original := installEmbeddedSkill
+	defer func() { installEmbeddedSkill = original }()
+	stale := filepath.Join(t.TempDir(), "requested", embeddedskill.Name, embeddedskill.FileName)
+	installEmbeddedSkill = func(string, bool) (embeddedskill.InstallResult, error) {
+		return embeddedskill.InstallResult{Path: stale, Installed: true}, &securefile.ReplacementError{Err: embeddedskill.ErrInstallLocationChanged}
+	}
+
+	human := runAuthCommand(t, Runtime{}, "skill", "install", "--directory", t.TempDir())
+	if human.code != 3 || human.stdout != "" || strings.Contains(human.stderr, stale) || !strings.Contains(human.stderr, "location changed") {
+		t.Fatalf("human swapped-location failure = %#v", human)
+	}
+	machine := runAuthCommand(t, Runtime{}, "--json", "skill", "install", "--directory", t.TempDir())
+	want := "{\"ok\":false,\"error\":{\"code\":\"skill_install_location_changed\",\"message\":\"Skill installed location changed during installation; inspect before retrying\"}}\n"
+	if machine.code != 3 || machine.stdout != want || machine.stderr != "" || strings.Contains(machine.stdout, stale) {
+		t.Fatalf("JSON swapped-location failure = %#v, want %q", machine, want)
 	}
 }
 

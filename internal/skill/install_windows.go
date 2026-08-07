@@ -59,6 +59,9 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 			return result, err
 		}
 		result.Unchanged = true
+		if !windowsInstallLocationMatches(rootPath, root, directory) {
+			return result, installLocationChanged(false)
+		}
 		return result, nil
 	}
 	if exists && !force {
@@ -99,6 +102,9 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 				return result, err
 			}
 			result.Unchanged = true
+			if !windowsInstallLocationMatches(rootPath, root, directory) {
+				return result, installLocationChanged(false)
+			}
 			return result, nil
 		}
 		if !force {
@@ -116,10 +122,17 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	if err := syncWindowsDirectory(directory, hooks); err != nil {
 		return result, &securefile.ReplacementError{Err: fmt.Errorf("flush skill directory: %w", err)}
 	}
+	if !windowsInstallLocationMatches(rootPath, root, directory) {
+		return result, installLocationChanged(true)
+	}
 	return result, nil
 }
 
 func openWindowsRoot(path string, hooks installHooks) (windows.Handle, error) {
+	return openWindowsRootAccess(path, hooks, true)
+}
+
+func openWindowsRootAccess(path string, hooks installHooks, writable bool) (windows.Handle, error) {
 	clean := filepath.Clean(path)
 	volume := filepath.VolumeName(clean)
 	if volume == "" {
@@ -135,7 +148,7 @@ func openWindowsRoot(path string, hooks installHooks) (windows.Handle, error) {
 	if err != nil {
 		return 0, ErrInvalidDirectory
 	}
-	current, err := ntOpenWindows(0, name, true, windows.FILE_OPEN, len(components) == 0)
+	current, err := ntOpenWindows(0, name, true, windows.FILE_OPEN, len(components) == 0 && writable)
 	if err != nil {
 		return 0, ErrInvalidDirectory
 	}
@@ -145,7 +158,7 @@ func openWindowsRoot(path string, hooks installHooks) (windows.Handle, error) {
 			windows.CloseHandle(current)
 			return 0, ErrInvalidDirectory
 		}
-		next, openErr := ntOpenWindows(current, objectName, true, windows.FILE_OPEN, index == len(components)-1)
+		next, openErr := ntOpenWindows(current, objectName, true, windows.FILE_OPEN, writable && index == len(components)-1)
 		windows.CloseHandle(current)
 		if openErr != nil {
 			return 0, ErrUnsafeTarget
@@ -159,6 +172,33 @@ func openWindowsRoot(path string, hooks installHooks) (windows.Handle, error) {
 		}
 	}
 	return current, nil
+}
+
+func windowsInstallLocationMatches(rootPath string, root, directory windows.Handle) bool {
+	requestedRoot, err := openWindowsRootAccess(rootPath, installHooks{}, false)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(requestedRoot)
+	if !sameWindowsHandleIdentity(root, requestedRoot) {
+		return false
+	}
+	requestedDirectory, err := openWindowsRelativeAccess(requestedRoot, Name, true, windows.FILE_OPEN, false)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(requestedDirectory)
+	return sameWindowsHandleIdentity(directory, requestedDirectory)
+}
+
+func sameWindowsHandleIdentity(first, second windows.Handle) bool {
+	var firstInfo, secondInfo windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(first, &firstInfo) != nil || windows.GetFileInformationByHandle(second, &secondInfo) != nil {
+		return false
+	}
+	return firstInfo.VolumeSerialNumber == secondInfo.VolumeSerialNumber &&
+		firstInfo.FileIndexHigh == secondInfo.FileIndexHigh &&
+		firstInfo.FileIndexLow == secondInfo.FileIndexLow
 }
 
 func openWindowsRelative(root windows.Handle, name string, directory bool, disposition uint32) (windows.Handle, error) {

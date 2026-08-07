@@ -4,11 +4,15 @@ package skill
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/fr3akX/artisan-cli/internal/securefile"
 	"golang.org/x/sys/unix"
@@ -67,7 +71,7 @@ func TestInstallWalksRootComponentsHandleRelativelyWithoutFollowingSwap(t *testi
 		t.Fatal(err)
 	}
 
-	_, err := installWithHooks(root, false, installHooks{afterRootComponentOpen: func(component string) error {
+	result, err := installWithHooks(root, false, installHooks{afterRootComponentOpen: func(component string) error {
 		if component != "container" {
 			return nil
 		}
@@ -76,8 +80,8 @@ func TestInstallWalksRootComponentsHandleRelativelyWithoutFollowingSwap(t *testi
 		}
 		return os.Symlink(outside, container)
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrInstallLocationChanged) || !InstallVisible(err) || result.Path != "" {
+		t.Fatalf("Install() = %#v, %v; want visible location-changed error without path", result, err)
 	}
 	assertFileEquals(t, filepath.Join(moved, "root", Name, FileName), Content)
 	assertPathAbsent(t, filepath.Join(outside, "root", Name))
@@ -92,14 +96,14 @@ func TestInstallAnchorsOpenedRootAcrossPathSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := installWithHooks(root, false, installHooks{afterRootOpen: func() error {
+	result, err := installWithHooks(root, false, installHooks{afterRootOpen: func() error {
 		if err := os.Rename(root, moved); err != nil {
 			return err
 		}
 		return os.Symlink(outside, root)
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrInstallLocationChanged) || !InstallVisible(err) || result.Path != "" {
+		t.Fatalf("Install() = %#v, %v; want visible location-changed error without path", result, err)
 	}
 	assertFileEquals(t, filepath.Join(moved, Name, FileName), Content)
 	assertPathAbsent(t, filepath.Join(outside, Name))
@@ -114,17 +118,92 @@ func TestInstallAnchorsOpenedSkillDirectoryAcrossPathSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := installWithHooks(root, false, installHooks{afterSkillDirOpen: func() error {
+	result, err := installWithHooks(root, false, installHooks{afterSkillDirOpen: func() error {
 		if err := os.Rename(visible, original); err != nil {
 			return err
 		}
 		return os.Symlink(outside, visible)
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrInstallLocationChanged) || !InstallVisible(err) || result.Path != "" {
+		t.Fatalf("Install() = %#v, %v; want visible location-changed error without path", result, err)
 	}
 	assertFileEquals(t, filepath.Join(original, FileName), Content)
 	assertPathAbsent(t, filepath.Join(outside, FileName))
+}
+
+func TestInstallRejectsDirectoryAndSocketTargets(t *testing.T) {
+	t.Run("directory", func(t *testing.T) {
+		root := t.TempDir()
+		directory := filepath.Join(root, Name)
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(directory, FileName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(root, true); !errors.Is(err, ErrUnsafeTarget) {
+			t.Fatalf("Install() error = %v, want ErrUnsafeTarget", err)
+		}
+	})
+	t.Run("socket", func(t *testing.T) {
+		root := t.TempDir()
+		directory := filepath.Join(root, Name)
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.Listen("unix", filepath.Join(directory, FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		if _, err := Install(root, true); !errors.Is(err, ErrUnsafeTarget) {
+			t.Fatalf("Install() error = %v, want ErrUnsafeTarget", err)
+		}
+	})
+}
+
+func TestInstallRejectsFIFOWithoutBlocking(t *testing.T) {
+	if mode := os.Getenv("ARTISAN_TEST_FIFO_MODE"); mode != "" {
+		root := os.Getenv("ARTISAN_TEST_FIFO_ROOT")
+		var err error
+		if mode == "install" {
+			_, err = Install(root, false)
+		} else {
+			fd, openErr := unix.Open(filepath.Join(root, Name), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			directory := os.NewFile(uintptr(fd), Name)
+			defer directory.Close()
+			err = syncExistingAt(fd, directory, installHooks{})
+		}
+		if !errors.Is(err, ErrUnsafeTarget) {
+			t.Fatalf("%s error = %v, want ErrUnsafeTarget", mode, err)
+		}
+		return
+	}
+	root := t.TempDir()
+	directory := filepath.Join(root, Name)
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(directory, FileName), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"install", "reread"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestInstallRejectsFIFOWithoutBlocking$")
+			command.Env = append(os.Environ(), "ARTISAN_TEST_FIFO_ROOT="+root, "ARTISAN_TEST_FIFO_MODE="+mode)
+			if output, err := command.CombinedOutput(); err != nil {
+				if ctx.Err() != nil {
+					t.Fatalf("%s blocked opening a FIFO without a writer: %v", mode, ctx.Err())
+				}
+				t.Fatalf("FIFO helper failed: %v\n%s", err, output)
+			}
+		})
+	}
 }
 
 func TestInstallTargetSymlinkRaceCannotRedirectWrite(t *testing.T) {

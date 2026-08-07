@@ -22,6 +22,8 @@ type skillShowResult struct {
 	Content string `json:"content"`
 }
 
+var installEmbeddedSkill = embeddedskill.Install
+
 func runSkill(_ context.Context, args []string, runtime Runtime, jsonMode bool) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		return writeCommandHelp(runtime, jsonMode, skillUsage)
@@ -63,7 +65,7 @@ func runSkillInstall(args []string, runtime Runtime, jsonMode bool) int {
 	if err := flags.Parse(args); err != nil || len(flags.Args()) != 0 || *directory == "" {
 		return skillUsageFailure(runtime, jsonMode, "skill install requires --directory ROOT")
 	}
-	result, err := embeddedskill.Install(*directory, *force)
+	result, err := installEmbeddedSkill(*directory, *force)
 	if err != nil {
 		return writeFailure(runtime, jsonMode, skillInstallFailure(err))
 	}
@@ -82,6 +84,8 @@ func runSkillInstall(args []string, runtime Runtime, jsonMode bool) int {
 
 func skillInstallFailure(err error) output.Error {
 	switch {
+	case errors.Is(err, embeddedskill.ErrInstallLocationChanged):
+		return output.Error{ExitCode: 3, Code: "skill_install_location_changed", Message: "Skill installed location changed during installation; inspect before retrying"}
 	case embeddedskill.InstallVisible(err):
 		return output.Error{ExitCode: 3, Code: "skill_install_durability_unknown", Message: "The skill became visible but directory durability is uncertain; inspect it before retrying"}
 	case errors.Is(err, embeddedskill.ErrInvalidDirectory):

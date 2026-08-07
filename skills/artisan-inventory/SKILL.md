@@ -21,8 +21,9 @@ artisan --json --server <EXPECTED_SERVER_URL> auth status
 
 3. Organization assurance comes from the bound auth identity plus server-side tenant scoping, not inventory response fields. Stop on identity/organization/server/role mismatch, nonzero exit, `ok:false`, malformed or incomplete JSON, timeout or ambiguous result, missing/repeated cursor, pagination limit, permission failure, or server upgrade requirement.
 4. Use JSON for automation; validate fields, IDs, states, and integer values. Never parse human tables.
-5. The agent must never request, read, print, persist, or pass a token and must never run `artisan auth login`. The human authenticates outside the agent session.
-6. Use integer grams: `2500` or `-2500`; never `+2500g`, decimals, kilograms, or suffixes.
+5. The CLI accepts dashed or compact UUID input and normalizes it; inventory response IDs are compact lowercase UUIDs. Normalize supplied IDs to compact lowercase before matching. Compare normalized IDs, never their dashed/compact spelling.
+6. The agent must never request, read, print, persist, or pass a token and must never run `artisan auth login`. The human authenticates outside the agent session.
+7. Use integer grams: `2500` or `-2500`; never `+2500g`, decimals, kilograms, or suffixes.
 
 ## Mutation Gate
 
@@ -46,7 +47,7 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot reservations <LOT_ID
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot conflicts <LOT_ID> --limit 100
 ```
 
-Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; verify ID, state, available grams, and conflicts.
+Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, and conflicts.
 
 ```sh
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --idempotency-key <KEY>
@@ -58,11 +59,11 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --limit 100
 ```
 
-Before adjustment, show current balances, signed delta, reason, and expected balance; then apply the Mutation Gate.
+Before adjustment, show current `on_hand_grams`, `reserved_grams`, `available_grams`, signed delta, reason, and expected post-adjustment gram fields; then apply the Mutation Gate.
 
 ## Images: Resolve, Mutate, Re-read
 
-Use `lot show` before and after. Verify `<IMAGE_ID>` belongs to `<LOT_ID>`; reorder with the complete image-ID order. Delete only after deletion-specific approval.
+Use `lot show` before and after. Compare normalized lot/image IDs and verify `<IMAGE_ID>` belongs to `<LOT_ID>`; reorder with the complete image-ID order. Delete only after deletion-specific approval.
 
 ```sh
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
@@ -79,7 +80,7 @@ After deletion timeout, re-read before any retry with the same key.
 
 ## Reservations: Resolve, Mutate, Re-read
 
-Re-read the active lot and available grams. Preserve client reservation UUID and one idempotency key per create/finalize/release mutation. Match rereads by client reservation UUID; verify lot, roast, client instance, grams, state, and conflict ID.
+Re-read the active lot and its integer `on_hand_grams`, `reserved_grams`, and `available_grams`. Preserve client reservation UUID and one idempotency key per create/finalize/release mutation. Match rereads by normalized client reservation UUID; compare normalized lot, roast, client instance, and conflict IDs, then verify grams and state.
 
 ```sh
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>

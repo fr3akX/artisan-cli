@@ -65,6 +65,9 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 			return result, err
 		}
 		result.Unchanged = true
+		if !unixInstallLocationMatches(rootPath, root, directory) {
+			return result, installLocationChanged(false)
+		}
 		return result, nil
 	}
 	if exists && !force {
@@ -114,6 +117,9 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 				return result, err
 			}
 			result.Unchanged = true
+			if !unixInstallLocationMatches(rootPath, root, directory) {
+				return result, installLocationChanged(false)
+			}
 			return result, nil
 		}
 		if !force {
@@ -136,6 +142,9 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	}
 	if cleanupErr != nil {
 		return result, &securefile.ReplacementError{Err: fmt.Errorf("clean committed temporary skill: %w", cleanupErr)}
+	}
+	if !unixInstallLocationMatches(rootPath, root, directory) {
+		return result, installLocationChanged(true)
 	}
 	return result, nil
 }
@@ -191,12 +200,16 @@ func verifyDirectory(file *os.File) error {
 }
 
 func inspectTargetAt(directoryFD int) (exists, identical bool, returnedErr error) {
-	fd, err := unix.Openat(directoryFD, FileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	exists, err := preflightUnixRegularAt(directoryFD)
+	if err != nil || !exists {
+		return exists, false, err
+	}
+	fd, err := unix.Openat(directoryFD, FileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return false, false, nil
 	}
 	if err != nil {
-		if errors.Is(err, unix.ELOOP) {
+		if unixNonregularOpenError(err) {
 			return false, false, ErrUnsafeTarget
 		}
 		return false, false, fmt.Errorf("open installed skill: %w", err)
@@ -218,9 +231,16 @@ func inspectTargetAt(directoryFD int) (exists, identical bool, returnedErr error
 }
 
 func syncExistingAt(directoryFD int, directory *os.File, hooks installHooks) error {
-	fd, err := unix.Openat(directoryFD, FileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	exists, err := preflightUnixRegularAt(directoryFD)
 	if err != nil {
-		if errors.Is(err, unix.ELOOP) {
+		return err
+	}
+	if !exists {
+		return ErrDifferentContent
+	}
+	fd, err := unix.Openat(directoryFD, FileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		if unixNonregularOpenError(err) {
 			return ErrUnsafeTarget
 		}
 		return fmt.Errorf("open installed skill for sync: %w", err)
@@ -245,6 +265,53 @@ func syncExistingAt(directoryFD int, directory *os.File, hooks installHooks) err
 		return fmt.Errorf("sync installed skill directory: %w", err)
 	}
 	return nil
+}
+
+func unixNonregularOpenError(err error) bool {
+	return errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EISDIR)
+}
+
+func preflightUnixRegularAt(directoryFD int) (bool, error) {
+	var info unix.Stat_t
+	if err := unix.Fstatat(directoryFD, FileName, &info, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect installed skill metadata: %w", err)
+	}
+	if info.Mode&unix.S_IFMT != unix.S_IFREG {
+		return true, ErrUnsafeTarget
+	}
+	return true, nil
+}
+
+func unixInstallLocationMatches(rootPath string, root, directory *os.File) bool {
+	requestedRootFD, err := unix.Open(rootPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	requestedRoot := os.NewFile(uintptr(requestedRootFD), rootPath)
+	defer requestedRoot.Close()
+	openedRootInfo, err := root.Stat()
+	if err != nil {
+		return false
+	}
+	requestedRootInfo, err := requestedRoot.Stat()
+	if err != nil || !os.SameFile(openedRootInfo, requestedRootInfo) {
+		return false
+	}
+	requestedDirectoryFD, err := unix.Openat(requestedRootFD, Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	requestedDirectory := os.NewFile(uintptr(requestedDirectoryFD), Name)
+	defer requestedDirectory.Close()
+	openedDirectoryInfo, err := directory.Stat()
+	if err != nil {
+		return false
+	}
+	requestedDirectoryInfo, err := requestedDirectory.Stat()
+	return err == nil && os.SameFile(openedDirectoryInfo, requestedDirectoryInfo)
 }
 
 func createTemporaryAt(directoryFD int) (string, *os.File, error) {
