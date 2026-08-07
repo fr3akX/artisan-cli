@@ -82,6 +82,67 @@ func TestUnknownCommandJSONIsOneStdoutEnvelope(t *testing.T) {
 	}
 }
 
+func TestParseFailureUsesJSONIntentAcrossGlobalPrefix(t *testing.T) {
+	code, stdout, stderr := runCommand(t, "--timeout", "nope", "--json", "version")
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	want := "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"invalid value \\\"nope\\\" for flag -timeout: parse error\"}}\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestParseFailureJSONIntentIsDeterministic(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantJSON bool
+	}{
+		{
+			name:     "explicit false after malformed value",
+			args:     []string{"--timeout", "nope", "--json=false", "version"},
+			wantJSON: false,
+		},
+		{
+			name:     "later true overrides false across malformed value",
+			args:     []string{"--json=false", "--timeout", "nope", "--json", "version"},
+			wantJSON: true,
+		},
+		{
+			name:     "malformed json value does not imply json",
+			args:     []string{"--json=not-a-bool", "version"},
+			wantJSON: false,
+		},
+		{
+			name:     "json after subcommand is not global",
+			args:     []string{"--timeout", "nope", "version", "--json"},
+			wantJSON: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, tt.args...)
+			if code != 2 {
+				t.Fatalf("Run() code = %d, want 2", code)
+			}
+			if tt.wantJSON {
+				if !strings.HasPrefix(stdout, "{\"ok\":false,") || stderr != "" {
+					t.Fatalf("stdout = %q, stderr = %q, want JSON failure on stdout", stdout, stderr)
+				}
+				return
+			}
+			if stdout != "" || stderr == "" {
+				t.Fatalf("stdout = %q, stderr = %q, want human failure on stderr", stdout, stderr)
+			}
+		})
+	}
+}
+
 func TestGlobalFlagsMustPrecedeCommand(t *testing.T) {
 	code, stdout, stderr := runCommand(t, "version", "--json")
 	if code != 2 {
