@@ -14,3 +14,5 @@
 # Local credentials and configuration
 .env
 *.local
+
+.worktrees/
