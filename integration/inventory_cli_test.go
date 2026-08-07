@@ -468,6 +468,63 @@ func TestWorkflowActionPinGuardMutations(t *testing.T) {
 			}
 		})
 	}
+	anchorMutations := []struct {
+		name     string
+		snippet  string
+		wantUses int
+	}{
+		{
+			name:     "alias key resolving to uses",
+			snippet:  "      - name: alias key seed\n        env:\n          KEY: &uses_key uses\n      - *uses_key: actions/cache@main\n",
+			wantUses: 3,
+		},
+		{
+			name:     "anchored action step referenced once",
+			snippet:  "      - &action_step\n        uses: " + pinnedTarget + "\n      - *action_step\n",
+			wantUses: 4,
+		},
+		{
+			name:     "anchored action step referenced multiple times",
+			snippet:  "      - &action_step\n        uses: " + pinnedTarget + "\n      - *action_step\n      - *action_step\n",
+			wantUses: 4,
+		},
+		{
+			name:     "merge alias injecting uses",
+			snippet:  "      - &action_fields\n        uses: " + pinnedTarget + "\n      - name: merged action\n        <<: *action_fields\n",
+			wantUses: 4,
+		},
+		{
+			name:     "anchored uses scalar",
+			snippet:  "      - uses: &action_value " + pinnedTarget + "\n",
+			wantUses: 4,
+		},
+		{
+			name:     "benign non-action anchor and alias",
+			snippet:  "      - name: benign reuse\n        env:\n          FIRST: &shared harmless\n          SECOND: *shared\n",
+			wantUses: 3,
+		},
+	}
+	for _, mutation := range anchorMutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedWorkflow := insert(mutation.snippet)
+			decoder := yaml.NewDecoder(strings.NewReader(mutatedWorkflow))
+			var document yaml.Node
+			if err := decoder.Decode(&document); err != nil {
+				t.Fatalf("anchor mutation was not valid YAML: %v", err)
+			}
+			var trailing yaml.Node
+			if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+				t.Fatalf("anchor mutation did not contain exactly one YAML document: %v", err)
+			}
+			err := validateWorkflowActionPins(mutatedWorkflow, mutation.wantUses)
+			if err == nil {
+				t.Fatal("YAML anchor or alias bypassed the workflow reuse guard")
+			}
+			if !strings.Contains(err.Error(), "anchors, aliases, or merge keys") {
+				t.Fatalf("YAML reuse failure was not clear: %v", err)
+			}
+		})
+	}
 	insideRunBlock := insert("      - name: text is not an action\n        run: |\n          uses: actions/cache@main\n")
 	if err := validateWorkflowActionPins(insideRunBlock, 3); err != nil {
 		t.Fatalf("uses text inside a run block was treated as an action: %v", err)
@@ -564,6 +621,9 @@ func validateWorkflowActionPins(workflow string, expectedCount int) error {
 		}
 		return errors.New("integration workflow must contain exactly one YAML document")
 	}
+	if err := rejectWorkflowYAMLReuse(&document); err != nil {
+		return err
+	}
 	pinnedUse := regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9A-Fa-f]{40}$`)
 	usesCount := 0
 	visited := make(map[*yaml.Node]bool)
@@ -609,6 +669,21 @@ func validateWorkflowActionPins(workflow string, expectedCount int) error {
 
 func isEmptyYAMLDocument(root *yaml.Node) bool {
 	return root == nil || root.Kind == 0 || (root.Kind == yaml.ScalarNode && root.Tag == "!!null")
+}
+
+func rejectWorkflowYAMLReuse(node *yaml.Node) error {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.AliasNode || node.Alias != nil || node.Anchor != "" || node.Tag == "!!merge" {
+		return errors.New("integration workflow must not contain YAML anchors, aliases, or merge keys")
+	}
+	for _, child := range node.Content {
+		if err := rejectWorkflowYAMLReuse(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func workflowStep(t *testing.T, workflow, name string) string {
