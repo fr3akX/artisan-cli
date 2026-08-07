@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fr3akX/artisan-cli/internal/config"
 	"github.com/fr3akX/artisan-cli/internal/output"
 	"github.com/fr3akX/artisan-cli/internal/release"
 )
@@ -18,6 +19,7 @@ const usageExitCode = 2
 
 // Run parses args, executes a command, and returns the process exit code.
 func Run(ctx context.Context, args []string, runtime Runtime) int {
+	runtime = normalizeRuntime(runtime)
 	flags := flag.NewFlagSet("artisan", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	jsonMode := flags.Bool("json", false, "emit a JSON envelope")
@@ -27,7 +29,31 @@ func Run(ctx context.Context, args []string, runtime Runtime) int {
 		return writeFailure(runtime, jsonModeForParseFailure(args), output.Error{
 			ExitCode: usageExitCode,
 			Code:     "usage",
-			Message:  err.Error(),
+			Message:  "Invalid global option",
+		})
+	}
+	serverProvided := false
+	flags.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "server" {
+			serverProvided = true
+		}
+	})
+	if serverProvided {
+		normalized, err := config.NormalizeServerURL(*server)
+		if err != nil {
+			return writeFailure(runtime, *jsonMode, output.Error{
+				ExitCode: usageExitCode,
+				Code:     "invalid_server_url",
+				Message:  "Server URL is invalid",
+			})
+		}
+		*server = normalized
+	}
+	if *timeout <= 0 {
+		return writeFailure(runtime, *jsonMode, output.Error{
+			ExitCode: usageExitCode,
+			Code:     "invalid_timeout",
+			Message:  "Timeout must be greater than zero",
 		})
 	}
 	remaining := flags.Args()
@@ -114,6 +140,22 @@ func splitGlobalFlag(arg string) (name, value string, hasValue, isFlag bool) {
 	}
 	name, value, hasValue = strings.Cut(name, "=")
 	return name, value, hasValue, true
+}
+
+func normalizeRuntime(runtime Runtime) Runtime {
+	if runtime.In == nil {
+		runtime.In = strings.NewReader("")
+	}
+	if runtime.Out == nil {
+		runtime.Out = io.Discard
+	}
+	if runtime.Err == nil {
+		runtime.Err = io.Discard
+	}
+	if runtime.Getenv == nil {
+		runtime.Getenv = func(string) string { return "" }
+	}
+	return runtime
 }
 
 func writeFailure(runtime Runtime, jsonMode bool, failure output.Error) int {

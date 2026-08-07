@@ -87,7 +87,7 @@ func TestParseFailureUsesJSONIntentAcrossGlobalPrefix(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("Run() code = %d, want 2", code)
 	}
-	want := "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"invalid value \\\"nope\\\" for flag -timeout: parse error\"}}\n"
+	want := "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid global option\"}}\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -153,6 +153,100 @@ func TestGlobalFlagsMustPrecedeCommand(t *testing.T) {
 	}
 	if stderr == "" {
 		t.Fatal("stderr is empty, want usage diagnostic")
+	}
+}
+
+func TestGlobalParseFailuresNeverEchoRawValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "secret shaped timeout human",
+			args:       []string{"--timeout=test-secret-token", "version"},
+			wantStderr: "Invalid global option\n",
+		},
+		{
+			name:       "secret shaped timeout with later JSON intent",
+			args:       []string{"--timeout=test-secret-token", "--json", "version"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid global option\"}}\n",
+		},
+		{
+			name:       "secret shaped boolean",
+			args:       []string{"--json=test-secret-token", "version"},
+			wantStderr: "Invalid global option\n",
+		},
+		{
+			name:       "secret shaped boolean with later JSON intent",
+			args:       []string{"--json=test-secret-token", "--json", "version"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid global option\"}}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, tt.args...)
+			if code != usageExitCode || stdout != tt.wantStdout || stderr != tt.wantStderr {
+				t.Fatalf("result = (%d, %q, %q), want (%d, %q, %q)", code, stdout, stderr, usageExitCode, tt.wantStdout, tt.wantStderr)
+			}
+			if strings.Contains(stdout, "test-secret-token") || strings.Contains(stderr, "test-secret-token") {
+				t.Fatal("global flag failure exposed raw value")
+			}
+		})
+	}
+}
+
+func TestExplicitGlobalServerAndTimeoutValidationAreStableUsageFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "invalid server human",
+			args:       []string{"--server=test-secret-token", "version"},
+			wantStderr: "Server URL is invalid\n",
+		},
+		{
+			name:       "invalid server JSON",
+			args:       []string{"--json", "--server=test-secret-token", "version"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"invalid_server_url\",\"message\":\"Server URL is invalid\"}}\n",
+		},
+		{
+			name:       "invalid timeout human",
+			args:       []string{"--timeout=0s", "version"},
+			wantStderr: "Timeout must be greater than zero\n",
+		},
+		{
+			name:       "invalid timeout JSON",
+			args:       []string{"--json", "--timeout=-1s", "version"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"invalid_timeout\",\"message\":\"Timeout must be greater than zero\"}}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, tt.args...)
+			if code != usageExitCode || stdout != tt.wantStdout || stderr != tt.wantStderr {
+				t.Fatalf("result = (%d, %q, %q), want (%d, %q, %q)", code, stdout, stderr, usageExitCode, tt.wantStdout, tt.wantStderr)
+			}
+			if strings.Contains(stdout, "test-secret-token") || strings.Contains(stderr, "test-secret-token") {
+				t.Fatal("global validation exposed raw value")
+			}
+		})
+	}
+}
+
+func TestZeroRuntimeDoesNotPanic(t *testing.T) {
+	if code := Run(context.Background(), []string{"version"}, Runtime{}); code != 0 {
+		t.Fatalf("version code = %d, want 0", code)
+	}
+	if code := Run(context.Background(), nil, Runtime{}); code != usageExitCode {
+		t.Fatalf("empty command code = %d, want %d", code, usageExitCode)
+	}
+	if code := Run(context.Background(), []string{"auth", "status"}, Runtime{}); code != 3 {
+		t.Fatalf("auth status code = %d, want 3", code)
 	}
 }
 

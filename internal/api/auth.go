@@ -3,10 +3,15 @@ package api
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
+
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // User identifies the authenticated Artisan user.
 type User struct {
@@ -46,20 +51,28 @@ func (c *Client) Identity(ctx context.Context) (Identity, *output.Error) {
 }
 
 func validIdentity(identity Identity) bool {
-	required := []string{
-		identity.User.ID,
-		identity.User.Email,
-		identity.User.Nickname,
-		identity.Organization.ID,
-		identity.Organization.Name,
-		identity.Organization.Slug,
+	if !canonicalUUIDPattern.MatchString(identity.User.ID) || !canonicalUUIDPattern.MatchString(identity.Organization.ID) {
+		return false
 	}
-	for _, value := range required {
-		if strings.TrimSpace(value) == "" {
+	if !validIdentityText(identity.User.Email, 320) ||
+		!validIdentityText(identity.User.Nickname, 100) ||
+		!validIdentityText(identity.Organization.Name, 200) ||
+		!validIdentityText(identity.Organization.Slug, 100) {
+		return false
+	}
+	return identity.Role == "admin" || identity.Role == "member"
+}
+
+func validIdentityText(value string, maxCodePoints int) bool {
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxCodePoints {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
 			return false
 		}
 	}
-	return identity.Role == "admin" || identity.Role == "member"
+	return true
 }
 
 func identityContainsAny(identity Identity, forbiddenValues []string) bool {

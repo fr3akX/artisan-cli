@@ -54,6 +54,9 @@ func runAuthLogin(ctx context.Context, args []string, runtime Runtime, jsonMode 
 	if len(flags.Args()) != 0 {
 		return authUsageFailure(runtime, jsonMode, "auth login does not accept arguments")
 	}
+	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
+		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
+	}
 
 	serverURL, persistServer, failure := resolveLoginServer(runtime, serverOverride)
 	if failure != nil {
@@ -91,6 +94,9 @@ func runAuthLogin(ctx context.Context, args []string, runtime Runtime, jsonMode 
 }
 
 func runAuthStatus(ctx context.Context, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
+	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
+		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
+	}
 	values, err := loadEffectiveConfiguration(runtime, serverOverride)
 	if err != nil {
 		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
@@ -120,12 +126,11 @@ func runAuthStatus(ctx context.Context, runtime Runtime, jsonMode bool, serverOv
 }
 
 func runAuthLogout(runtime Runtime, jsonMode bool) int {
+	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
+		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
+	}
 	if err := auth.NewFileStore(runtime.ConfigDir).Remove(); err != nil {
-		return writeFailure(runtime, jsonMode, output.Error{
-			ExitCode: 1,
-			Code:     "credential_store_error",
-			Message:  "Unable to remove stored credentials",
-		})
+		return writeFailure(runtime, jsonMode, *transactionConfigurationFailure())
 	}
 	data := struct {
 		LoggedOut bool `json:"logged_out"`
@@ -142,13 +147,6 @@ func runAuthLogout(runtime Runtime, jsonMode bool) int {
 func resolveLoginServer(runtime Runtime, serverOverride string) (serverURL, persistServer string, failure *output.Error) {
 	values, err := loadConfiguration(runtime.ConfigDir, runtime.Getenv, serverOverride, true)
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "missing_configuration:") {
-			return "", "", &output.Error{
-				ExitCode: usageExitCode,
-				Code:     "missing_configuration",
-				Message:  "--server is required when no server is configured",
-			}
-		}
 		result := configurationLoadFailure(err)
 		return "", "", &result
 	}
@@ -227,8 +225,8 @@ func readBoundedTokenLine(reader io.Reader) (string, error) {
 	if reader == nil {
 		return "", errors.New("missing input")
 	}
-	contents, err := io.ReadAll(io.LimitReader(reader, maxTokenInputBytes+1))
-	if err != nil || len(contents) > maxTokenInputBytes {
+	contents, err := io.ReadAll(io.LimitReader(reader, maxTokenInputBytes+3))
+	if err != nil || len(contents) > maxTokenInputBytes+2 {
 		return "", errors.New("invalid input")
 	}
 	if strings.HasSuffix(string(contents), "\r\n") {
@@ -237,53 +235,28 @@ func readBoundedTokenLine(reader io.Reader) (string, error) {
 		contents = contents[:len(contents)-1]
 	}
 	token := string(contents)
-	if strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") {
+	if len(token) > maxTokenInputBytes || strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") {
 		return "", errors.New("invalid token")
 	}
 	return token, nil
 }
 
 func persistLogin(configDir, token, serverURL string) *output.Error {
-	store := auth.NewFileStore(configDir)
-	previousToken, loadErr := store.Load()
-	if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+	if serverURL != "" {
+		return persistExplicitLogin(configDir, token, serverURL, nil)
+	}
+	if err := auth.NewFileStore(configDir).Save(token); err != nil {
 		return credentialStoreFailure()
 	}
-	if err := store.Save(token); err != nil {
-		return credentialStoreFailure()
-	}
-	if serverURL == "" {
-		return nil
-	}
-	if err := config.SaveServer(configDir, serverURL); err == nil {
-		return nil
-	}
-
-	if loadErr == nil {
-		_ = store.Save(previousToken)
-	} else {
-		_ = store.Remove()
-	}
-	return &output.Error{
-		ExitCode: 1,
-		Code:     "configuration_store_error",
-		Message:  "Unable to save server configuration",
-	}
+	return nil
 }
 
 func credentialStoreFailure() *output.Error {
-	return &output.Error{
-		ExitCode: 1,
-		Code:     "credential_store_error",
-		Message:  "Unable to save credentials",
-	}
+	return transactionConfigurationFailure()
 }
 
-func configurationLoadFailure(err error) output.Error {
-	if strings.HasPrefix(err.Error(), "missing_configuration:") {
-		return output.Error{ExitCode: usageExitCode, Code: "missing_configuration", Message: "Server URL and token must be configured"}
-	}
-	return output.Error{ExitCode: 1, Code: "configuration_error", Message: "Unable to load configuration"}
+func configurationLoadFailure(error) output.Error {
+	return output.Error{ExitCode: 3, Code: "configuration_error", Message: "Configuration is missing or unsafe"}
 }
 
 func clientConfigurationFailure(err error) output.Error {

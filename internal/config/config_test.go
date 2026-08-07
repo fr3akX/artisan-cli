@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -286,4 +287,19 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatalf("ReadFile(%q): %v", path, err)
 	}
 	return contents
+}
+
+func TestRemoveServerIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	if err := config.SaveServer(dir, "http://127.0.0.1:43210"); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := config.RemoveServer(dir); err != nil {
+			t.Fatalf("RemoveServer() call %d error = %v", i+1, err)
+		}
+	}
+	if _, err := config.LoadStoredServer(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadStoredServer() error = %v, want not exist", err)
+	}
 }

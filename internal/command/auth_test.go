@@ -3,6 +3,7 @@ package command
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,10 +22,14 @@ import (
 const commandTestToken = "test-secret-token"
 
 const commandIdentityJSON = `{
-	"user":{"id":"user-id","email":"owner@example.com","nickname":"Owner"},
-	"organization":{"id":"organization-id","name":"My Roastery","slug":"my-roastery"},
+	"user":{"id":"11111111-1111-4111-8111-111111111111","email":"owner@example.com","nickname":"Owner"},
+	"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"My Roastery","slug":"my-roastery"},
 	"role":"admin"
 }`
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, errors.New("test read failure") }
 
 type commandResult struct {
 	code   int
@@ -117,11 +122,106 @@ func TestAuthLoginJSONNeverIncludesToken(t *testing.T) {
 	if result.code != 0 || result.stderr != "" {
 		t.Fatalf("result code/stderr = %d/%q, want success", result.code, result.stderr)
 	}
-	want := `{"ok":true,"data":{"user":{"id":"user-id","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"organization-id","name":"My Roastery","slug":"my-roastery"},"role":"admin"}}` + "\n"
+	want := `{"ok":true,"data":{"user":{"id":"11111111-1111-4111-8111-111111111111","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"My Roastery","slug":"my-roastery"},"role":"admin"}}` + "\n"
 	if result.stdout != want {
 		t.Fatalf("stdout = %q, want identity envelope", result.stdout)
 	}
 	assertTokenRedacted(t, result)
+}
+
+func TestAuthConfigurationFailuresUseStableExitThree(t *testing.T) {
+	tests := []struct {
+		name     string
+		jsonMode bool
+		setup    func(t *testing.T, dir string) func(string) string
+	}{
+		{name: "missing human"},
+		{name: "missing JSON", jsonMode: true},
+		{
+			name: "malformed stored human",
+			setup: func(t *testing.T, dir string) func(string) string {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte("{not-json\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+				return nil
+			},
+		},
+		{
+			name: "unsafe stored credential human",
+			setup: func(t *testing.T, dir string) func(string) string {
+				t.Helper()
+				if err := config.SaveServer(dir, "http://127.0.0.1:43210"); err != nil {
+					t.Fatalf("SaveServer() error = %v", err)
+				}
+				credentialPath := filepath.Join(dir, "credentials.json")
+				if err := os.WriteFile(credentialPath, []byte(`{"token":"stored"}`+"\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+				if err := os.Chmod(credentialPath, 0o644); err != nil {
+					t.Fatalf("Chmod() error = %v", err)
+				}
+				return nil
+			},
+		},
+		{
+			name: "malformed environment token human",
+			setup: func(t *testing.T, _ string) func(string) string {
+				return func(name string) string {
+					switch name {
+					case "ARTISAN_SERVER_URL":
+						return "http://127.0.0.1:43210"
+					case "ARTISAN_SERVER_TOKEN":
+						return "bad\ntoken"
+					default:
+						return ""
+					}
+				}
+			},
+		},
+		{
+			name:     "invalid environment JSON",
+			jsonMode: true,
+			setup: func(t *testing.T, _ string) func(string) string {
+				return func(name string) string {
+					switch name {
+					case "ARTISAN_SERVER_URL":
+						return "test-secret-token"
+					case "ARTISAN_SERVER_TOKEN":
+						return commandTestToken
+					default:
+						return ""
+					}
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var getenv func(string) string
+			if tt.setup != nil {
+				getenv = tt.setup(t, dir)
+			}
+			args := []string{"auth", "status"}
+			if tt.jsonMode {
+				args = append([]string{"--json"}, args...)
+			}
+			result := runAuthCommand(t, Runtime{ConfigDir: dir, Getenv: getenv}, args...)
+			if result.code != 3 {
+				t.Fatalf("Run() code = %d, want 3", result.code)
+			}
+			if tt.jsonMode {
+				want := "{\"ok\":false,\"error\":{\"code\":\"configuration_error\",\"message\":\"Configuration is missing or unsafe\"}}\n"
+				if result.stdout != want || result.stderr != "" {
+					t.Fatalf("JSON result = %#v, want stable config envelope", result)
+				}
+			} else if result.stdout != "" || result.stderr != "Configuration is missing or unsafe\n" {
+				t.Fatalf("human result = %#v, want stable config failure", result)
+			}
+			assertTokenRedacted(t, result)
+		})
+	}
 }
 
 func TestAuthLoginRequiresServerWhenNoneConfigured(t *testing.T) {
@@ -131,8 +231,8 @@ func TestAuthLoginRequiresServerWhenNoneConfigured(t *testing.T) {
 		ConfigDir: configDir,
 	}, "auth", "login", "--token-stdin")
 
-	if result.code != usageExitCode || !strings.Contains(result.stderr, "--server") {
-		t.Fatalf("result = %#v, want --server usage failure", result)
+	if result.code != 3 || result.stderr != "Configuration is missing or unsafe\n" {
+		t.Fatalf("result = %#v, want stable configuration failure", result)
 	}
 	if _, err := os.Stat(filepath.Join(configDir, "config.json")); !os.IsNotExist(err) {
 		t.Fatal("login without a server changed configuration")
@@ -212,6 +312,43 @@ func TestAuthLoginRejectsTokenOptionWithoutExposure(t *testing.T) {
 			t.Fatalf("result code/output did not report invalid option: code=%d stderr=%q", result.code, result.stderr)
 		}
 		assertTokenRedacted(t, result)
+	}
+}
+
+func TestReadBoundedTokenLineCoverage(t *testing.T) {
+	accepted := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "EOF without newline", input: "token", want: "token"},
+		{name: "LF", input: "token\n", want: "token"},
+		{name: "CR", input: "token\r", want: "token"},
+		{name: "CRLF", input: "token\r\n", want: "token"},
+		{name: "exact bound", input: strings.Repeat("x", maxTokenInputBytes), want: strings.Repeat("x", maxTokenInputBytes)},
+		{name: "exact bound with CRLF", input: strings.Repeat("x", maxTokenInputBytes) + "\r\n", want: strings.Repeat("x", maxTokenInputBytes)},
+	}
+	for _, tt := range accepted {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readBoundedTokenLine(strings.NewReader(tt.input))
+			if err != nil || got != tt.want {
+				t.Fatalf("readBoundedTokenLine() length/error = %d/%v, want length %d", len(got), err, len(tt.want))
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name   string
+		reader io.Reader
+	}{
+		{name: "overflow", reader: strings.NewReader(strings.Repeat("x", maxTokenInputBytes+1))},
+		{name: "extra line", reader: strings.NewReader("token\nextra")},
+		{name: "reader error", reader: errorReader{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := readBoundedTokenLine(tt.reader); err == nil {
+				t.Fatal("readBoundedTokenLine() succeeded, want failure")
+			}
+		})
 	}
 }
 
@@ -352,7 +489,7 @@ func TestAuthLoginRejectsIdentityContainingToken(t *testing.T) {
 	configDir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"user":{"id":"u","email":"e","nickname":%q},"organization":{"id":"o","name":"Org","slug":"org"},"role":"admin"}`, commandTestToken)
+		_, _ = fmt.Fprintf(w, `{"user":{"id":"11111111-1111-4111-8111-111111111111","email":"e","nickname":%q},"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"Org","slug":"org"},"role":"admin"}`, commandTestToken)
 	}))
 	defer server.Close()
 
@@ -408,7 +545,7 @@ func TestAuthStatusHumanAndJSON(t *testing.T) {
 	if jsonResult.code != 0 || jsonResult.stderr != "" {
 		t.Fatalf("JSON result = %#v", jsonResult)
 	}
-	wantJSON := `{"ok":true,"data":{"user":{"id":"user-id","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"organization-id","name":"My Roastery","slug":"my-roastery"},"role":"admin"}}` + "\n"
+	wantJSON := `{"ok":true,"data":{"user":{"id":"11111111-1111-4111-8111-111111111111","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"My Roastery","slug":"my-roastery"},"role":"admin"}}` + "\n"
 	if jsonResult.stdout != wantJSON {
 		t.Fatalf("JSON stdout = %q, want identity envelope", jsonResult.stdout)
 	}
@@ -437,7 +574,7 @@ func TestAuthStatusGlobalServerOverridesStoredWithoutPersisting(t *testing.T) {
 		ConfigDir: configDir,
 		Getenv: func(name string) string {
 			if name == "ARTISAN_SERVER_URL" {
-				return storedServer.URL
+				return "test-secret-token"
 			}
 			return ""
 		},
@@ -454,6 +591,39 @@ func TestAuthStatusGlobalServerOverridesStoredWithoutPersisting(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), storedServer.URL) || strings.Contains(string(contents), overrideServer.URL) {
 		t.Fatal("one-command server override rewrote stored configuration")
+	}
+}
+
+func TestAuthLogoutWithEnvironmentTokenRemovesOnlyStoredToken(t *testing.T) {
+	configDir := t.TempDir()
+	if err := config.SaveServer(configDir, "http://127.0.0.1:43210"); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
+	}
+	if err := auth.NewFileStore(configDir).Save(commandTestToken); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	getenv := func(name string) string {
+		if name == "ARTISAN_SERVER_TOKEN" {
+			return "environment-credential"
+		}
+		return ""
+	}
+	result := runAuthCommand(t, Runtime{
+		ConfigDir: configDir,
+		Getenv:    getenv,
+	}, "auth", "logout")
+	if result.code != 0 {
+		t.Fatalf("Run() code = %d, want 0", result.code)
+	}
+	if _, err := auth.NewFileStore(configDir).Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("logout did not remove stored credential")
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "config.json")); err != nil {
+		t.Fatal("logout removed stored server")
+	}
+	values, err := config.Load(configDir, getenv)
+	if err != nil || values.Token != "environment-credential" || values.Source.Token != config.OriginEnvironment {
+		t.Fatal("logout altered the effective environment credential")
 	}
 }
 
@@ -480,6 +650,236 @@ func TestAuthLogoutIsIdempotentAndLeavesServerConfiguration(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join(configDir, "config.json"))
 	if err != nil || !strings.Contains(string(contents), serverURL) {
 		t.Fatal("logout removed or changed server configuration")
+	}
+}
+
+func TestExplicitLoginTransactionRestoresPriorStateOnStageFailure(t *testing.T) {
+	stages := []string{loginStageJournalWritten, loginStageTokenSaved, loginStageServerSaved, loginStageBeforeCommit}
+	for _, stage := range stages {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			const oldServer = "http://127.0.0.1:41001"
+			const oldToken = "old-credential"
+			if err := config.SaveServer(dir, oldServer); err != nil {
+				t.Fatalf("SaveServer() error = %v", err)
+			}
+			if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:41002", func(got string) error {
+				if got == stage {
+					return errors.New("injected stage failure")
+				}
+				return nil
+			})
+			if failure == nil {
+				t.Fatal("persistExplicitLogin() succeeded, want failure")
+			}
+			assertStoredAuthState(t, dir, oldServer, oldToken)
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("restored transaction left journal behind")
+			}
+		})
+	}
+}
+
+func TestExplicitLoginTransactionRestoresPriorAbsence(t *testing.T) {
+	dir := t.TempDir()
+	failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:41502", func(stage string) error {
+		if stage == loginStageTokenSaved {
+			return errors.New("injected failure")
+		}
+		return nil
+	})
+	if failure == nil {
+		t.Fatal("persistExplicitLogin() succeeded, want failure")
+	}
+	for _, name := range []string{"config.json", "credentials.json", loginTransactionFileName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("transaction did not restore absence of %s", name)
+		}
+	}
+}
+
+func TestExplicitLoginTransactionRecoversCrashAtEveryStage(t *testing.T) {
+	stages := []string{loginStageJournalWritten, loginStageTokenSaved, loginStageServerSaved, loginStageBeforeCommit}
+	for _, stage := range stages {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			const oldServer = "http://127.0.0.1:42001"
+			const oldToken = "old-credential"
+			if err := config.SaveServer(dir, oldServer); err != nil {
+				t.Fatalf("SaveServer() error = %v", err)
+			}
+			if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:42002", func(got string) error {
+				if got == stage {
+					return errSimulatedLoginCrash
+				}
+				return nil
+			})
+			if failure == nil {
+				t.Fatal("persistExplicitLogin() succeeded, want simulated crash failure")
+			}
+			journalInfo, err := os.Stat(filepath.Join(dir, loginTransactionFileName))
+			if err != nil {
+				t.Fatal("simulated crash did not leave recovery journal")
+			}
+			if journalInfo.Mode().Perm()&0o077 != 0 {
+				t.Fatalf("journal mode = %#o, grants group/other access", journalInfo.Mode().Perm())
+			}
+			if err := recoverLoginTransaction(dir); err != nil {
+				t.Fatalf("recoverLoginTransaction() error = %v", err)
+			}
+			assertStoredAuthState(t, dir, oldServer, oldToken)
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("recovery did not remove journal")
+			}
+		})
+	}
+}
+
+func TestExplicitLoginTransactionLeavesJournalWhenRollbackFailsAndNextRunRecovers(t *testing.T) {
+	dir := t.TempDir()
+	const oldServer = "http://127.0.0.1:43001"
+	const oldToken = "old-credential"
+	if err := config.SaveServer(dir, oldServer); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
+	}
+	store := auth.NewFileStore(dir)
+	if err := store.Save(oldToken); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	credentialPath := filepath.Join(dir, "credentials.json")
+	failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:43002", func(stage string) error {
+		if stage != loginStageTokenSaved {
+			return nil
+		}
+		if err := os.Remove(credentialPath); err != nil {
+			return err
+		}
+		if err := os.Mkdir(credentialPath, 0o700); err != nil {
+			return err
+		}
+		return errors.New("injected failure with blocked rollback")
+	})
+	if failure == nil {
+		t.Fatal("persistExplicitLogin() succeeded, want failure")
+	}
+	if strings.Contains(failure.Code, commandTestToken) || strings.Contains(failure.Message, commandTestToken) {
+		t.Fatal("transaction failure exposed newly supplied credential")
+	}
+	if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); err != nil {
+		t.Fatal("failed rollback did not retain recovery journal")
+	}
+	if current, err := store.Load(); err == nil && current == commandTestToken {
+		t.Fatal("newly supplied credential remained usable after failed rollback")
+	}
+	if err := os.Remove(credentialPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove blocker: %v", err)
+	}
+	if err := recoverLoginTransaction(dir); err != nil {
+		t.Fatalf("recoverLoginTransaction() error = %v", err)
+	}
+	assertStoredAuthState(t, dir, oldServer, oldToken)
+}
+
+func TestAuthCommandAutomaticallyRecoversPendingLoginTransaction(t *testing.T) {
+	dir := t.TempDir()
+	const oldServer = "http://127.0.0.1:43501"
+	const oldToken = "old-credential"
+	if err := config.SaveServer(dir, oldServer); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
+	}
+	if err := auth.NewFileStore(dir).Save(oldToken); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:43502", func(stage string) error {
+		if stage == loginStageTokenSaved {
+			return errSimulatedLoginCrash
+		}
+		return nil
+	})
+	if failure == nil {
+		t.Fatal("persistExplicitLogin() succeeded, want simulated crash")
+	}
+	result := runAuthCommand(t, Runtime{ConfigDir: dir}, "auth", "logout")
+	if result.code != 0 {
+		t.Fatalf("logout code = %d, want 0", result.code)
+	}
+	server, err := config.LoadStoredServer(dir)
+	if err != nil || server != oldServer {
+		t.Fatal("auth command did not recover prior server before logout")
+	}
+	if _, err := auth.NewFileStore(dir).Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("logout did not remove recovered stored credential")
+	}
+	if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("auth command did not complete transaction recovery")
+	}
+}
+
+func TestLoginTransactionJournalStrictDecode(t *testing.T) {
+	dir := t.TempDir()
+	contents := []byte(`{"version":1,"server_present":false,"server_url":"","token_present":false,"token":"","unknown":true}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, loginTransactionFileName), contents, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := recoverLoginTransaction(dir); err == nil {
+		t.Fatal("recoverLoginTransaction() accepted unknown journal field")
+	}
+	if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); err != nil {
+		t.Fatal("invalid journal was removed instead of retained for inspection/recovery")
+	}
+}
+
+func TestLoginTransactionJournalRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "journal-target")
+	contents := []byte(`{"version":1,"server_present":false,"server_url":"","token_present":false,"token":""}` + "\n")
+	if err := os.WriteFile(target, contents, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, loginTransactionFileName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := recoverLoginTransaction(dir); err == nil {
+		t.Fatal("recoverLoginTransaction() followed a journal symlink")
+	}
+}
+
+func TestExplicitLoginTransactionSuccessCleansJournalAndTemps(t *testing.T) {
+	dir := t.TempDir()
+	failure := persistExplicitLogin(dir, commandTestToken, "http://127.0.0.1:44002", nil)
+	if failure != nil {
+		t.Fatalf("persistExplicitLogin() failure code = %q", failure.Code)
+	}
+	assertStoredAuthState(t, dir, "http://127.0.0.1:44002", commandTestToken)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == loginTransactionFileName || strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("transaction artifact remains: %s", entry.Name())
+		}
+	}
+}
+
+func assertStoredAuthState(t *testing.T, dir, wantServer, wantToken string) {
+	t.Helper()
+	server, err := config.LoadStoredServer(dir)
+	if err != nil || server != wantServer {
+		t.Fatalf("stored server mismatch or error: %v", err)
+	}
+	token, err := auth.NewFileStore(dir).Load()
+	if err != nil || token != wantToken {
+		t.Fatal("stored credential mismatch or load error")
+	}
+	if token == commandTestToken && wantToken != commandTestToken {
+		t.Fatal("newly supplied credential remained usable after failure")
 	}
 }
 

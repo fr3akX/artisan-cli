@@ -173,6 +173,33 @@ func SaveServer(configDir, serverURL string) error {
 
 type privateOpener func(string) (*os.File, error)
 
+// LoadStoredServer loads only the persisted server origin, ignoring environment
+// variables and credentials.
+func LoadStoredServer(configDir string) (string, error) {
+	dir, err := resolveConfigDir(configDir)
+	if err != nil {
+		return "", err
+	}
+	return loadStoredServer(dir)
+}
+
+// RemoveServer removes persisted server configuration. It succeeds when absent.
+func RemoveServer(configDir string) error {
+	dir, err := resolveConfigDir(configDir)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, configFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove configuration: %w", err)
+	}
+	return nil
+}
+
+// ResolveDir returns the configuration directory used by persistent stores.
+func ResolveDir(configDir string) (string, error) {
+	return resolveConfigDir(configDir)
+}
+
 func loadStoredServer(configDir string) (string, error) {
 	return loadStoredServerWithOpener(configDir, securefile.OpenPrivate)
 }
