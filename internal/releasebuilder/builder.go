@@ -51,7 +51,10 @@ type Options struct {
 	AfterSourceSnapshot func() error
 	AfterBinarySnapshot func(goos, goarch, path string) error
 	BeforePublish       func() error
+	BeforeNativeRename  func() error
+	AfterNativeRename   func() error
 	AfterPublish        func() error
+	BeforeCleanup       func(stageName string) error
 }
 
 type target struct{ goos, goarch string }
@@ -138,10 +141,14 @@ func Build(options Options) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("create private held staging directory: %w", err)
 	}
-	published := false
 	defer func() {
-		if err := dist.cleanup(stage); err != nil && returnErr == nil && !published {
-			returnErr = fmt.Errorf("remove held staging directory: %w", err)
+		if options.BeforeCleanup != nil {
+			if err := options.BeforeCleanup(stage.name); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("before cleanup: %w", err))
+			}
+		}
+		if err := dist.cleanup(stage); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("identity-safe held staging cleanup: %w", err))
 		}
 	}()
 	publishPath := filepath.Join(stage.path, "payload")
@@ -196,22 +203,21 @@ func Build(options Options) (returnErr error) {
 	if !dist.pathMatches() {
 		return errors.New("requested dist identity changed before publish")
 	}
-	if err := dist.publish(stage, options.Destination); err != nil {
+	if err := dist.publish(stage, options.Destination, options.BeforeNativeRename, options.AfterNativeRename); err != nil {
 		if isAlreadyExists(err) {
 			return fmt.Errorf("final destination appeared before atomic publish: %w", err)
 		}
 		return fmt.Errorf("atomic no-replace publish: %w", err)
 	}
-	published = true
 	if options.AfterPublish != nil {
-		_ = options.AfterPublish()
-	}
-	if !dist.pathMatches() {
-		if rollbackErr := dist.rollback(stage, options.Destination); rollbackErr == nil {
-			published = false
-			return errors.New("requested dist identity changed after publish; publication rolled back")
+		if err := options.AfterPublish(); err != nil {
+			stage.ambiguous = true
+			return fmt.Errorf("after publish: %w", err)
 		}
-		return errors.New("requested dist identity changed after publish; publication status is confined to held original dist")
+	}
+	if !dist.pathMatches() || !dist.publishedMatches(stage, options.Destination) {
+		stage.ambiguous = true
+		return errors.New("publication is visible only in the held original dist or final identity is ambiguous; no rollback or deletion attempted")
 	}
 	// Do not print lexical paths: the held directory is authoritative, while the
 	// requested path can be renamed by another process after the final check.
@@ -468,8 +474,11 @@ func runBounded(timeout time.Duration, maximum int, environment []string, name s
 	if startErr != nil {
 		return output.bytes, nil, startErr
 	}
-	defer cleanup()
 	exitErr := command.Wait()
+	containmentErr := cleanup()
+	if containmentErr != nil {
+		return output.bytes, exitErr, fmt.Errorf("terminate contained process tree: %w", containmentErr)
+	}
 	if contextValue.Err() != nil {
 		return output.bytes, nil, fmt.Errorf("command timed out and was killed: %w", contextValue.Err())
 	}

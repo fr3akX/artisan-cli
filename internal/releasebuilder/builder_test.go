@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,108 @@ func TestBuildBeforePublishRacesFailWithoutOverwriteOrEscape(t *testing.T) {
 	})
 }
 
+func TestBuildRejectsPayloadFinalAndStageIdentitySwaps(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("deterministic rename race fixture is Linux-specific")
+	}
+	findStage := func(t *testing.T, root string) string {
+		t.Helper()
+		matches, err := filepath.Glob(filepath.Join(root, "dist", ".release-build-*"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("stage matches=%v err=%v", matches, err)
+		}
+		return matches[0]
+	}
+	t.Run("payload immediately before native rename", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), BeforeNativeRename: func() error {
+			stage := findStage(t, root)
+			if err := os.Rename(filepath.Join(stage, "payload"), filepath.Join(stage, "payload-held")); err != nil {
+				return err
+			}
+			if err := os.Mkdir(filepath.Join(stage, "payload"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(stage, "payload", "competitor"), []byte("keep"), 0o600)
+		}})
+		if err == nil {
+			t.Fatal("payload identity swap reported success")
+		}
+		stage := findStage(t, root)
+		assertFileContents(t, filepath.Join(stage, "payload", "competitor"), "keep")
+		if _, statErr := os.Lstat(filepath.Join(root, "dist", "release")); !os.IsNotExist(statErr) {
+			t.Fatalf("wrong payload published: %v", statErr)
+		}
+	})
+	t.Run("final immediately after native rename", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), AfterNativeRename: func() error {
+			dist := filepath.Join(root, "dist")
+			if err := os.Rename(filepath.Join(dist, "release"), filepath.Join(dist, "verified-payload")); err != nil {
+				return err
+			}
+			if err := os.Mkdir(filepath.Join(dist, "release"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dist, "release", "competitor"), []byte("keep"), 0o600)
+		}})
+		if err == nil {
+			t.Fatal("final identity swap reported success")
+		}
+		assertFileContents(t, filepath.Join(root, "dist", "release", "competitor"), "keep")
+		if _, statErr := os.Lstat(filepath.Join(root, "dist", "verified-payload", "checksums.txt")); statErr != nil {
+			t.Fatalf("verified payload was deleted: %v", statErr)
+		}
+	})
+	t.Run("requested dist after verified publish", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		external := t.TempDir()
+		sentinel := filepath.Join(external, "sentinel")
+		if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		original := filepath.Join(root, "dist-original")
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), AfterPublish: func() error {
+			if err := os.Rename(filepath.Join(root, "dist"), original); err != nil {
+				return err
+			}
+			return os.Symlink(external, filepath.Join(root, "dist"))
+		}})
+		if err == nil {
+			t.Fatal("post-publish dist swap reported success")
+		}
+		assertFileContents(t, sentinel, "keep")
+		if _, statErr := os.Lstat(filepath.Join(external, "release")); !os.IsNotExist(statErr) {
+			t.Fatalf("publication escaped: %v", statErr)
+		}
+		if _, statErr := os.Lstat(filepath.Join(original, "release", "checksums.txt")); statErr != nil {
+			t.Fatalf("verified payload deleted: %v", statErr)
+		}
+	})
+	t.Run("stage name before cleanup", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		var replacement string
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), BeforeCleanup: func(name string) error {
+			dist := filepath.Join(root, "dist")
+			if err := os.Rename(filepath.Join(dist, name), filepath.Join(dist, name+"-held")); err != nil {
+				return err
+			}
+			replacement = filepath.Join(dist, name)
+			if err := os.Mkdir(replacement, 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(replacement, "competitor"), []byte("keep"), 0o600)
+		}})
+		if err == nil {
+			t.Fatal("stage identity swap reported success")
+		}
+		assertFileContents(t, filepath.Join(replacement, "competitor"), "keep")
+		if _, statErr := os.Lstat(filepath.Join(root, "dist", "release", "checksums.txt")); statErr != nil {
+			t.Fatalf("published payload missing: %v", statErr)
+		}
+	})
+}
+
 func TestInspectBinaryRejectsMislabeledTarget(t *testing.T) {
 	root := repositoryRoot(t)
 	binary := filepath.Join(t.TempDir(), "artisan")
@@ -220,7 +323,7 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 		if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := dist.publish(stage, "release"); err == nil {
+		if err := dist.publish(stage, "release", nil, nil); err == nil {
 			t.Fatal("atomic no-replace publish overwrote competitor")
 		}
 		assertFileContents(t, sentinel, "keep")
@@ -299,7 +402,7 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 		if err := stage.preparePayload(); err != nil {
 			t.Fatal(err)
 		}
-		if err := dist.publish(stage, "release"); err != nil {
+		if err := dist.publish(stage, "release", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Rename(distPath, oldPath); err != nil {
@@ -311,16 +414,11 @@ func TestHeldPublishNeverReplacesCompetitorAndSurvivesDistSwap(t *testing.T) {
 		if dist.pathMatches() {
 			t.Fatal("post-publish swap matched")
 		}
-		if err := dist.rollback(stage, "release"); err != nil {
-			t.Fatal(err)
-		}
 		assertFileContents(t, sentinel, "keep")
 		if _, err := os.Lstat(filepath.Join(external, "release")); !os.IsNotExist(err) {
 			t.Fatalf("post-publish path escaped: %v", err)
 		}
-		if _, err := os.Lstat(filepath.Join(oldPath, "release")); !os.IsNotExist(err) {
-			t.Fatalf("rollback left final: %v", err)
-		}
+		assertFileContents(t, filepath.Join(oldPath, "release", "complete"), "yes")
 		if err := dist.cleanup(stage); err != nil {
 			t.Fatal(err)
 		}
@@ -453,8 +551,25 @@ func TestNativeSmokeIsBoundedAndParsesOneExactEnvelope(t *testing.T) {
 			}
 		})
 	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	body := "sleep 30 >/dev/null 2>&1 & child=$!; echo $child > '" + pidFile + "'; printf '%s\\n' '" + valid + "'"
+	script := writeScript(t, body)
+	if err := runNativeSmoke(script, contractVersion, contractCommit, time.Second); err != nil {
+		t.Fatalf("parent-exit fixture: %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processExists(pid) {
+		t.Fatalf("child %d remained after helper", pid)
+	}
 	marker := filepath.Join(t.TempDir(), "leaked-child")
-	script := writeScript(t, "(sleep 0.2; echo leaked > '"+marker+"') & wait")
+	script = writeScript(t, "(sleep 0.2; echo leaked > '"+marker+"') & wait")
 	if err := runNativeSmoke(script, contractVersion, contractCommit, 50*time.Millisecond); err == nil {
 		t.Fatal("process-tree hang accepted")
 	}
