@@ -2,7 +2,7 @@
 
 `inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
 
-The harness resolves a trusted locally built CLI binary before execution and rejects a symlink in its final path component. Parent-directory symlink resolution and replacement races remain within the trusted local build/workspace premise; the harness is not a sandbox for an attacker-controlled binary. Every command runs from a separate temporary working directory with isolated home, config, state, and temp directories. Each invocation has a context deadline, bounded child-pipe wait, and bounded stdout/stderr capture.
+The harness resolves a trusted locally built CLI binary before execution and rejects a symlink in its final path component. Parent-directory symlink resolution and replacement races remain within the trusted local build/workspace premise; the harness is not a sandbox for an attacker-controlled binary. Every command runs from a separate temporary working directory with isolated home, config, state, and temp directories. Each invocation has a context deadline, bounded child-pipe wait, and bounded stdout/stderr capture. Unix commands run in a new process group that is terminated and checked before return; Windows commands start suspended and are assigned to a kill-on-close Job Object before they resume. This containment completes before deferred token scans begin.
 
 The test logs in through the browser CSRF/session APIs, issues a disposable desktop credential, and passes its one-time token only to the compiled CLI's `auth login --token-stdin`. Captured CLI records never include stdin and are scanned for the raw token before diagnostics. Deferred cleanup attempts logout on every post-issuance failure, then scans every isolated tree and captured record, while credential revocation and Compose teardown remain additional cleanup boundaries.
 
@@ -57,7 +57,7 @@ compose_guard up -d --build
 Poll the fixed loopback readiness URL with a bounded timeout; do not use an unbounded wait, redirects, proxies, or a fixed sleep:
 
 ```bash
-python3 - <<'PY'
+timeout --signal=TERM --kill-after=5s 125s python3 - <<'PY'
 import json, time, urllib.error, urllib.request
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
@@ -78,6 +78,8 @@ while True:
     time.sleep(min(1, max(0, deadline - time.monotonic())))
 PY
 ```
+
+The readiness loop has an internal monotonic 120-second deadline. Its outer workflow/local guard permits 125 seconds before sending `TERM`, then up to the five-second `--kill-after` interval; it is therefore not a strict 120-second process ceiling. On workflow failure, Compose `logs --tail 200` retains up to 200 lines **per container**, while the following `head -c 65536` caps the aggregate emitted log stream at 65,536 bytes.
 
 Then bootstrap and run the compiled CLI:
 

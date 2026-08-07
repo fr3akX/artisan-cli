@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -415,6 +417,48 @@ func TestCLIRunnerUsesIsolatedCWDAndBoundsChildPipeWait(t *testing.T) {
 	}
 }
 
+func TestWorkflowActionPinGuardMutations(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "integration.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	insert := func(snippet string) string {
+		t.Helper()
+		return strings.Replace(workflow, "    steps:\n", "    steps:\n"+snippet, 1)
+	}
+	pinned := "      - uses: actions/cache@ABCDEF0123456789abcdef0123456789ABCDEF01 # audited\n"
+	if err := validateWorkflowActionPins(insert(pinned), 4); err != nil {
+		t.Fatalf("nameless pinned action rejected: %v", err)
+	}
+	mutations := []struct {
+		name     string
+		snippet  string
+		wantUses int
+	}{
+		{name: "nameless branch", snippet: "      - uses: actions/cache@main\n", wantUses: 4},
+		{name: "nameless tag", snippet: "      - uses: actions/cache@v4\n", wantUses: 4},
+		{name: "named unpinned", snippet: "      - name: bypass\n        uses: actions/cache@main\n", wantUses: 4},
+		{name: "missing at", snippet: "      - uses: actions/cache\n", wantUses: 4},
+		{name: "malformed at", snippet: "      - uses: actions/cache@@ABCDEF0123456789abcdef0123456789ABCDEF01\n", wantUses: 4},
+		{name: "expression", snippet: "      - uses: ${{ github.event.action }}\n", wantUses: 4},
+		{name: "local action", snippet: "      - uses: ./local-action\n", wantUses: 4},
+		{name: "docker action", snippet: "      - uses: docker://alpine:3\n", wantUses: 4},
+		{name: "exact count", snippet: pinned, wantUses: 3},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := validateWorkflowActionPins(insert(mutation.snippet), mutation.wantUses); err == nil {
+				t.Fatal("workflow action mutation bypassed the full-SHA guard")
+			}
+		})
+	}
+	insideRunBlock := insert("      - name: text is not an action\n        run: |\n          uses: actions/cache@main\n")
+	if err := validateWorkflowActionPins(insideRunBlock, 3); err != nil {
+		t.Fatalf("uses text inside a run block was treated as an action: %v", err)
+	}
+}
+
 func TestIntegrationWorkflowContract(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "integration.yml"))
 	if err != nil {
@@ -433,21 +477,8 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 	if strings.Contains(text, "workflow_dispatch") || strings.Contains(text, "docker compose") || strings.Contains(text, "docker-compose") {
 		t.Error("workflow must not expose dispatch targets or bypass the guarded Compose wrapper")
 	}
-	usesCount := 0
-	pinnedUse := regexp.MustCompile(`^[^@[:space:]]+@[0-9a-f]{40}$`)
-	for lineNumber, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "uses:") {
-			continue
-		}
-		usesCount++
-		target := strings.TrimSpace(strings.TrimPrefix(trimmed, "uses:"))
-		if !pinnedUse.MatchString(target) {
-			t.Errorf("workflow uses line %d is not exactly action@full-SHA: %q", lineNumber+1, line)
-		}
-	}
-	if usesCount != 3 {
-		t.Fatalf("workflow has %d action uses, want exactly checkout twice and setup-go", usesCount)
+	if err := validateWorkflowActionPins(text, 3); err != nil {
+		t.Fatal(err)
 	}
 	wrapperCount := 0
 	for lineNumber, line := range strings.Split(text, "\n") {
@@ -478,6 +509,54 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 			t.Errorf("failure log step missing %q", required)
 		}
 	}
+}
+
+func validateWorkflowActionPins(workflow string, expectedCount int) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
+		return errors.New("integration workflow was not valid YAML")
+	}
+	pinnedUse := regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9A-Fa-f]{40}$`)
+	usesCount := 0
+	visited := make(map[*yaml.Node]bool)
+	var inspect func(*yaml.Node) error
+	inspect = func(node *yaml.Node) error {
+		if node == nil || visited[node] {
+			return nil
+		}
+		visited[node] = true
+		switch node.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, child := range node.Content {
+				if err := inspect(child); err != nil {
+					return err
+				}
+			}
+		case yaml.MappingNode:
+			for index := 0; index+1 < len(node.Content); index += 2 {
+				key, value := node.Content[index], node.Content[index+1]
+				if key.Kind == yaml.ScalarNode && key.Value == "uses" {
+					usesCount++
+					if value.Kind != yaml.ScalarNode || value.Style != 0 || !pinnedUse.MatchString(value.Value) {
+						return fmt.Errorf("workflow uses line %d is not exactly owner/repo@full-SHA", value.Line)
+					}
+				}
+				if err := inspect(value); err != nil {
+					return err
+				}
+			}
+		case yaml.AliasNode:
+			return inspect(node.Alias)
+		}
+		return nil
+	}
+	if err := inspect(&document); err != nil {
+		return err
+	}
+	if usesCount != expectedCount {
+		return fmt.Errorf("workflow has %d action uses, want exactly %d", usesCount, expectedCount)
+	}
+	return nil
 }
 
 func workflowStep(t *testing.T, workflow, name string) string {
@@ -876,7 +955,32 @@ func (runner *cliRunner) execute(stdin string, commandArgs ...string) commandExe
 	stderr := boundedCapture{limit: maxCLIOutputBytes}
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	tree, treeErr := prepareProcessTree(command)
+	var err error
+	var timedOut bool
+	if treeErr != nil {
+		err = errors.New("CLI process-tree containment setup failed")
+	} else {
+		startErr := command.Start()
+		if startErr != nil {
+			err = startErr
+		} else {
+			containErr := tree.afterStart(command.Process)
+			if containErr != nil {
+				_ = command.Process.Kill()
+			}
+			waitErr := command.Wait()
+			timedOut = waitErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+			if containErr != nil {
+				err = errors.New("CLI process-tree containment failed")
+			} else {
+				err = waitErr
+			}
+		}
+		if closeErr := tree.close(waitDelay); closeErr != nil {
+			err = errors.New("CLI process-tree cleanup failed")
+		}
+	}
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
@@ -887,7 +991,7 @@ func (runner *cliRunner) execute(stdin string, commandArgs ...string) commandExe
 	}
 	record := newCommandRecord(args, exitCode, stdout.Bytes(), stderr.Bytes())
 	runner.records = append(runner.records, record)
-	return commandExecution{record: record, err: err, timedOut: ctx.Err() != nil, overflow: stdout.overflow || stderr.overflow}
+	return commandExecution{record: record, err: err, timedOut: timedOut, overflow: stdout.overflow || stderr.overflow}
 }
 
 func (runner *cliRunner) runJSON(t *testing.T, stdin string, target any, commandArgs ...string) {
