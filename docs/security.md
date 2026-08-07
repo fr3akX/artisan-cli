@@ -48,8 +48,10 @@ logs that contain surrounding sensitive data.
 
 Configuration and credential reads require the exact opened object to be a
 safe private regular file and reject final symlinks/reparse points. Atomic
-writes use a private temporary file and durable replacement. Unsafe ownership,
-permissions, link, directory, or replacement conditions fail closed.
+writes use a private temporary file and durable replacement. Reads check file
+type and platform-appropriate private mode/ACL conditions; they do not perform
+a Unix UID ownership check. Unsafe permissions, link, directory, or replacement
+conditions fail closed.
 
 Image uploads snapshot regular-file identity, size, timestamps, and a SHA-256
 fingerprint, then recheck while reading; replacement, retargeting, or content

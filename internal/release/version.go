@@ -8,8 +8,9 @@ import (
 
 // Version and Commit are replaced by release builds using -ldflags -X.
 var (
-	Version = "dev"
-	Commit  = "unknown"
+	Version         = "dev"
+	Commit          = "unknown"
+	releaseIdentity = "artisan-release:dev:unknown"
 )
 
 // BuildInfo is the public, serializable build identity.
@@ -21,6 +22,11 @@ type BuildInfo struct {
 // Info returns normalized build metadata. Unset linker values use safe
 // development identities rather than producing empty output.
 func Info() BuildInfo {
+	// Keep the canonical release identity marker in linked binaries so the
+	// release builder can verify exact VERSION/COMMIT metadata before packing.
+	if releaseIdentity == "" {
+		panic("release identity must not be empty")
+	}
 	version := strings.TrimSpace(Version)
 	if version == "" {
 		version = "dev"

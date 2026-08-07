@@ -16,10 +16,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/fr3akX/artisan-cli/internal/releasebuilder"
 	"gopkg.in/yaml.v3"
 )
 
@@ -73,15 +74,20 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutation := range map[string][2]string{
-		"native OS":        {"windows-2022", "windows-missing"},
-		"race":             {"go test ./... -race", "go test ./..."},
-		"build":            {"go build -trimpath", "echo no-build"},
-		"smoke":            {"--json version", "version-disabled"},
-		"permissions":      {"contents: read", "contents: write"},
-		"generation drift": {"git diff --exit-code", "git status --short"},
+		"native OS":          {"windows-2022", "windows-missing"},
+		"race flags":         {"run: go test ./... -race", "run: go test -race"},
+		"build command":      {"go build -trimpath", "echo no-build"},
+		"smoke command":      {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
+		"permissions":        {"contents: read", "contents: write"},
+		"generation drift":   {"git diff --exit-code", "git status --short"},
+		"command in comment": {"run: go vet ./...", "run: echo vet-disabled\n      # go vet ./..."},
+		"wrong shell":        {"name: Check formatting\n        shell: bash", "name: Check formatting\n        shell: sh"},
 	} {
 		t.Run("CI missing "+name, func(t *testing.T) {
 			changed := bytes.Replace(ci, []byte(mutation[0]), []byte(mutation[1]), 1)
+			if bytes.Equal(changed, ci) {
+				t.Fatal("test mutation did not apply")
+			}
 			if err := validateCIWorkflow(changed); err == nil {
 				t.Fatal("CI contract drift was accepted")
 			}
@@ -93,13 +99,19 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutation := range map[string][2]string{
-		"tag filter":  {"- 'v*'", "- '*'"},
-		"builder":     {"scripts/build-release.sh", "echo no-builder"},
-		"attestation": {"actions/attest-build-provenance@", "actions/upload-artifact@"},
-		"publish":     {"softprops/action-gh-release@", "actions/upload-artifact@"},
+		"tag filter":        {"- 'v*'", "- '*'"},
+		"builder":           {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, "run: echo no-builder"},
+		"builder in text":   {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, `run: echo 'scripts/build-release.sh "$VERSION" "$COMMIT" release'`},
+		"wrong shell":       {"name: Build and verify static release archives\n        shell: bash", "name: Build and verify static release archives\n        shell: sh"},
+		"attestation":       {"actions/attest-build-provenance@", "actions/upload-artifact@"},
+		"attestation input": {"subject-path: 'dist/release/*'", "subject-path: 'dist/release/*.zip'"},
+		"publish":           {"softprops/action-gh-release@", "actions/upload-artifact@"},
 	} {
 		t.Run("release "+name, func(t *testing.T) {
 			changed := bytes.Replace(release, []byte(mutation[0]), []byte(mutation[1]), 1)
+			if bytes.Equal(changed, release) {
+				t.Fatal("test mutation did not apply")
+			}
 			if err := validateReleaseWorkflow(changed); err == nil {
 				t.Fatal("release contract drift was accepted")
 			}
@@ -107,46 +119,61 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 	}
 }
 
-func TestReleaseScriptsStaticContract(t *testing.T) {
+func TestReleaseScriptsAreExactThinWrappers(t *testing.T) {
 	root := repositoryRoot(t)
-	for _, path := range []string{"scripts/build-release.sh", "scripts/build-release.ps1"} {
+	expected := map[string]string{
+		"scripts/build-release.sh":  "#!/usr/bin/env bash\nset -euo pipefail\n\n[[ $# -ge 2 && $# -le 3 ]] || {\n  echo \"Usage: scripts/build-release.sh VERSION COMMIT [DESTINATION_LEAF]\" >&2\n  exit 2\n}\n\nROOT=$(CDPATH= cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")/..\" && pwd -P)\nGO_BIN=${GO:-go}\ncd \"$ROOT\"\nexec \"$GO_BIN\" run ./internal/releasebuilder/cmd \"$1\" \"$2\" \"${3:-release}\"\n",
+		"scripts/build-release.ps1": "[CmdletBinding()]\nparam(\n    [Parameter(Mandatory = $true)][string]$Version,\n    [Parameter(Mandatory = $true)][string]$Commit,\n    [string]$Destination = \"release\"\n)\n\n$ErrorActionPreference = \"Stop\"\nSet-StrictMode -Version Latest\n$root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot \"..\"))\n$go = if ($env:GO) { $env:GO } else { \"go\" }\nSet-Location $root\n& $go run ./internal/releasebuilder/cmd $Version $Commit $Destination\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+	}
+	for path, want := range expected {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(contents)
-		for _, required := range []string{
-			"linux", "darwin", "windows", "amd64", "arm64", "CGO_ENABLED", "-trimpath",
-			"github.com/fr3akX/artisan-cli/internal/release.Version", "github.com/fr3akX/artisan-cli/internal/release.Commit",
-			"LICENSE", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md", "checksums.txt",
-		} {
-			if !strings.Contains(text, required) {
-				t.Errorf("%s missing %q", path, required)
-			}
+		if strings.ReplaceAll(string(contents), "\r\n", "\n") != want {
+			t.Errorf("%s is not the reviewed thin wrapper", path)
 		}
+	}
+}
+
+func TestPowerShellWrapperWhenAvailable(t *testing.T) {
+	powerShell, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("pwsh is unavailable")
+	}
+	root := repositoryRoot(t)
+	leaf := "contract-powershell"
+	output := filepath.Join(root, "dist", leaf)
+	_ = os.RemoveAll(output)
+	t.Cleanup(func() { _ = os.RemoveAll(output) })
+	command := exec.Command(powerShell, "-NoProfile", "-File", "scripts/build-release.ps1", "-Version", testVersion, "-Commit", testCommit, "-Destination", leaf)
+	command.Dir = root
+	command.Env = append(os.Environ(), "GO="+goCommand(t))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("PowerShell wrapper failed: %v\n%s", err, output)
 	}
 }
 
 func TestReleaseArchives(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("shell release builder is validated on Unix; Windows runs the PowerShell builder in CI")
+		t.Skip("archive implementation is exercised through the shared Go builder; wrapper execution is platform-specific")
 	}
-	for _, tool := range []string{"bash", "tar", "gzip", "zip", "sha256sum", "file", "ldd"} {
+	for _, tool := range []string{"bash", "tar"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s is unavailable: %v", tool, err)
 		}
 	}
 	root := repositoryRoot(t)
-	outputRelative := filepath.ToSlash(filepath.Join("dist", "contract-test-"+strings.ReplaceAll(t.Name(), "/", "-")))
-	output := filepath.Join(root, filepath.FromSlash(outputRelative))
-	t.Cleanup(func() { _ = os.RemoveAll(output) })
-	command := exec.Command("bash", "scripts/build-release.sh", testVersion, testCommit, outputRelative)
-	command.Dir = root
-	command.Env = append(os.Environ(), "GO="+goCommand(t))
-	combined, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("release builder failed: %v\n%s", err, combined)
+	leafA := "contract-test-a"
+	leafB := "contract-test-b"
+	output := filepath.Join(root, "dist", leafA)
+	outputB := filepath.Join(root, "dist", leafB)
+	for _, path := range []string{output, outputB} {
+		_ = os.RemoveAll(path)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(output); _ = os.RemoveAll(outputB) })
+	runReleaseBuilder(t, root, leafA, "077")
+	runReleaseBuilder(t, root, leafB, "022")
 
 	wantArchives := make([]string, 0, 6)
 	for _, target := range []struct{ goos, goarch, extension string }{
@@ -156,19 +183,47 @@ func TestReleaseArchives(t *testing.T) {
 	} {
 		name := fmt.Sprintf("artisan-%s-%s-%s%s", testVersion, target.goos, target.goarch, target.extension)
 		wantArchives = append(wantArchives, name)
-		entries := archiveEntries(t, filepath.Join(output, name))
+		archivePath := filepath.Join(output, name)
+		entries := archiveEntries(t, archivePath)
 		top := strings.TrimSuffix(name, target.extension)
 		binary := "artisan"
 		if target.goos == "windows" {
 			binary += ".exe"
 		}
 		wantEntries := []string{
-			top + "/", top + "/" + binary, top + "/LICENSE", top + "/THIRD_PARTY_NOTICES.txt",
+			top + "/", top + "/LICENSE", top + "/THIRD_PARTY_NOTICES.txt", top + "/" + binary,
 			top + "/skills/", top + "/skills/artisan-inventory/", top + "/skills/artisan-inventory/SKILL.md",
 		}
-		assertSameStrings(t, entries, wantEntries)
+		if strings.Join(entries, "\n") != strings.Join(wantEntries, "\n") {
+			t.Errorf("archive order/content = %v, want %v", entries, wantEntries)
+		}
+		if err := releasebuilder.InspectArchive(archivePath, testVersion, target.goos, target.goarch); err != nil {
+			t.Fatal(err)
+		}
+		first, err := os.ReadFile(archivePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := os.ReadFile(filepath.Join(outputB, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(first, second) {
+			t.Errorf("archive differs across umasks: %s", name)
+		}
 	}
 	assertChecksums(t, output, wantArchives)
+	manifestA, err := os.ReadFile(filepath.Join(output, "checksums.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestB, err := os.ReadFile(filepath.Join(outputB, "checksums.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(manifestA, manifestB) {
+		t.Error("checksum manifests differ across umasks")
+	}
 
 	native := filepath.Join(output, fmt.Sprintf("artisan-%s-%s-%s.tar.gz", testVersion, runtime.GOOS, runtime.GOARCH))
 	if runtime.GOOS == "linux" {
@@ -193,8 +248,8 @@ func TestDocumentationContract(t *testing.T) {
 	root := repositoryRoot(t)
 	required := map[string][]string{
 		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "skills/artisan-inventory/SKILL.md"},
-		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "skill install", "version"},
-		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency"},
+		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres"},
+		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1"},
 		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token"},
 		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens"},
 	}
@@ -215,6 +270,16 @@ func TestDocumentationContract(t *testing.T) {
 		if err == nil && !strings.Contains(string(contents), "4c0136fe98f6728f4bb94e416c5abe570e7f4831") {
 			t.Errorf("%s missing minimum compatible server ref", path)
 		}
+	}
+}
+
+func runReleaseBuilder(t *testing.T, root, leaf, umask string) {
+	t.Helper()
+	command := exec.Command("bash", "-c", `umask "$1"; exec bash scripts/build-release.sh "$2" "$3" "$4"`, "builder", umask, testVersion, testCommit, leaf)
+	command.Dir = root
+	command.Env = append(os.Environ(), "GO="+goCommand(t))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("release builder (%s) failed: %v\n%s", umask, err, output)
 	}
 }
 
@@ -288,11 +353,11 @@ func validateCIWorkflow(contents []byte) error {
 	if err != nil {
 		return err
 	}
-	qualityRuns, qualityUses, err := jobSteps(quality)
+	_, qualityUses, err := jobSteps(quality)
 	if err != nil {
 		return err
 	}
-	nativeRuns, nativeUses, err := jobSteps(native)
+	_, nativeUses, err := jobSteps(native)
 	if err != nil {
 		return err
 	}
@@ -305,13 +370,23 @@ func validateCIWorkflow(contents []byte) error {
 			return fmt.Errorf("CI action is not pinned: %s", use)
 		}
 	}
-	for _, required := range []string{"gofmt", "go vet ./...", "go test ./...", "go test ./... -race", "go generate ./internal/skill", "git diff --exit-code"} {
-		if !containsRun(qualityRuns, required) {
-			return fmt.Errorf("CI quality job missing %q", required)
+	for _, expected := range []struct{ name, shell, run string }{
+		{"Check formatting", "bash", `test -z "$(gofmt -l $(find cmd internal integration -name '*.go' -type f))"`},
+		{"Vet", "", "go vet ./..."},
+		{"Test", "", "go test ./..."},
+		{"Race test", "", "go test ./... -race"},
+		{"Check generated skill", "bash", "go generate ./internal/skill\ngit diff --exit-code"},
+	} {
+		if err := requireRunStep(quality, expected.name, expected.shell, expected.run); err != nil {
+			return err
 		}
 	}
-	if !containsRun(nativeRuns, "go build -trimpath") || !containsRun(nativeRuns, "--json version") {
-		return errors.New("native job must build and smoke the executable")
+	if err := requireRunStep(native, "Build and smoke native executable", "bash", `set -euo pipefail
+suffix=
+if [[ "${{ runner.os }}" == "Windows" ]]; then suffix=.exe; fi
+go build -trimpath -o "artisan-ci${suffix}" ./cmd/artisan
+"./artisan-ci${suffix}" --json version`); err != nil {
+		return err
 	}
 	environment, err := mappingLookup(native, "env")
 	if err != nil || !mappingEquals(environment, map[string]string{"CGO_ENABLED": "0"}) {
@@ -381,25 +456,30 @@ func validateReleaseWorkflow(contents []byte) error {
 	if err != nil || !mappingEquals(permissions, map[string]string{"contents": "write", "id-token": "write", "attestations": "write"}) {
 		return errors.New("release job permissions drifted")
 	}
-	runs, uses, err := jobSteps(release)
+	_, uses, err := jobSteps(release)
 	if err != nil {
 		return err
 	}
-	for _, required := range []string{"go test ./...", "go generate ./internal/skill", "git diff --exit-code", "scripts/build-release.sh", "checksums.txt"} {
-		if !containsRun(runs, required) {
-			return fmt.Errorf("release job missing %q", required)
+	for _, expected := range []struct{ name, shell, run string }{
+		{"Test and check generated skill", "bash", "set -euo pipefail\ngo test ./...\ngo generate ./internal/skill\ngit diff --exit-code"},
+		{"Validate release identity", "bash", "set -euo pipefail\n[[ \"$VERSION\" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]]\n[[ \"$COMMIT\" =~ ^[0-9a-fA-F]{40}$ ]]"},
+		{"Build and verify static release archives", "bash", `scripts/build-release.sh "$VERSION" "$COMMIT" release`},
+		{"Verify release asset set", "bash", "set -euo pipefail\ntest \"$(find dist/release -maxdepth 1 -type f | wc -l)\" -eq 7\ntest \"$(find dist/release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' \\) | wc -l)\" -eq 6\n(cd dist/release && sha256sum -c checksums.txt)"},
+	} {
+		if err := requireRunStep(release, expected.name, expected.shell, expected.run); err != nil {
+			return err
 		}
 	}
-	attestation, publisher := false, false
 	for _, use := range uses {
 		if !fullActionSHA.MatchString(use) {
 			return fmt.Errorf("release action is not pinned: %s", use)
 		}
-		attestation = attestation || strings.HasPrefix(use, "actions/attest-build-provenance@")
-		publisher = publisher || strings.HasPrefix(use, "softprops/action-gh-release@")
 	}
-	if !attestation || !publisher {
-		return errors.New("release provenance or publication action is missing")
+	if err := requireUsesStep(release, "Attest archives and checksums", "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", map[string]string{"subject-path": "dist/release/*"}); err != nil {
+		return err
+	}
+	if err := requireUsesStep(release, "Publish GitHub release", "softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8", map[string]string{"fail_on_unmatched_files": "true", "files": "dist/release/*.tar.gz\ndist/release/*.zip\ndist/release/checksums.txt\n"}); err != nil {
+		return err
 	}
 	if !workflowHasGo123(document) {
 		return errors.New("release must use Go 1.23.x")
@@ -460,13 +540,54 @@ func jobSteps(job *yaml.Node) (runs, uses []string, err error) {
 	return runs, uses, nil
 }
 
-func containsRun(runs []string, required string) bool {
-	for _, run := range runs {
-		if strings.Contains(run, required) {
-			return true
-		}
+func requireUsesStep(job *yaml.Node, name, use string, with map[string]string) error {
+	steps, err := mappingLookup(job, "steps")
+	if err != nil || steps.Kind != yaml.SequenceNode {
+		return errors.New("job steps are missing")
 	}
-	return false
+	for _, step := range steps.Content {
+		stepName, lookupErr := mappingLookup(step, "name")
+		if lookupErr != nil || stepName.Value != name {
+			continue
+		}
+		actualUse, lookupErr := mappingLookup(step, "uses")
+		if lookupErr != nil || actualUse.Value != use {
+			return fmt.Errorf("step %q action drifted", name)
+		}
+		actualWith, lookupErr := mappingLookup(step, "with")
+		if lookupErr != nil || !mappingEquals(actualWith, with) {
+			return fmt.Errorf("step %q inputs drifted", name)
+		}
+		return nil
+	}
+	return fmt.Errorf("action step %q is missing", name)
+}
+
+func requireRunStep(job *yaml.Node, name, shell, run string) error {
+	steps, err := mappingLookup(job, "steps")
+	if err != nil || steps.Kind != yaml.SequenceNode {
+		return errors.New("job steps are missing")
+	}
+	for _, step := range steps.Content {
+		stepName, lookupErr := mappingLookup(step, "name")
+		if lookupErr != nil || stepName.Value != name {
+			continue
+		}
+		actualRun, lookupErr := mappingLookup(step, "run")
+		if lookupErr != nil {
+			return fmt.Errorf("step %q has no run command", name)
+		}
+		actualShell := ""
+		if shellNode, shellErr := mappingLookup(step, "shell"); shellErr == nil {
+			actualShell = shellNode.Value
+		}
+		normalize := func(value string) string { return strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n")) }
+		if actualShell != shell || normalize(actualRun.Value) != normalize(run) {
+			return fmt.Errorf("step %q command/shell drifted", name)
+		}
+		return nil
+	}
+	return fmt.Errorf("run step %q is missing", name)
 }
 
 func workflowHasWritePermission(document *yaml.Node) bool {
@@ -525,6 +646,16 @@ func walkYAML(node *yaml.Node, visit func(*yaml.Node) error) error {
 
 func archiveEntries(t *testing.T, path string) []string {
 	t.Helper()
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	modeFor := func(name string) os.FileMode {
+		if strings.HasSuffix(name, "/") {
+			return 0o755
+		}
+		if filepath.Base(name) == "artisan" || filepath.Base(name) == "artisan.exe" {
+			return 0o755
+		}
+		return 0o644
+	}
 	if strings.HasSuffix(path, ".zip") {
 		reader, err := zip.OpenReader(path)
 		if err != nil {
@@ -533,8 +664,12 @@ func archiveEntries(t *testing.T, path string) []string {
 		defer reader.Close()
 		entries := make([]string, 0, len(reader.File))
 		for _, file := range reader.File {
-			if file.FileInfo().Mode()&os.ModeSymlink != 0 || strings.HasPrefix(file.Name, "/") || strings.Contains(file.Name, "../") {
+			mode := file.Mode()
+			if mode&os.ModeSymlink != 0 || strings.HasPrefix(file.Name, "/") || strings.Contains(file.Name, "../") {
 				t.Fatalf("unsafe zip entry %q", file.Name)
+			}
+			if mode.Perm() != modeFor(file.Name) || mode.IsDir() != strings.HasSuffix(file.Name, "/") || !file.Modified.Equal(epoch) {
+				t.Fatalf("noncanonical zip metadata for %q: mode=%v time=%v", file.Name, mode, file.Modified)
 			}
 			entries = append(entries, file.Name)
 		}
@@ -550,6 +685,9 @@ func archiveEntries(t *testing.T, path string) []string {
 		t.Fatal(err)
 	}
 	defer compressed.Close()
+	if !compressed.Header.ModTime.Equal(epoch) || compressed.Header.Name != "" || compressed.Header.Comment != "" || compressed.Header.OS != 255 {
+		t.Fatal("noncanonical gzip header")
+	}
 	reader := tar.NewReader(compressed)
 	var entries []string
 	for {
@@ -560,8 +698,16 @@ func archiveEntries(t *testing.T, path string) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink || strings.HasPrefix(header.Name, "/") || strings.Contains(header.Name, "../") {
+		isDirectory := strings.HasSuffix(header.Name, "/")
+		wantType := byte(tar.TypeReg)
+		if isDirectory {
+			wantType = tar.TypeDir
+		}
+		if header.Typeflag != wantType || header.Linkname != "" || strings.HasPrefix(header.Name, "/") || strings.Contains(header.Name, "../") {
 			t.Fatalf("unsafe tar entry %q", header.Name)
+		}
+		if os.FileMode(header.Mode) != modeFor(header.Name) || !header.ModTime.Equal(epoch) || header.Uid != 0 || header.Gid != 0 || header.Uname != "" || header.Gname != "" {
+			t.Fatalf("noncanonical tar metadata for %q", header.Name)
 		}
 		entries = append(entries, header.Name)
 	}
@@ -599,15 +745,6 @@ func assertChecksums(t *testing.T, directory string, archives []string) {
 		if got[archive] != hex.EncodeToString(digest[:]) {
 			t.Errorf("checksum mismatch for %s", archive)
 		}
-	}
-}
-
-func assertSameStrings(t *testing.T, got, want []string) {
-	t.Helper()
-	sort.Strings(got)
-	sort.Strings(want)
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("archive entries:\n got %q\nwant %q", got, want)
 	}
 }
 

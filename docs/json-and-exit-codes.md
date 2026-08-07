@@ -76,8 +76,8 @@ and relevant ledger/reservation/conflict data before retrying.
 All stock quantities are signed or unsigned **integer grams** as specified by
 the individual command. Do not pass decimals, kilograms, unit suffixes, or
 floating-point conversions. Reservation create requires positive planned
-grams; finalize permits nonnegative actual grams. Manual adjustment requires a
-nonzero signed integer.
+grams; supplied finalize actual grams must be at least 1. Manual adjustment
+requires a nonzero signed integer.
 
 A reservation operation can return a conflict while also returning authoritative
 balance fields. Conflict resolution records review state only: neither the CLI

@@ -46,7 +46,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
-        run: scripts/build-release.sh "$VERSION" "$COMMIT" dist/release
+        run: scripts/build-release.sh "$VERSION" "$COMMIT" release
       - name: Verify release asset set
         shell: bash
         run: |

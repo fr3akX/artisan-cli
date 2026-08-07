@@ -103,8 +103,32 @@ create/image syntax.
 Update accepts the same lot field flags (not opening/image flags), repeatable
 `--clear FIELD`, `--from-json FILE|-`, and `--idempotency-key KEY`. At least one
 field must change. Use archive/restore rather than setting `state`. Clearable
-fields are origin, producer, supplier, external reference, received date, crop
-year, varietals, SCA score, processing method/detail, altitudes, and notes.
+fields accept exactly these `--clear` tokens (repeat the flag for multiple
+fields):
+
+```text
+origin
+producer
+supplier
+notes
+varietals
+external-reference
+external_reference
+received-date
+received_date
+crop-year
+crop_year
+sca-score
+sca_score
+processing-method
+processing_method
+processing-detail
+processing_detail
+altitude-min-metres
+altitude_min_metres
+altitude-max-metres
+altitude_max_metres
+```
 
 ## Manual adjustment
 
@@ -157,7 +181,7 @@ artisan [GLOBAL FLAGS] inventory reservation release CLIENT_RESERVATION_UUID
 ```
 
 Create requires every listed reservation field. Planned grams must be positive;
-actual grams, when present, must be nonnegative. Timestamps use canonical UTC
+actual grams, when present, must be at least 1. Timestamps use canonical UTC
 form with six fractional digits, for example `2026-08-07T12:34:56.000000Z`.
 
 ## Conflicts
