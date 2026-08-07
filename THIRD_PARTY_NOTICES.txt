@@ -1,0 +1,1 @@
+Artisan CLI currently includes no third-party software dependencies.

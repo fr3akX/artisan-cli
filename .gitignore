@@ -3,6 +3,7 @@
 /artisan.exe
 *.test
 *.out
+*.prof
 /coverage/
 /dist/
 
