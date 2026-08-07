@@ -68,7 +68,11 @@ func NewClient(serverURL, token string, timeout time.Duration) (*Client, error) 
 
 // Do executes an API request, applying bounded retries only to safe reads or
 // replayable idempotent mutations. It returns nil on success.
-func (c *Client) Do(ctx context.Context, request Request, destination any) *output.Error {
+func (c *Client) Do(ctx context.Context, request Request, destination any) (failure *output.Error) {
+	defer func() {
+		failure = c.failureWithoutSecrets(failure)
+	}()
+
 	if ctx == nil {
 		return localFailure("invalid_request", "Request context is required")
 	}
@@ -122,36 +126,66 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) *outp
 			return networkFailure()
 		}
 
+		status := response.StatusCode
+		if status >= 300 && status < 400 {
+			_ = response.Body.Close()
+			return redirectRefused(status)
+		}
+
 		responseBody, oversized, readErr := readBoundedResponse(response.Body)
 		if readErr != nil {
+			isExpectedClientError := status >= 400 && status < 500
+			isNonTransientServerError := status >= 500 && status < 600 && !isTransientStatus(status)
+			if isExpectedClientError || isNonTransientServerError {
+				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			}
 			if canRetry && attempt < maxAttempts-1 && ctx.Err() == nil {
 				if err := waitForRetry(ctx, attempt); err == nil {
 					continue
 				}
 			}
+			if isTransientStatus(status) {
+				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			}
 			return networkFailure()
 		}
 		if oversized {
-			return invalidServerResponse(response.StatusCode)
+			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 		}
-		if response.StatusCode >= 300 && response.StatusCode < 400 {
-			return redirectRefused(response.StatusCode)
-		}
-		if isTransientStatus(response.StatusCode) && canRetry && attempt < maxAttempts-1 {
+		if isTransientStatus(status) && canRetry && attempt < maxAttempts-1 {
 			if err := waitForRetry(ctx, attempt); err != nil {
 				return networkFailure()
 			}
 			continue
 		}
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			return decodeSuccess(response.StatusCode, responseBody, destination)
+		if status >= 200 && status < 300 {
+			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
-		if response.StatusCode >= 400 && response.StatusCode < 600 {
-			return decodeAPIError(response.StatusCode, responseBody)
+		if status >= 400 && status < 600 {
+			return decodeAPIError(status, responseBody, c.token, c.serverURL.String())
 		}
-		return invalidServerResponse(response.StatusCode)
+		return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 	}
 	return networkFailure()
+}
+
+func (c *Client) failureWithoutSecrets(failure *output.Error) *output.Error {
+	if failure == nil {
+		return nil
+	}
+	forbiddenValues := []string{c.token, c.serverURL.String()}
+	if !containsAny(failure.Code, forbiddenValues) && !containsAny(failure.Message, forbiddenValues) {
+		return failure
+	}
+
+	sanitized := *failure
+	if containsAny(sanitized.Code, forbiddenValues) {
+		sanitized.Code = firstSafeGeneric([]string{"request_failed", "remote_error", "failure", "x"}, forbiddenValues)
+	}
+	if containsAny(sanitized.Message, forbiddenValues) {
+		sanitized.Message = firstSafeGeneric([]string{"Request failed", "Remote error", "Failure", "x"}, forbiddenValues)
+	}
+	return &sanitized
 }
 
 func (c *Client) endpointURL(path string, query url.Values) (string, error) {
@@ -159,7 +193,7 @@ func (c *Client) endpointURL(path string, query url.Values) (string, error) {
 		return "", errors.New("invalid path")
 	}
 	parsedPath, err := url.Parse(path)
-	if err != nil || parsedPath.IsAbs() || parsedPath.Host != "" || parsedPath.User != nil || parsedPath.RawQuery != "" || parsedPath.Fragment != "" {
+	if err != nil || parsedPath.IsAbs() || parsedPath.Host != "" || parsedPath.User != nil || parsedPath.RawQuery != "" || parsedPath.ForceQuery || strings.Contains(path, "#") {
 		return "", errors.New("invalid path")
 	}
 	endpoint := *c.serverURL
@@ -202,9 +236,9 @@ func readBoundedResponse(body io.ReadCloser) ([]byte, bool, error) {
 	return contents, false, nil
 }
 
-func decodeSuccess(status int, body []byte, destination any) *output.Error {
+func decodeSuccess(method string, status int, body []byte, destination any) *output.Error {
 	if len(strings.TrimSpace(string(body))) == 0 {
-		if status == http.StatusNoContent || status == http.StatusResetContent {
+		if method == http.MethodHead || status == http.StatusNoContent || status == http.StatusResetContent {
 			return nil
 		}
 		return invalidServerResponse(status)

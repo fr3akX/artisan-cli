@@ -33,10 +33,10 @@ type apiErrorBody struct {
 	Details json.RawMessage `json:"details"`
 }
 
-func decodeAPIError(status int, body []byte) *output.Error {
+func decodeAPIError(status int, body []byte, forbiddenValues ...string) *output.Error {
 	var envelope errorEnvelope
-	if err := decodeOneJSON(body, &envelope); err != nil || envelope.Error == nil || !validAPIError(envelope.Error) {
-		return invalidServerResponse(status)
+	if err := decodeOneJSON(body, &envelope); err != nil || envelope.Error == nil || !validAPIError(envelope.Error, forbiddenValues) {
+		return invalidServerResponseAvoiding(status, forbiddenValues)
 	}
 	return &output.Error{
 		ExitCode:   exitCodeForStatus(status),
@@ -46,7 +46,7 @@ func decodeAPIError(status int, body []byte) *output.Error {
 	}
 }
 
-func validAPIError(serverError *apiErrorBody) bool {
+func validAPIError(serverError *apiErrorBody, forbiddenValues []string) bool {
 	if len(serverError.Code) == 0 || len(serverError.Code) > maxAPIErrorCodeBytes || !apiErrorCodePattern.MatchString(serverError.Code) {
 		return false
 	}
@@ -58,7 +58,7 @@ func validAPIError(serverError *apiErrorBody) bool {
 			return false
 		}
 	}
-	return true
+	return !containsAny(serverError.Code, forbiddenValues) && !containsAny(serverError.Message, forbiddenValues)
 }
 
 func decodeOneJSON(body []byte, destination any) error {
@@ -102,6 +102,36 @@ func invalidServerResponse(status int) *output.Error {
 		failure.HTTPStatus = statusPointer(status)
 	}
 	return failure
+}
+
+func invalidServerResponseAvoiding(status int, forbiddenValues []string) *output.Error {
+	failure := invalidServerResponse(status)
+	failure.Code = firstSafeGeneric([]string{"invalid_server_response", "remote_response_rejected", "request_failed", "x"}, forbiddenValues)
+	failure.Message = firstSafeGeneric([]string{
+		"The server returned an invalid response",
+		"Remote response rejected",
+		"Request failed",
+		"x",
+	}, forbiddenValues)
+	return failure
+}
+
+func firstSafeGeneric(candidates, forbiddenValues []string) string {
+	for _, candidate := range candidates {
+		if !containsAny(candidate, forbiddenValues) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func containsAny(value string, forbiddenValues []string) bool {
+	for _, forbidden := range forbiddenValues {
+		if forbidden != "" && strings.Contains(value, forbidden) {
+			return true
+		}
+	}
+	return false
 }
 
 func redirectRefused(status int) *output.Error {

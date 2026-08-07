@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
 func TestAPIErrorExitCodeMapAndPreservation(t *testing.T) {
@@ -49,6 +51,63 @@ func TestAPIErrorExitCodeMapAndPreservation(t *testing.T) {
 				t.Errorf("HTTPStatus = %v, want %d", failure.HTTPStatus, test.status)
 			}
 		})
+	}
+}
+
+func TestValidAPIErrorCannotEchoClientSecrets(t *testing.T) {
+	t.Parallel()
+
+	const token = "bearer-token-echo-secret"
+	for _, test := range []struct {
+		name string
+		body func(string) string
+	}{
+		{
+			name: "token in code with surrounding text",
+			body: func(string) string {
+				return `{"error":{"code":"prefix_` + token + `_suffix","message":"Safe message"}}`
+			},
+		},
+		{
+			name: "token in message with surrounding text",
+			body: func(string) string {
+				return `{"error":{"code":"safe_code","message":"prefix ` + token + ` suffix"}}`
+			},
+		},
+		{
+			name: "server origin in message with surrounding text",
+			body: func(serverURL string) string {
+				return `{"error":{"code":"safe_code","message":"prefix ` + serverURL + ` suffix"}}`
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, test.body(server.URL))
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, token, time.Second)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/echo"}, nil)
+			if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+				t.Fatalf("failure = %+v, want invalid_server_response exit 9", failure)
+			}
+			assertOutputErrorOmits(t, failure, token, server.URL)
+		})
+	}
+}
+
+func assertOutputErrorOmits(t *testing.T, failure *output.Error, secrets ...string) {
+	t.Helper()
+	for _, value := range []string{failure.Code, failure.Message} {
+		assertFailureOmits(t, value, secrets...)
 	}
 }
 

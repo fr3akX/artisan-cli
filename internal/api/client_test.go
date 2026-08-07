@@ -196,6 +196,130 @@ func TestClientRejectsMalformedSuccessResponse(t *testing.T) {
 	}
 }
 
+func TestKnownNonRetryStatusesClassifiedBeforeFailingBodyRead(t *testing.T) {
+	t.Parallel()
+
+	statuses := []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+	}
+	for status := 300; status < 400; status++ {
+		statuses = append(statuses, status)
+	}
+	for _, status := range statuses {
+		status := status
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
+			client, err := NewClient("http://127.0.0.1", "status-body-secret", time.Second)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			var attempts atomic.Int32
+			body := &trackedFailingBody{}
+			client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: body}, nil
+			})
+
+			failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/status"}, nil)
+			if failure == nil || failure.ExitCode != 9 {
+				t.Fatalf("failure = %+v, want exit 9", failure)
+			}
+			if status >= 300 && status < 400 {
+				if failure.Code != "redirect_refused" {
+					t.Fatalf("failure = %+v, want redirect_refused", failure)
+				}
+				if body.reads.Load() != 0 {
+					t.Errorf("redirect response body reads = %d, want 0", body.reads.Load())
+				}
+			} else if failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %+v, want invalid_server_response", failure)
+			}
+			if failure.HTTPStatus == nil || *failure.HTTPStatus != status {
+				t.Errorf("HTTPStatus = %v, want %d", failure.HTTPStatus, status)
+			}
+			if attempts.Load() != 1 {
+				t.Errorf("attempts = %d, want 1", attempts.Load())
+			}
+			if !body.closed.Load() {
+				t.Error("response body was not closed")
+			}
+			assertOutputErrorOmits(t, failure, "status-body-secret", "failing-body-secret")
+		})
+	}
+}
+
+func TestHeadAllowsEmptySuccessfulResponse(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		if attempt == 1 && r.Method != http.MethodHead {
+			t.Errorf("first method = %q, want HEAD", r.Method)
+		}
+		if attempt == 2 && r.Method != http.MethodGet {
+			t.Errorf("second method = %q, want GET", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "head-secret", time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if failure := client.Do(context.Background(), Request{Method: http.MethodHead, Path: "/resource"}, nil); failure != nil {
+		t.Fatalf("HEAD failure = %+v, want success", failure)
+	}
+	failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/resource"}, nil)
+	if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+		t.Fatalf("empty GET failure = %+v, want invalid_server_response exit 9", failure)
+	}
+}
+
+func TestRequestPathStrictlySeparatesPathAndQuery(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got, want := r.URL.EscapedPath(), "/resource/%23fragment-data"; got != want {
+			t.Errorf("EscapedPath() = %q, want %q", got, want)
+		}
+		if got, want := r.URL.RawQuery, "filter=active"; got != want {
+			t.Errorf("RawQuery = %q, want %q", got, want)
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "path-secret", time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	for _, path := range []string{"/resource?", "/resource?hidden=true", "/resource#", "/resource#hidden"} {
+		failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: path}, nil)
+		if failure == nil || failure.Code != "invalid_request" || failure.ExitCode != 2 {
+			t.Errorf("Path %q failure = %+v, want invalid_request exit 2", path, failure)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("requests after invalid paths = %d, want 0", requests.Load())
+	}
+	if failure := client.Do(context.Background(), Request{
+		Method: http.MethodGet,
+		Path:   "/resource/%23fragment-data",
+		Query:  map[string][]string{"filter": {"active"}},
+	}, nil); failure != nil {
+		t.Fatalf("escaped fragment path failure = %+v", failure)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+}
+
 func assertFailureOmits(t *testing.T, message string, secrets ...string) {
 	t.Helper()
 	for _, secret := range secrets {
@@ -203,6 +327,21 @@ func assertFailureOmits(t *testing.T, message string, secrets ...string) {
 			t.Errorf("failure message %q leaks secret %q", message, secret)
 		}
 	}
+}
+
+type trackedFailingBody struct {
+	reads  atomic.Int32
+	closed atomic.Bool
+}
+
+func (b *trackedFailingBody) Read([]byte) (int, error) {
+	b.reads.Add(1)
+	return 0, fmt.Errorf("failing-body-secret")
+}
+
+func (b *trackedFailingBody) Close() error {
+	b.closed.Store(true)
+	return nil
 }
 
 type countingReadCloser struct {
