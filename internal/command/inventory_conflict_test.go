@@ -15,6 +15,7 @@ import (
 func TestInventoryConflictReadsNeverPromptAndUseAdminNamespace(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		paths = append(paths, r.URL.Path)
 		if strings.HasSuffix(r.URL.Path, "/conflicts") {
 			_, _ = fmt.Fprint(w, `{"items":[`+commandConflictJSON()+`],"next_cursor":null}`)
@@ -48,6 +49,7 @@ func TestInventoryConflictReadsNeverPromptAndUseAdminNamespace(t *testing.T) {
 func TestInventoryConflictResolveConfirmsExactTargetAndNoteAndUsesOneKey(t *testing.T) {
 	var path, body, key string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		path = r.URL.Path
 		key = r.Header.Get("Idempotency-Key")
 		contents, _ := io.ReadAll(r.Body)
@@ -86,6 +88,7 @@ func TestInventoryConflictResolveConfirmsExactTargetAndNoteAndUsesOneKey(t *test
 func TestInventoryConflictResolveDeclineNonTTYAndInvalidConfirmationIssueZeroRequests(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandResolvedConflictJSON())
 	}))
@@ -121,6 +124,7 @@ func (reader commandConflictErrorReader) Read([]byte) (int, error) { return 0, r
 func TestInventoryConflictResolveYesPreservesServerConflictWithoutAutoAdjustment(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		paths = append(paths, r.URL.Path)
 		w.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(w, `{"error":{"code":"negative_inventory_available","message":"Inventory remains negative","details":null}}`)
@@ -154,6 +158,7 @@ func TestInventoryConflictResolveRejectsMissingBlankOversizedNoteIDAndKeyLocally
 
 func TestInventoryConflictResolveJSONEnvelopeIsExact(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, commandResolvedConflictJSON())
 	}))
 	defer server.Close()

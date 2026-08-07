@@ -31,6 +31,7 @@ func TestAPIErrorExitCodeMapAndPreservation(t *testing.T) {
 		t.Run(fmt.Sprint(test.status), func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(test.status)
 				_, _ = io.WriteString(w, `{"error":{"code":"server_code","message":"Safe server message","details":{"field":"value"}}}`)
 			}))
@@ -86,6 +87,7 @@ func TestValidAPIErrorCannotEchoClientSecrets(t *testing.T) {
 			t.Parallel()
 			var server *httptest.Server
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, test.body(server.URL))
 			}))
@@ -127,6 +129,7 @@ func TestMalformedAPIErrorsHaveStableSanitizedFailure(t *testing.T) {
 		t.Run(fmt.Sprintf("body_%d", len(body)), func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, body)
 			}))

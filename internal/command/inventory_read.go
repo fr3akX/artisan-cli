@@ -70,7 +70,7 @@ func runInventoryConflict(ctx context.Context, args []string, runtime Runtime, j
 		if _, failure := api.NormalizeInventoryUUID(args[1]); failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+		client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 		if client == nil {
 			return code
 		}
@@ -107,7 +107,7 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	if failure := api.ValidateLotListOptions(options); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -128,7 +128,7 @@ func runInventoryLotShow(ctx context.Context, lotID string, runtime Runtime, jso
 	if _, failure := api.NormalizeInventoryUUID(lotID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -162,7 +162,7 @@ func runInventoryLotHistory(ctx context.Context, kind string, args []string, run
 	if kind == "conflicts" {
 		return executeInventoryConflicts(ctx, lotID, options, *all, runtime, jsonMode, serverOverride, timeout)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -203,7 +203,7 @@ func executeInventoryConflicts(ctx context.Context, lotID string, options api.Pa
 	if failure := api.ValidatePageOptions(options); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -220,7 +220,12 @@ func executeInventoryConflicts(ctx context.Context, lotID string, options api.Pa
 	return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeConflictTable(w, page) })
 }
 
-func inventoryReadClient(runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) (*api.Client, int) {
+func inventoryReadClient(ctx context.Context, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) (*api.Client, int) {
+	release, lockFailure := acquireAuthStateLock(ctx, runtime.ConfigDir)
+	if lockFailure != nil {
+		return nil, writeFailure(runtime, jsonMode, *lockFailure)
+	}
+	defer release()
 	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
 		return nil, writeFailure(runtime, jsonMode, configurationLoadFailure(err))
 	}

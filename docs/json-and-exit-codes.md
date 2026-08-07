@@ -42,10 +42,14 @@ download result); consumers must reject malformed or incomplete fields.
 | 5 | HTTP 403 |
 | 6 | HTTP 404 |
 | 7 | Other HTTP 4xx response, including HTTP 409 |
-| 8 | Network/transport failure |
+| 8 | Network/transport failure, including request deadlines/timeouts |
 | 9 | Server 5xx, redirect, invalid/oversized server response, or pagination safety failure |
 | 10 | Confirmation declined, unavailable, or required for noninteractive use |
-| 130 | Interrupted operation |
+| 130 | Caller interruption (SIGINT, and SIGTERM where supported) |
+
+An interruption produces the same stable `interrupted` error in human and JSON
+modes after deferred cleanup runs. A configured timeout or deadline remains a
+`network_error` with exit 8 rather than being reported as an interruption.
 
 Remote error `code` and `message` are preserved only when bounded, valid, and
 free of known token/server secrets. Redirects are never followed. A 409 remains

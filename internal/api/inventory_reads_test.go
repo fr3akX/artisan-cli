@@ -238,8 +238,9 @@ func TestMissingAdminNamespaceMapsToServerUpgradeWithoutMaskingEntityNotFound(t 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := inventoryAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotFound)
-				writeInventoryJSON(w, tt.body)
+				_, _ = fmt.Fprint(w, tt.body)
 			})
 			_, failure := client.BeanLot(context.Background(), inventoryLotID)
 			if failure == nil || failure.Code != tt.wantCode {

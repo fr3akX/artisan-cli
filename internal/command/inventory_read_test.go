@@ -68,6 +68,7 @@ func inventoryRuntime(t *testing.T, serverURL string) Runtime {
 func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 	var query url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/api/v1/inventory/admin/bean-lots" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
@@ -93,8 +94,34 @@ func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 	}
 }
 
+func TestInventoryBearerReflectionIsRefusedInHumanAndJSONModes(t *testing.T) {
+	for _, jsonMode := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"items":[{"name":%q}],"next_cursor":null}`, commandTestToken)
+		}))
+		args := []string{"inventory", "lot", "list"}
+		if jsonMode {
+			args = append([]string{"--json"}, args...)
+		}
+		result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+		server.Close()
+		if result.code != 9 || strings.Contains(result.stdout+result.stderr, commandTestToken) {
+			t.Fatalf("json=%t result = %#v", jsonMode, result)
+		}
+		if jsonMode {
+			if result.stdout != "{\"ok\":false,\"error\":{\"code\":\"invalid_server_response\",\"message\":\"The server returned an invalid response\",\"http_status\":200}}\n" || result.stderr != "" {
+				t.Fatalf("JSON result = %#v", result)
+			}
+		} else if result.stdout != "" || result.stderr != "The server returned an invalid response\n" {
+			t.Fatalf("human result = %#v", result)
+		}
+	}
+}
+
 func TestInventoryLotListJSONRetainsPageAndCursor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"next"}`, commandInventorySummaryFull())
 	}))
 	defer server.Close()
@@ -108,6 +135,7 @@ func TestInventoryLotListJSONRetainsPageAndCursor(t *testing.T) {
 func TestInventoryLotListAllFollowsOpaqueCursorsAndReturnsNullCursor(t *testing.T) {
 	var cursors []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		cursor := r.URL.Query().Get("cursor")
 		cursors = append(cursors, cursor)
 		if cursor == "" {
@@ -146,6 +174,7 @@ func TestInventoryJSONContractsForDetailAndHistoryCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, tt.response)
 			}))
 			defer server.Close()
@@ -189,6 +218,7 @@ func TestInventoryJSONContractAssertionsDetectMutatedTagsTypesAndKeys(t *testing
 func TestInventoryLotListAllPaginationFailureEmitsNoPartialData(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests++
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"same"}`, commandInventorySummary(commandLotID, "must-not-leak", 5000))
 	}))
@@ -360,6 +390,7 @@ func inventoryExpectedOpenConflict() map[string]any {
 func TestInventoryReadCommandsUseAdminRoutesAndNormalizeIDs(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		paths = append(paths, r.URL.Path)
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/ledger"):
@@ -420,6 +451,7 @@ func TestInventoryReadUsageAndUpgradeFailuresHaveStableExits(t *testing.T) {
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"detail":"Not Found"}`)
 	}))

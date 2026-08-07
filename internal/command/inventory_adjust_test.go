@@ -14,6 +14,7 @@ import (
 func TestInventoryAdjustConfirmationIncludesExactChangeAndSendsCanonicalBody(t *testing.T) {
 	var body, key string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		body, key = string(contents), r.Header.Get("Idempotency-Key")
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
@@ -42,6 +43,7 @@ func TestInventoryAdjustConfirmationIncludesExactChangeAndSendsCanonicalBody(t *
 func TestInventoryAdjustNonTTYAndDeclineIssueZeroRequests(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
 	}))
@@ -84,6 +86,7 @@ func TestInventoryAdjustNonTTYAndDeclineIssueZeroRequests(t *testing.T) {
 func TestInventoryAdjustIncompleteAndInvalidConfirmationsIssueZeroRequests(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
 	}))

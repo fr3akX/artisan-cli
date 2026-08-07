@@ -19,6 +19,7 @@ func TestSafeReadsRetryOnlyTransientStatusesWithThreeAttemptLimit(t *testing.T) 
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				attempt := requests.Add(1)
 				if attempt < 3 {
 					w.WriteHeader(status)
@@ -51,6 +52,7 @@ func TestRetriesStopAfterThreeTotalAttempts(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"code":"unavailable","message":"Still unavailable"}}`)
@@ -75,6 +77,7 @@ func TestExpectedClientErrorsAreNotRetried(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		w.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(w, `{"error":{"code":"conflict","message":"Conflict"}}`)
@@ -102,6 +105,7 @@ func TestReplayableMutationRecreatesBodyAndPreservesKey(t *testing.T) {
 	var mu sync.Mutex
 	var keys, bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
@@ -154,6 +158,7 @@ func TestMutationWithoutReplayableBodyDoesNotRetry(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"code":"temporary","message":"Temporary"}}`)
@@ -182,6 +187,7 @@ func TestInvalidMutationKeyAndBodyFactoryFailureDoNotSend(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 	}))
 	defer server.Close()
@@ -234,7 +240,7 @@ func TestSafeReadRetriesTransportFailuresWithoutLeakingThem(t *testing.T) {
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
 		}, nil
 	})
@@ -261,7 +267,7 @@ func TestSafeReadRetriesResponseConnectionFailures(t *testing.T) {
 		if attempt < 3 {
 			body = failingReadCloser{}
 		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body}, nil
 	})
 	var destination any
 	if failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/read"}, &destination); failure != nil {
@@ -278,6 +284,7 @@ func TestRetryBackoffStopsWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		cancel()
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -290,8 +297,8 @@ func TestRetryBackoffStopsWhenContextIsCanceled(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 	failure := client.Do(ctx, Request{Method: http.MethodGet, Path: "/read"}, nil)
-	if failure == nil || failure.ExitCode != 8 || failure.Code != "network_error" {
-		t.Fatalf("Do() failure = %+v, want network_error exit 8", failure)
+	if failure == nil || failure.ExitCode != 130 || failure.Code != "interrupted" {
+		t.Fatalf("Do() failure = %+v, want interrupted exit 130", failure)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests = %d, want 1", requests.Load())

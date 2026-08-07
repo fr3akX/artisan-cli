@@ -107,6 +107,9 @@ func defaultLoginTransactionOperations() loginTransactionOperations {
 	}
 }
 
+// Transaction helpers in this file deliberately do not acquire the auth-state
+// lock. Command entry points hold one lock across recovery, remote validation,
+// snapshot reads, and publication so nested helper calls cannot deadlock.
 func persistExplicitLogin(configDir, token, serverURL string, hook loginStageHook) *output.Error {
 	return persistExplicitLoginWithOperations(configDir, token, serverURL, hook, defaultLoginTransactionOperations())
 }

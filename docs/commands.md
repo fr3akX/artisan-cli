@@ -13,7 +13,8 @@ artisan [--json] [--server URL] [--timeout DURATION] COMMAND ...
 In examples, the complete global option group is `--json --server URL --timeout DURATION`.
 Global flags must precede `auth`, `inventory`, `skill`, or `version`; command
 flags must appear in the positions shown below. `--timeout` uses a Go duration
-such as `30s` or `2m` and must be positive. Its default is `30s`.
+such as `30s` or `2m`, must be positive, and cannot exceed `5m`. Its default is
+`30s`; the exact `5m` boundary is accepted.
 
 `--server` overrides the effective server for that invocation. Otherwise
 `ARTISAN_SERVER_URL` overrides stored configuration. `ARTISAN_SERVER_TOKEN`
@@ -50,7 +51,9 @@ Without `--token-stdin`, login prompts only on a terminal with hidden input.
 Login validates the token by reading the authenticated identity before storing
 it. An explicit `--server` is stored with the token. `auth status` reads the
 live identity. `auth logout` removes the stored token but retains the stored
-server. Environment overrides remain outside these operations.
+server. Environment overrides remain outside these operations. Authentication
+recovery, login publication, logout, and stored server/token snapshots are serialized
+across CLI processes; a command uses one consistent origin/credential snapshot.
 
 ## Lots and inventory history
 
@@ -210,5 +213,6 @@ create help are implemented and return success. Other `--help` placements are
 not implemented by this release and return a usage error rather than a command
 catalog. See [agent skill installation](agent-skill.md).
 
-See [JSON, pagination, idempotency, and exit codes](json-and-exit-codes.md) and
-[security](security.md).
+SIGINT, and SIGTERM on platforms that support it, cancel active work and run
+normal cleanup before the process exits with status 130. See [JSON, pagination,
+idempotency, and exit codes](json-and-exit-codes.md) and [security](security.md).

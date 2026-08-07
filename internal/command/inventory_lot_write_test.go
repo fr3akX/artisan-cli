@@ -17,6 +17,7 @@ func TestInventoryLotCreateSendsManifestWithEveryFlagAndNoPrompt(t *testing.T) {
 	var manifest map[string]any
 	var key string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		key = r.Header.Get("Idempotency-Key")
 		mediaType, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || mediaType != "multipart/form-data" {
@@ -64,6 +65,7 @@ func TestInventoryLotCreateSendsManifestWithEveryFlagAndNoPrompt(t *testing.T) {
 func TestInventoryLotUpdateSupportsNullableClearsAndStateCommandsAreExact(t *testing.T) {
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(contents))
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
@@ -92,6 +94,7 @@ func TestInventoryLotUpdateSupportsNullableClearsAndStateCommandsAreExact(t *tes
 func TestInventoryLotArchiveDeclineAndNonTTYMissingYesMakeNoRequest(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
 	}))
@@ -117,6 +120,7 @@ func TestInventoryLotArchiveDeclineAndNonTTYMissingYesMakeNoRequest(t *testing.T
 func TestInventoryLotCreateFromJSONIsBoundedStrictAndCanonical(t *testing.T) {
 	var manifest string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, parameters, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		part, err := multipart.NewReader(r.Body, parameters["boundary"]).NextPart()
 		if err != nil {

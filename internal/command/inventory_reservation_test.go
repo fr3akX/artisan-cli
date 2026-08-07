@@ -28,6 +28,7 @@ func TestInventoryReservationCommandsSendEveryExactFieldWithoutPrompt(t *testing
 	var paths, bodies, keys []string
 	statuses := []int{http.StatusCreated, http.StatusOK, http.StatusOK}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		paths = append(paths, r.URL.Path)
 		bodies = append(bodies, string(contents))
@@ -107,6 +108,7 @@ func commandReservationHumanOutput(state string, replay bool) string {
 func TestInventoryReservationFinalizeDoesNotInferActualGrams(t *testing.T) {
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
 		_, _ = fmt.Fprint(w, commandReservationMutationJSON("finalized", false))
@@ -141,6 +143,7 @@ func TestInventoryReservationRejectsMissingInvalidAndNonintegerFieldsLocally(t *
 func TestInventoryReservationPreservesServerConflictResponseWithoutAdjustment(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		paths = append(paths, r.URL.Path)
 		w.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(w, `{"error":{"code":"invalid_inventory_transition","message":"Reservation cannot transition","details":null}}`)
@@ -168,6 +171,7 @@ func TestInventoryReservationMutationJSONEnvelopesAreExact(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(test.status)
 				_, _ = fmt.Fprint(w, commandReservationMutationJSON(test.state, false))
 			}))
@@ -184,6 +188,7 @@ func TestInventoryReservationMutationJSONEnvelopesAreExact(t *testing.T) {
 
 func TestInventoryReservationCreateHumanOutputIsExact(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = fmt.Fprint(w, commandReservationMutationJSON("reserved", false))
 	}))

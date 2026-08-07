@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,12 +44,22 @@ type multipartImage struct {
 // against its captured filesystem identity, size, modification time, and SHA-256
 // fingerprint before and during every attempt. Image contents are never buffered.
 func NewManifestMultipartBody(manifest []byte, imagePaths ...string) (func() (io.ReadCloser, string, error), error) {
+	return newManifestMultipartBody(context.Background(), manifest, imagePaths...)
+}
+
+func newManifestMultipartBody(ctx context.Context, manifest []byte, imagePaths ...string) (func() (io.ReadCloser, string, error), error) {
+	if ctx == nil {
+		return nil, errors.New("multipart context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(imagePaths) > maxMultipartImages {
 		return nil, &multipartFileError{}
 	}
 	images := make([]multipartImage, len(imagePaths))
 	for index, path := range imagePaths {
-		captured, err := captureMultipartImage(path)
+		captured, err := captureMultipartImage(path, ctx.Done())
 		if err != nil {
 			return nil, err
 		}
@@ -87,7 +98,7 @@ func NewManifestMultipartBody(manifest []byte, imagePaths ...string) (func() (io
 	}, nil
 }
 
-func captureMultipartImage(path string) (multipartImage, error) {
+func captureMultipartImage(path string, cancel <-chan struct{}) (multipartImage, error) {
 	filename := filepath.Base(path)
 	if path == "" || filename == "." || filename == string(filepath.Separator) || !validMultipartFilename(filename) {
 		return multipartImage{}, &multipartFileError{}
@@ -109,11 +120,17 @@ func captureMultipartImage(path string) (multipartImage, error) {
 		_ = file.Close()
 		return multipartImage{}, &multipartFileError{}
 	}
-	fingerprint, fingerprintErr := fingerprintMultipartFile(file, fileInfo.Size())
+	fingerprint, fingerprintErr := fingerprintMultipartFileCancelable(file, fileInfo.Size(), cancel)
 	postFileInfo, postStatErr := file.Stat()
 	postLinkInfo, postLinkErr := os.Lstat(path)
 	closeErr := file.Close()
-	if fingerprintErr != nil || postStatErr != nil || postLinkErr != nil || closeErr != nil ||
+	if fingerprintErr != nil {
+		if errors.Is(fingerprintErr, io.ErrClosedPipe) {
+			return multipartImage{}, fingerprintErr
+		}
+		return multipartImage{}, &multipartFileError{changed: true}
+	}
+	if postStatErr != nil || postLinkErr != nil || closeErr != nil ||
 		!sameMultipartSnapshot(fileInfo, postFileInfo) || !os.SameFile(linkInfo, postLinkInfo) {
 		return multipartImage{}, &multipartFileError{changed: true}
 	}

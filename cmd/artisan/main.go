@@ -3,12 +3,19 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
 
 	"github.com/fr3akX/artisan-cli/internal/command"
 	"golang.org/x/term"
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), handledSignals()...)
+	defer stop()
 	runtime := command.Runtime{
 		In:           os.Stdin,
 		Out:          os.Stdout,
@@ -17,5 +24,5 @@ func main() {
 		IsTerminal:   term.IsTerminal,
 		ReadPassword: term.ReadPassword,
 	}
-	os.Exit(command.Run(context.Background(), os.Args[1:], runtime))
+	return command.Run(ctx, os.Args[1:], runtime)
 }

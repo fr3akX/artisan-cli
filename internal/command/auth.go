@@ -37,7 +37,7 @@ func runAuth(ctx context.Context, args []string, runtime Runtime, jsonMode bool,
 		if len(args) != 1 {
 			return authUsageFailure(runtime, jsonMode, "auth logout does not accept arguments")
 		}
-		return runAuthLogout(runtime, jsonMode)
+		return runAuthLogout(ctx, runtime, jsonMode)
 	default:
 		return authUsageFailure(runtime, jsonMode, "Unknown auth command")
 	}
@@ -53,15 +53,25 @@ func runAuthLogin(ctx context.Context, args []string, runtime Runtime, jsonMode 
 	if len(flags.Args()) != 0 {
 		return authUsageFailure(runtime, jsonMode, "auth login does not accept arguments")
 	}
-	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
-		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
-	}
-
-	serverURL, persistServer, failure := resolveLoginServer(runtime, serverOverride)
+	token, failure := readLoginToken(runtime, *tokenStdin)
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	token, failure := readLoginToken(runtime, *tokenStdin)
+
+	release, lockFailure := acquireAuthStateLock(ctx, runtime.ConfigDir)
+	if lockFailure != nil {
+		return writeFailure(runtime, jsonMode, *lockFailure)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = release()
+		}
+	}()
+	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
+		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
+	}
+	serverURL, persistServer, failure := resolveLoginServer(runtime, serverOverride)
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
@@ -77,6 +87,8 @@ func runAuthLogin(ctx context.Context, args []string, runtime Runtime, jsonMode 
 	if failure := persistLogin(runtime.ConfigDir, token, persistServer); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
+	_ = release()
+	locked = false
 
 	if err := output.WriteSuccess(runtime.Out, jsonMode, identity, func(w io.Writer) error {
 		_, err := fmt.Fprintf(w, "Authenticated as %s for %s (%s) with role %s\n",
@@ -93,6 +105,16 @@ func runAuthLogin(ctx context.Context, args []string, runtime Runtime, jsonMode 
 }
 
 func runAuthStatus(ctx context.Context, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
+	release, lockFailure := acquireAuthStateLock(ctx, runtime.ConfigDir)
+	if lockFailure != nil {
+		return writeFailure(runtime, jsonMode, *lockFailure)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = release()
+		}
+	}()
 	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
 		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
 	}
@@ -101,6 +123,8 @@ func runAuthStatus(ctx context.Context, runtime Runtime, jsonMode bool, serverOv
 		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
 	}
 	client, err := api.NewClient(values.ServerURL, values.Token, timeout)
+	_ = release()
+	locked = false
 	if err != nil {
 		return writeFailure(runtime, jsonMode, clientConfigurationFailure(err))
 	}
@@ -124,13 +148,25 @@ func runAuthStatus(ctx context.Context, runtime Runtime, jsonMode bool, serverOv
 	return 0
 }
 
-func runAuthLogout(runtime Runtime, jsonMode bool) int {
+func runAuthLogout(ctx context.Context, runtime Runtime, jsonMode bool) int {
+	release, lockFailure := acquireAuthStateLock(ctx, runtime.ConfigDir)
+	if lockFailure != nil {
+		return writeFailure(runtime, jsonMode, *lockFailure)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = release()
+		}
+	}()
 	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
 		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
 	}
 	if failure := persistLogout(runtime.ConfigDir); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
+	_ = release()
+	locked = false
 	data := struct {
 		LoggedOut bool `json:"logged_out"`
 	}{LoggedOut: true}

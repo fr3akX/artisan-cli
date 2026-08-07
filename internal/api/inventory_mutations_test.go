@@ -30,6 +30,7 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 	var mu sync.Mutex
 	var methods, paths, keys, bodies, types []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		methods = append(methods, r.Method)
@@ -89,6 +90,7 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 func TestMutationRetriesReplayIdenticalJSONAndIdempotencyKey(t *testing.T) {
 	var bodies, keys []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(contents))
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
@@ -217,6 +219,7 @@ func TestMutationMethodsRequireExactSuccessStatusesAndBodies(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(test.status)
 				if test.status != http.StatusNoContent && test.status != http.StatusResetContent {
 					_, _ = io.WriteString(w, mutationLotJSON(1))
@@ -236,6 +239,7 @@ func TestCreateEnforcesEncodedManifestCapAtExactWireBoundary(t *testing.T) {
 	var requests atomic.Int64
 	var receivedManifestBytes int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		receivedManifestBytes = len(rawMutationManifest(t, string(body), r.Header.Get("Content-Type")))
@@ -270,6 +274,7 @@ func TestCreateEnforcesEncodedManifestCapAtExactWireBoundary(t *testing.T) {
 func TestCreateNormalizesDecomposedUnicodeToNFCAndRejectsCanonicalDuplicateVarietals(t *testing.T) {
 	decomposed := "Cafe\u0301"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		manifest := rawMutationManifest(t, string(body), r.Header.Get("Content-Type"))
 		if strings.Contains(manifest, decomposed) || !strings.Contains(manifest, "Café") {

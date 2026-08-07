@@ -10,8 +10,13 @@ The CLI protects a bearer token, refuses credential-bearing URLs and redirects,
 bounds remote bodies/retries/pagination, validates response models, and uses
 careful local file replacement. It does not make an untrusted server safe. The
 selected server sees the token and all requested inventory data and controls
-otherwise valid response content. Confirm the exact organization, identity,
-role, and server origin before mutation. DNS, system certificate roots, the OS,
+otherwise valid response content. Successful and error JSON bodies must use an
+unambiguous `application/json` media type (optionally `charset=utf-8`), and a
+successful body containing the exact bearer token is rejected before decoding
+or rendering. Identity and JSON read routes require exact HTTP 200 responses;
+mutation routes retain their documented exact statuses. Confirm the exact
+organization, identity, role, and server origin
+before mutation. DNS, system certificate roots, the OS,
 local administrators, and any configured trusted proxy remain in the trust
 boundary.
 
@@ -37,12 +42,18 @@ credential/config file accessible to group or other users. On Windows it uses a
 protected DACL for the current user, SYSTEM, and Administrators. These controls
 do not provide encryption at rest or protection from the account owner,
 administrators, malware in the account, backups, crash dumps, or a compromised
-OS. `auth logout` removes the stored token but cannot revoke copied tokens;
-revoke credentials at the server when exposure is possible.
+OS. A private credential-free lock serializes complete authentication recovery,
+server/token snapshot, login validation/publication, and logout critical
+sections across processes. The lock rejects Unix symlinks and Windows reparse
+points and uses the same private mode/ACL policy as other local state.
+`auth logout` removes the stored token but cannot revoke copied tokens; revoke
+credentials at the server when exposure is possible.
 
 The CLI suppresses known token/server values from accepted remote errors, but
 users must still avoid shell tracing, dumping environment/input, or sending raw
-logs that contain surrounding sensitive data.
+logs that contain surrounding sensitive data. SIGINT, and SIGTERM where
+supported, use cancellation-aware cleanup and return the stable interruption
+status 130; request deadlines remain network failures.
 
 ## Files, symlinks, and unsafe paths
 

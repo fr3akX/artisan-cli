@@ -115,17 +115,55 @@ func protectPrivate(file *os.File, directory bool) error {
 }
 
 func applyPrivateACL(path string, directory bool) error {
+	acl, err := privateACL(directory)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("set private ACL: %w", err)
+	}
+	return nil
+}
+
+func applyPrivateACLHandle(handle windows.Handle, directory bool) error {
+	acl, err := privateACL(directory)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("set private ACL on opened handle: %w", err)
+	}
+	return nil
+}
+
+func privateACL(directory bool) (*windows.ACL, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return fmt.Errorf("get current user SID: %w", err)
+		return nil, fmt.Errorf("get current user SID: %w", err)
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return fmt.Errorf("get SYSTEM SID: %w", err)
+		return nil, fmt.Errorf("get SYSTEM SID: %w", err)
 	}
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
-		return fmt.Errorf("get Administrators SID: %w", err)
+		return nil, fmt.Errorf("get Administrators SID: %w", err)
 	}
 
 	inheritance := uint32(windows.NO_INHERITANCE)
@@ -142,20 +180,9 @@ func applyPrivateACL(path string, directory bool) error {
 	runtime.KeepAlive(system)
 	runtime.KeepAlive(administrators)
 	if err != nil {
-		return fmt.Errorf("build private ACL: %w", err)
+		return nil, fmt.Errorf("build private ACL: %w", err)
 	}
-	if err := windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	); err != nil {
-		return fmt.Errorf("set private ACL: %w", err)
-	}
-	return nil
+	return acl, nil
 }
 
 func privateAccessEntry(sid *windows.SID, trusteeType windows.TRUSTEE_TYPE, inheritance uint32) windows.EXPLICIT_ACCESS {

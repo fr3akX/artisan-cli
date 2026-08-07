@@ -55,7 +55,7 @@ func runInventoryReservationCreate(ctx context.Context, args []string, runtime R
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -105,7 +105,7 @@ func runInventoryReservationTransition(ctx context.Context, transition, clientRe
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}

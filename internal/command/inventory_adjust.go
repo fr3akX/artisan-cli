@@ -61,7 +61,7 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}

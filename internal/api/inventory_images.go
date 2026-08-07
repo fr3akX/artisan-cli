@@ -144,10 +144,19 @@ func normalizeImageUploadManifest(images []ImageUploadManifest, requireNonempty 
 // ValidateImageUploadFiles checks locally knowable file requirements without
 // reading image contents into memory.
 func ValidateImageUploadFiles(paths []string) *output.Error {
+	return ValidateImageUploadFilesContext(context.Background(), paths)
+}
+
+// ValidateImageUploadFilesContext is the cancellation-aware command validation
+// path for upload sources.
+func ValidateImageUploadFilesContext(ctx context.Context, paths []string) *output.Error {
 	if len(paths) == 0 || len(paths) > MaxInventoryImages {
 		return mutationUsage("invalid_image_file", "Image files must contain between one and eight paths")
 	}
-	if _, err := NewManifestMultipartBody(nil, paths...); err != nil {
+	if _, err := newManifestMultipartBody(ctx, nil, paths...); err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return contextOrNetworkFailure(ctx)
+		}
 		return multipartPreparationFailure(err)
 	}
 	return nil
@@ -172,8 +181,11 @@ func (c *Client) AddInventoryImages(ctx context.Context, rawLotID string, metada
 	if err != nil || len(manifest) > maxBeanLotManifestBytes {
 		return BeanLotDetail{}, mutationUsage("invalid_images", "Unable to encode image declarations")
 	}
-	body, err := NewManifestMultipartBody(manifest, paths...)
+	body, err := newManifestMultipartBody(ctx, manifest, paths...)
 	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return BeanLotDetail{}, contextOrNetworkFailure(ctx)
+		}
 		return BeanLotDetail{}, multipartPreparationFailure(err)
 	}
 	var lot BeanLotDetail
@@ -282,7 +294,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		return result, localFailure("invalid_request", "Request context is required")
 	}
 	if ctx.Err() != nil {
-		return result, interruptionFailure()
+		return result, contextOrNetworkFailure(ctx)
 	}
 	lotID, failure := normalizeInventoryUUID(rawLotID)
 	if failure != nil {
@@ -330,7 +342,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	var downloaded int64
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
-			return result, interruptionFailure()
+			return result, contextOrNetworkFailure(ctx)
 		}
 		if err := resetDownloadTemp(temporary); err != nil {
 			return result, localStorageFailure("Unable to store the image download safely")
@@ -344,14 +356,14 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		response, err := c.httpClient.Do(request)
 		if err != nil {
 			if ctx.Err() != nil {
-				return result, interruptionFailure()
+				return result, contextOrNetworkFailure(ctx)
 			}
 			if attempt < maxAttempts-1 {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
 				}
 				if ctx.Err() != nil {
-					return result, interruptionFailure()
+					return result, contextOrNetworkFailure(ctx)
 				}
 			}
 			return result, networkFailure()
@@ -364,14 +376,17 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		if status != http.StatusOK {
 			body, oversized, readErr := readBoundedResponse(response.Body)
 			if ctx.Err() != nil {
-				return result, interruptionFailure()
+				return result, contextOrNetworkFailure(ctx)
+			}
+			if !oversized && responseRequiresJSON(body) && !trustedJSONContentType(response.Header) {
+				return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
 			if isTransientStatus(status) && attempt < maxAttempts-1 && !oversized {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
 				}
 				if ctx.Err() != nil {
-					return result, interruptionFailure()
+					return result, contextOrNetworkFailure(ctx)
 				}
 			}
 			if readErr != nil || oversized || status < 400 || status >= 600 {
@@ -394,14 +409,14 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		}
 		if readErr != nil {
 			if ctx.Err() != nil {
-				return result, interruptionFailure()
+				return result, contextOrNetworkFailure(ctx)
 			}
 			if attempt < maxAttempts-1 {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
 				}
 				if ctx.Err() != nil {
-					return result, interruptionFailure()
+					return result, contextOrNetworkFailure(ctx)
 				}
 			}
 			return result, networkFailure()
@@ -413,7 +428,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	}
 
 	if ctx.Err() != nil {
-		return result, interruptionFailure()
+		return result, contextOrNetworkFailure(ctx)
 	}
 	if err := c.downloadOps.syncFile(temporary); err != nil {
 		return result, localStorageFailure("Unable to store the image download safely")
@@ -423,7 +438,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	}
 	temporaryClosed = true
 	if ctx.Err() != nil {
-		return result, interruptionFailure()
+		return result, contextOrNetworkFailure(ctx)
 	}
 	var installed bool
 	if force {

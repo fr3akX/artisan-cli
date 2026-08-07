@@ -38,8 +38,9 @@ type Identity struct {
 func (c *Client) Identity(ctx context.Context) (Identity, *output.Error) {
 	var identity Identity
 	if failure := c.Do(ctx, Request{
-		Method: http.MethodGet,
-		Path:   "/api/v1/auth/me",
+		Method:         http.MethodGet,
+		Path:           "/api/v1/auth/me",
+		ExpectedStatus: http.StatusOK,
 	}, &identity); failure != nil {
 		return Identity{}, failure
 	}

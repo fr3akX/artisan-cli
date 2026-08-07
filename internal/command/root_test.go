@@ -238,6 +238,32 @@ func TestExplicitGlobalServerAndTimeoutValidationAreStableUsageFailures(t *testi
 	}
 }
 
+func TestGlobalTimeoutHasFiniteMaximumBoundary(t *testing.T) {
+	code, stdout, stderr := runCommand(t, "--timeout=5m", "version")
+	if code != 0 || stdout == "" || stderr != "" {
+		t.Fatalf("boundary result = (%d, %q, %q), want success", code, stdout, stderr)
+	}
+
+	for _, jsonMode := range []bool{false, true} {
+		args := []string{"--timeout=5m1ns", "version"}
+		if jsonMode {
+			args = append([]string{"--json"}, args...)
+		}
+		code, stdout, stderr = runCommand(t, args...)
+		if code != usageExitCode {
+			t.Fatalf("code = %d, want %d", code, usageExitCode)
+		}
+		if jsonMode {
+			want := "{\"ok\":false,\"error\":{\"code\":\"invalid_timeout\",\"message\":\"Timeout must not exceed 5m0s\"}}\n"
+			if stdout != want || stderr != "" {
+				t.Fatalf("JSON output = stdout %q stderr %q", stdout, stderr)
+			}
+		} else if stdout != "" || stderr != "Timeout must not exceed 5m0s\n" {
+			t.Fatalf("human output = stdout %q stderr %q", stdout, stderr)
+		}
+	}
+}
+
 func TestZeroRuntimeDoesNotPanic(t *testing.T) {
 	if code := Run(context.Background(), []string{"version"}, Runtime{}); code != 0 {
 		t.Fatalf("version code = %d, want 0", code)

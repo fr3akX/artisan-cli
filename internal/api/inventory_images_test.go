@@ -38,6 +38,7 @@ func TestInventoryImageMutationsUseExactAdminContracts(t *testing.T) {
 	}
 	var requests []recorded
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		requests = append(requests, recorded{method: r.Method, path: r.URL.Path, key: r.Header.Get("Idempotency-Key"), contentType: r.Header.Get("Content-Type"), body: body})
 		_, _ = io.WriteString(w, mutationLotJSON(0))
@@ -154,6 +155,7 @@ func TestInventoryImageMutationsRequireExactSuccessStatuses(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.Copy(io.Discard, r.Body)
 				w.WriteHeader(test.status)
 				if test.status != http.StatusNoContent {
@@ -179,6 +181,7 @@ func TestInventoryImageUploadRetryReopensIdenticalFilesAndRejectsReplacement(t *
 	var bodies [][]byte
 	var keys []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, body)
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
@@ -200,6 +203,7 @@ func TestInventoryImageUploadRetryReopensIdenticalFilesAndRejectsReplacement(t *
 
 	var attempts atomic.Int32
 	replacedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		attempts.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		replacement := path + ".new"
@@ -298,6 +302,7 @@ func TestInventoryImageValidationIsLocalAndStrict(t *testing.T) {
 func TestDownloadInventoryImageStreamsPrivateWebPAtomically(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "download.webp")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/api/v1/inventory/admin/bean-lots/"+mutationLotID+"/images/"+commandAPIImageID+"/thumbnail" || r.Header.Get("Authorization") != "Bearer secret" {
 			t.Errorf("request = %s %q", r.URL.Path, r.Header.Get("Authorization"))
 		}
@@ -336,6 +341,7 @@ func TestDownloadInventoryImageRetriesTransientStatusIntoSameAtomicDestination(t
 	destination := filepath.Join(t.TempDir(), "retry.webp")
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if attempts.Add(1) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(w, `{"error":{"code":"busy","message":"busy","details":null}}`)
@@ -443,6 +449,7 @@ func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *test
 			}
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				requests.Add(1)
 				w.Header().Set("Content-Type", "image/webp")
 				_, _ = io.WriteString(w, "download-body")
@@ -586,6 +593,7 @@ func TestDownloadInventoryImageParentSyncFailurePreservesInstalledDestination(t 
 			}
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				requests.Add(1)
 				w.Header().Set("Content-Type", "image/webp")
 				_, _ = io.WriteString(w, "installed")
@@ -655,6 +663,7 @@ func TestDownloadInventoryImageNoClobberPrecheckAndInstallRace(t *testing.T) {
 	var requests atomic.Int32
 	var createRacer atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		if createRacer.Load() {
 			if err := os.WriteFile(destination, []byte("racer"), 0o600); err != nil {
@@ -755,6 +764,7 @@ func TestDownloadInventoryImageRefusesRedirectWithoutForwardingBearer(t *testing
 	}))
 	defer target.Close()
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		http.Redirect(w, r, target.URL+"/credential-target", http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
@@ -801,6 +811,7 @@ func TestDownloadInventoryImageCancellationBeforeInstallRemovesOnlyTemporary(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		w.Header().Set("Content-Type", "image/webp")
 		_, _ = io.WriteString(w, "complete")
@@ -835,7 +846,9 @@ func TestDownloadInventoryImageExpiredDeadlineMakesZeroRequests(t *testing.T) {
 		return nil, errors.New("request should not be made")
 	})
 	_, failure := client.DownloadInventoryImage(ctx, mutationLotID, commandAPIImageID, "display", destination, false)
-	assertInterruptionFailure(t, failure)
+	if failure == nil || failure.ExitCode != 8 || failure.Code != "network_error" || failure.Message != "Unable to communicate with the server" || failure.HTTPStatus != nil {
+		t.Fatalf("failure = %#v, want network_error exit 8", failure)
+	}
 	if requests.Load() != 0 {
 		t.Fatalf("requests = %d, want 0", requests.Load())
 	}

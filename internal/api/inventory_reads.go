@@ -148,7 +148,7 @@ func (c *Client) InventoryConflict(ctx context.Context, rawConflictID string) (I
 }
 
 func (c *Client) doInventoryRead(ctx context.Context, path string, query url.Values, entityRoute bool, destination any) *output.Error {
-	failure := c.Do(ctx, Request{Method: http.MethodGet, Path: path, Query: query}, destination)
+	failure := c.Do(ctx, Request{Method: http.MethodGet, Path: path, Query: query, ExpectedStatus: http.StatusOK}, destination)
 	if failure == nil || failure.HTTPStatus == nil || *failure.HTTPStatus != http.StatusNotFound {
 		return failure
 	}

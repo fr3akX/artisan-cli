@@ -2,9 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -79,6 +82,9 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 	if ctx == nil {
 		return localFailure("invalid_request", "Request context is required")
 	}
+	if ctx.Err() != nil {
+		return contextOrNetworkFailure(ctx)
+	}
 	request.Method = strings.ToUpper(strings.TrimSpace(request.Method))
 	if request.Method == "" || containsUnsafeHeaderValue(request.Method) {
 		return localFailure("invalid_request", "A valid HTTP method is required")
@@ -99,6 +105,9 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 
 	canRetry := requestCanRetry(request)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return contextOrNetworkFailure(ctx)
+		}
 		body, contentType, failure := openRequestBody(request)
 		if failure != nil {
 			return failure
@@ -129,7 +138,7 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 					continue
 				}
 			}
-			return networkFailure()
+			return contextOrNetworkFailure(ctx)
 		}
 
 		status := response.StatusCode
@@ -153,14 +162,23 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			if isTransientStatus(status) {
 				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
-			return networkFailure()
+			return contextOrNetworkFailure(ctx)
 		}
 		if oversized {
 			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 		}
+		if ctx.Err() != nil {
+			return contextOrNetworkFailure(ctx)
+		}
+		if containsExactTokenReflection(responseBody, c.token) {
+			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		}
+		if responseRequiresJSON(responseBody) && !trustedJSONContentType(response.Header) {
+			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		}
 		if isTransientStatus(status) && canRetry && attempt < maxAttempts-1 {
 			if err := waitForRetry(ctx, attempt); err != nil {
-				return networkFailure()
+				return contextOrNetworkFailure(ctx)
 			}
 			continue
 		}
@@ -174,6 +192,50 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			return decodeAPIError(status, responseBody, c.token, c.serverURL.String())
 		}
 		return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+	}
+	return contextOrNetworkFailure(ctx)
+}
+
+func responseRequiresJSON(body []byte) bool {
+	return len(bytes.TrimSpace(body)) != 0
+}
+
+func containsExactTokenReflection(body []byte, token string) bool {
+	if bytes.Contains(body, []byte(token)) {
+		return true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	for {
+		value, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		if text, ok := value.(string); ok && strings.Contains(text, token) {
+			return true
+		}
+	}
+}
+
+func trustedJSONContentType(header http.Header) bool {
+	values := header.Values("Content-Type")
+	if len(values) != 1 || strings.Contains(values[0], ",") {
+		return false
+	}
+	mediaType, parameters, err := mime.ParseMediaType(values[0])
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return false
+	}
+	for name, value := range parameters {
+		if !strings.EqualFold(name, "charset") || !strings.EqualFold(value, "utf-8") {
+			return false
+		}
+	}
+	return true
+}
+
+func contextOrNetworkFailure(ctx context.Context) *output.Error {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return interruptionFailure()
 	}
 	return networkFailure()
 }

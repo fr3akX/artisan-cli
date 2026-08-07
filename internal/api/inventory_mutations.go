@@ -310,8 +310,11 @@ func (c *Client) CreateBeanLotWithImages(ctx context.Context, manifest BeanLotCr
 	if err != nil {
 		return BeanLotDetail{}, mutationUsage("invalid_manifest", "Unable to encode bean lot manifest")
 	}
-	body, err := NewManifestMultipartBody(encoded, imagePaths...)
+	body, err := newManifestMultipartBody(ctx, encoded, imagePaths...)
 	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return BeanLotDetail{}, contextOrNetworkFailure(ctx)
+		}
 		return BeanLotDetail{}, multipartPreparationFailure(err)
 	}
 	var lot BeanLotDetail

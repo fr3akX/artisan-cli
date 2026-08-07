@@ -19,6 +19,7 @@ func TestClientSendsExactAuthenticationAndUserAgent(t *testing.T) {
 
 	const token = "super-secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
 			t.Errorf("Authorization = %q, want %q", got, want)
 		}
@@ -67,6 +68,7 @@ func TestClientRefusesEveryRedirectWithoutCredentialForwarding(t *testing.T) {
 			var targetAuthorization atomic.Value
 			targetAuthorization.Store("")
 			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				targetRequests.Add(1)
 				targetAuthorization.Store(r.Header.Get("Authorization"))
 				w.WriteHeader(http.StatusNoContent)
@@ -75,6 +77,7 @@ func TestClientRefusesEveryRedirectWithoutCredentialForwarding(t *testing.T) {
 
 			var sourceRequests atomic.Int32
 			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				sourceRequests.Add(1)
 				http.Redirect(w, r, target.URL+"/stolen", status)
 			}))
@@ -106,6 +109,7 @@ func TestClientTimeoutAndErrorsDoNotLeakSecrets(t *testing.T) {
 
 	const token = "timeout-secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		time.Sleep(100 * time.Millisecond)
 		_, _ = io.WriteString(w, `{}`)
 	}))
@@ -181,6 +185,7 @@ func TestClientRejectsMalformedSuccessResponse(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"value":true} trailing`)
 	}))
 	defer server.Close()
@@ -253,6 +258,7 @@ func TestKnownNonRetryStatusesClassifiedBeforeFailingBodyRead(t *testing.T) {
 
 func TestClientExpectedStatusRejectsOtherSuccessfulStatusesWithoutChangingDefault(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
@@ -276,6 +282,7 @@ func TestHeadAllowsEmptySuccessfulResponse(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		attempt := requests.Add(1)
 		if attempt == 1 && r.Method != http.MethodHead {
 			t.Errorf("first method = %q, want HEAD", r.Method)
@@ -304,6 +311,7 @@ func TestRequestPathStrictlySeparatesPathAndQuery(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		if got, want := r.URL.EscapedPath(), "/resource/%23fragment-data"; got != want {
 			t.Errorf("EscapedPath() = %q, want %q", got, want)

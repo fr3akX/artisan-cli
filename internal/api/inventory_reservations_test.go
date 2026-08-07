@@ -39,6 +39,7 @@ func TestReservationMethodsUseMemberCompatibleRoutesExactBodiesStatusesAndOneKey
 	var methods, paths, keys, bodies []string
 	statuses := []int{http.StatusCreated, http.StatusOK, http.StatusOK}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		methods = append(methods, r.Method)
 		paths = append(paths, r.URL.Path)
@@ -91,6 +92,7 @@ func TestReservationMethodsUseMemberCompatibleRoutesExactBodiesStatusesAndOneKey
 func TestReservationFinalizePreservesOmittedActualWeightAsNull(t *testing.T) {
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		body = string(contents)
 		_, _ = io.WriteString(w, reservationMutationJSON("finalized", false))
@@ -181,6 +183,7 @@ func TestReservationMethodsRequireExactStatusesAndReplayIdentically(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(test.status)
 				if test.status != http.StatusNoContent {
 					_, _ = io.WriteString(w, reservationMutationJSON("reserved", false))
@@ -197,6 +200,7 @@ func TestReservationMethodsRequireExactStatusesAndReplayIdentically(t *testing.T
 
 	var bodies, keys []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		contents, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(contents))
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
@@ -220,6 +224,7 @@ func TestReservationMethodsRequireExactStatusesAndReplayIdentically(t *testing.T
 func TestConflictResolutionUsesAdminRouteExactNormalizedNoteAndStatus(t *testing.T) {
 	var path, body, key string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		path = r.URL.Path
 		key = r.Header.Get("Idempotency-Key")
 		contents, _ := io.ReadAll(r.Body)
@@ -240,6 +245,7 @@ func TestConflictResolutionUsesAdminRouteExactNormalizedNoteAndStatus(t *testing
 func TestConflictResolutionRejectsInvalidNoteBeforeNetworkAndRequires200(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, validConflictJSON())
@@ -331,6 +337,7 @@ func TestReservationMutationResponsesAreBoundToEachRequest(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(test.status)
 				_, _ = io.WriteString(w, test.response)
 			}))
@@ -349,6 +356,7 @@ func TestCreateReservationAcceptsLifecycleCoherentCurrentProjectionStates(t *tes
 		for _, replay := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/replay=%t", state, replay), func(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusCreated)
 					_, _ = io.WriteString(w, reservationMutationJSON(state, replay))
 				}))
@@ -373,6 +381,7 @@ func TestCreateReservationRejectsLifecycleIncoherentCurrentProjection(t *testing
 	for index, response := range responses {
 		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, response)
 			}))

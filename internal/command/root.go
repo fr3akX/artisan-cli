@@ -15,7 +15,11 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/release"
 )
 
-const usageExitCode = 2
+const (
+	usageExitCode = 2
+	// MaxGlobalTimeout is the finite upper bound for all command network activity.
+	MaxGlobalTimeout = 5 * time.Minute
+)
 
 // Run parses args, executes a command, and returns the process exit code.
 func Run(ctx context.Context, args []string, runtime Runtime) int {
@@ -49,11 +53,15 @@ func Run(ctx context.Context, args []string, runtime Runtime) int {
 		}
 		*server = normalized
 	}
-	if *timeout <= 0 {
+	if *timeout <= 0 || *timeout > MaxGlobalTimeout {
+		message := "Timeout must be greater than zero"
+		if *timeout > MaxGlobalTimeout {
+			message = "Timeout must not exceed " + MaxGlobalTimeout.String()
+		}
 		return writeFailure(runtime, *jsonMode, output.Error{
 			ExitCode: usageExitCode,
 			Code:     "invalid_timeout",
-			Message:  "Timeout must be greater than zero",
+			Message:  message,
 		})
 	}
 	remaining := flags.Args()

@@ -101,7 +101,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 		}
 	}
 	if len(imagePaths) != 0 {
-		if failure := api.ValidateImageUploadFiles(imagePaths); failure != nil {
+		if failure := api.ValidateImageUploadFilesContext(ctx, imagePaths); failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
 	}
@@ -109,7 +109,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -167,7 +167,7 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -213,7 +213,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 		patchState = "archived"
 	}
 	patch, _ := api.NewBeanLotPatch(map[string]any{"state": patchState})
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}

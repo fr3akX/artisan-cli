@@ -203,7 +203,7 @@ func runInventoryImageAdd(ctx context.Context, args []string, runtime Runtime, j
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	if failure = api.ValidateImageUploadFiles(paths); failure != nil {
+	if failure = api.ValidateImageUploadFilesContext(ctx, paths); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
 	visited := visitedFlagNames(flags)
@@ -211,7 +211,7 @@ func runInventoryImageAdd(ctx context.Context, args []string, runtime Runtime, j
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -267,7 +267,7 @@ func runInventoryImageUpdate(ctx context.Context, args []string, runtime Runtime
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -309,7 +309,7 @@ func runInventoryImageReorder(ctx context.Context, args []string, runtime Runtim
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -351,7 +351,7 @@ func runInventoryImageDelete(ctx context.Context, args []string, runtime Runtime
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -380,7 +380,7 @@ func runInventoryImageDownload(ctx context.Context, args []string, runtime Runti
 	if _, failure := api.NormalizeInventoryUUID(imageID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(runtime, jsonMode, serverOverride, timeout)
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}

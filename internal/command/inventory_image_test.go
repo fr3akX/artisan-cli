@@ -30,6 +30,7 @@ func TestInventoryImageAddUsesIndexedMetadataAndOrderedPositionalFiles(t *testin
 	var filenames, contentTypes, contents []string
 	var gotPath, gotKey string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		gotPath = r.URL.Path
 		gotKey = r.Header.Get("Idempotency-Key")
 		_, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -95,6 +96,7 @@ func TestInventoryLotCreateSupportsRepeatedImageDeclarations(t *testing.T) {
 	var manifest map[string]any
 	var imageParts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/api/v1/inventory/admin/bean-lots" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
@@ -141,6 +143,7 @@ func TestInventoryLotCreateFromJSONPairsExactManifestMetadataWithImageDeclaratio
 	}
 	var manifest string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, parameters, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		part, _ := multipart.NewReader(r.Body, parameters["boundary"]).NextPart()
 		body, _ := io.ReadAll(part)
@@ -161,6 +164,7 @@ func TestInventoryLotCreateFromJSONPairsExactManifestMetadataWithImageDeclaratio
 func TestInventoryImageUpdateReorderAndDeleteContracts(t *testing.T) {
 	var methods, paths, bodies, keys []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		methods = append(methods, r.Method)
 		paths = append(paths, r.URL.Path)
@@ -186,6 +190,7 @@ func TestInventoryImageUpdateReorderAndDeleteContracts(t *testing.T) {
 func TestInventoryImageDeleteDeclineAndMissingYesMakeZeroRequests(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
 	}))
@@ -211,6 +216,7 @@ func TestInventoryImageDownloadSelectsVariantAndWritesOnlyFile(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "thumb.webp")
 	var path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		path = r.URL.Path
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Cache-Control", "private, no-store")
