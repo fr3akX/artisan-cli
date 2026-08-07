@@ -26,7 +26,13 @@ import (
 	"time"
 )
 
-const pinnedServerRef = "4c0136fe98f6728f4bb94e416c5abe570e7f4831"
+const (
+	pinnedServerRef     = "4c0136fe98f6728f4bb94e416c5abe570e7f4831"
+	maxCLIOutputBytes   = 2 << 20
+	maxBrowserJSONBytes = 1 << 20
+	cliCommandTimeout   = 45 * time.Second
+	cliCommandWaitDelay = 2 * time.Second
+)
 
 var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -47,12 +53,58 @@ type commandRecord struct {
 	Stderr   string   `json:"stderr"`
 }
 
+type commandExecution struct {
+	record   commandRecord
+	err      error
+	timedOut bool
+	overflow bool
+}
+
+type boundedCapture struct {
+	contents []byte
+	limit    int
+	overflow bool
+}
+
+func (capture *boundedCapture) Write(value []byte) (int, error) {
+	remaining := capture.limit - len(capture.contents)
+	if remaining > 0 {
+		kept := len(value)
+		if kept > remaining {
+			kept = remaining
+		}
+		capture.contents = append(capture.contents, value[:kept]...)
+	}
+	if len(value) > remaining {
+		capture.overflow = true
+	}
+	return len(value), nil
+}
+
+func (capture *boundedCapture) Bytes() []byte  { return capture.contents }
+func (capture *boundedCapture) String() string { return string(capture.contents) }
+
 type cliRunner struct {
-	binary         string
-	baseURL        string
-	env            []string
-	forbiddenToken string
-	records        []commandRecord
+	binary           string
+	baseURL          string
+	cwd              string
+	env              []string
+	commandTimeout   time.Duration
+	commandWaitDelay time.Duration
+	forbiddenToken   string
+	records          []commandRecord
+}
+
+type authIdentity struct {
+	User struct {
+		Email    string `json:"email"`
+		Nickname string `json:"nickname"`
+	} `json:"user"`
+	Organization struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	} `json:"organization"`
+	Role string `json:"role"`
 }
 
 type lot struct {
@@ -65,9 +117,11 @@ type lot struct {
 }
 
 type imageProjection struct {
-	ImageID  string `json:"image_id"`
-	IsCover  bool   `json:"is_cover"`
-	Position int64  `json:"position"`
+	ImageID  string  `json:"image_id"`
+	Caption  *string `json:"caption"`
+	AltText  *string `json:"alt_text"`
+	IsCover  bool    `json:"is_cover"`
+	Position int64   `json:"position"`
 }
 
 type lotPage struct {
@@ -118,21 +172,59 @@ func TestPinnedServerRef(t *testing.T) {
 }
 
 func TestValidateLoopbackBaseURL(t *testing.T) {
-	valid := []string{"http://localhost", "http://127.0.0.1:18080", "https://[::1]:8443"}
-	for _, raw := range valid {
-		if _, err := validateLoopbackBaseURL(raw); err != nil {
-			t.Errorf("validateLoopbackBaseURL(%q): %v", raw, err)
-		}
+	tests := []struct {
+		name  string
+		raw   string
+		valid bool
+	}{
+		{name: "IPv4 loopback", raw: "http://127.0.0.1", valid: true},
+		{name: "IPv4 loopback with port", raw: "http://127.0.0.2:18080", valid: true},
+		{name: "entire IPv4 loopback range", raw: "https://127.255.255.255:443", valid: true},
+		{name: "IPv6 loopback", raw: "http://[::1]", valid: true},
+		{name: "IPv6 loopback with port", raw: "https://[::1]:8443", valid: true},
+		{name: "blank", raw: ""},
+		{name: "whitespace", raw: " http://127.0.0.1"},
+		{name: "hostname localhost", raw: "http://localhost"},
+		{name: "hostname", raw: "http://example.com"},
+		{name: "hostname suffix", raw: "http://localhost.evil.invalid"},
+		{name: "IPv4 mapped loopback rejected", raw: "http://[::ffff:127.0.0.1]"},
+		{name: "IPv4 mapped nonloopback", raw: "http://[::ffff:192.0.2.1]"},
+		{name: "IPv6 zone", raw: "http://[::1%25lo0]"},
+		{name: "expanded IPv6 alternate", raw: "http://[0:0:0:0:0:0:0:1]"},
+		{name: "IPv6 uppercase alternate", raw: "http://[0:0:0:0:0:0:0:0A]"},
+		{name: "integer IPv4", raw: "http://2130706433"},
+		{name: "hex IPv4", raw: "http://0x7f000001"},
+		{name: "octal IPv4", raw: "http://0177.0.0.1"},
+		{name: "leading-zero IPv4", raw: "http://127.000.000.001"},
+		{name: "nonloopback IPv4", raw: "http://126.255.255.255"},
+		{name: "unspecified IPv4", raw: "http://0.0.0.0"},
+		{name: "nonloopback IPv6", raw: "http://[::2]"},
+		{name: "unspecified IPv6", raw: "http://[::]"},
+		{name: "unsupported scheme", raw: "ftp://127.0.0.1"},
+		{name: "credentials", raw: "http://user:pass@127.0.0.1"},
+		{name: "trailing slash", raw: "http://127.0.0.1/"},
+		{name: "path", raw: "http://127.0.0.1/api"},
+		{name: "escaped path", raw: "http://127.0.0.1/%2e"},
+		{name: "query", raw: "http://127.0.0.1?x=1"},
+		{name: "empty query", raw: "http://127.0.0.1?"},
+		{name: "fragment", raw: "http://127.0.0.1#fragment"},
+		{name: "empty IPv4 port", raw: "http://127.0.0.1:"},
+		{name: "empty IPv6 port", raw: "https://[::1]:"},
+		{name: "zero port", raw: "http://127.0.0.1:0"},
+		{name: "oversized port", raw: "http://127.0.0.1:65536"},
+		{name: "malformed port", raw: "http://127.0.0.1:http"},
+		{name: "newline injection", raw: "http://127.0.0.1\n.example"},
 	}
-	invalid := []string{
-		"", "ftp://127.0.0.1", "http://example.com", "http://localhost.evil.invalid",
-		"http://user@localhost", "http://localhost/", "http://localhost/path", "http://localhost?x=1",
-		"http://localhost#fragment", "http://localhost:bad",
-	}
-	for _, raw := range invalid {
-		if _, err := validateLoopbackBaseURL(raw); err == nil {
-			t.Errorf("validateLoopbackBaseURL(%q) unexpectedly succeeded", raw)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validateLoopbackBaseURL(test.raw)
+			if test.valid && (err != nil || got != test.raw) {
+				t.Fatalf("validateLoopbackBaseURL(%q) = (%q, %v), want exact accepted origin", test.raw, got, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("validateLoopbackBaseURL(%q) unexpectedly succeeded as %q", test.raw, got)
+			}
+		})
 	}
 }
 
@@ -171,6 +263,158 @@ func TestCommandRecordNeverContainsTokenInput(t *testing.T) {
 	}
 }
 
+func TestBoundedCaptureStopsRetainingOverflow(t *testing.T) {
+	capture := boundedCapture{limit: 4}
+	if written, err := capture.Write([]byte("abcdef")); err != nil || written != 6 {
+		t.Fatalf("Write = (%d, %v), want (6, nil)", written, err)
+	}
+	if string(capture.Bytes()) != "abcd" || !capture.overflow {
+		t.Fatalf("bounded capture = (%q, %v), want retained prefix and overflow", capture.Bytes(), capture.overflow)
+	}
+	if written, err := capture.Write([]byte("secret-unscanned-tail")); err != nil || written != 21 {
+		t.Fatalf("overflow Write = (%d, %v)", written, err)
+	}
+	if string(capture.Bytes()) != "abcd" {
+		t.Fatalf("overflow retained additional bytes: %q", capture.Bytes())
+	}
+}
+
+func TestDecodeExactlyOneJSONObject(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{name: "one object", input: `{"value":"ok"}`, valid: true},
+		{name: "one object with whitespace", input: "  {\"value\":\"ok\"}\n\t", valid: true},
+		{name: "empty"},
+		{name: "null", input: `null`},
+		{name: "array", input: `[]`},
+		{name: "scalar", input: `true`},
+		{name: "truncated", input: `{"value":`},
+		{name: "two objects", input: `{"value":"one"}{"value":"two"}`},
+		{name: "object and scalar", input: `{"value":"one"}true`},
+		{name: "trailing junk", input: `{"value":"one"}junk`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var target struct {
+				Value string `json:"value"`
+			}
+			err := decodeExactlyOneJSON([]byte(test.input), &target, false)
+			if test.valid && (err != nil || target.Value != "ok") {
+				t.Fatalf("decode = (%+v, %v), want one object", target, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid JSON stream unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestReadBoundedBrowserJSON(t *testing.T) {
+	var target map[string]string
+	if err := readBoundedJSON(strings.NewReader(`{"ok":"yes"}`), 32, "", &target); err != nil || target["ok"] != "yes" {
+		t.Fatalf("bounded browser decode = (%v, %v)", target, err)
+	}
+	if err := readBoundedJSON(strings.NewReader(`{} {}`), 32, "", &target); err == nil {
+		t.Fatal("browser decoder accepted two JSON objects")
+	}
+	if err := readBoundedJSON(strings.NewReader(strings.Repeat("x", 33)), 32, "", &target); !errors.Is(err, errBrowserResponseTooLarge) {
+		t.Fatalf("browser overflow error = %v, want static size error", err)
+	}
+	token := "browser-secret-token"
+	if err := readBoundedJSON(strings.NewReader(`{"error":"`+token+`"}`), 128, token, &target); !errors.Is(err, errBrowserTokenExposure) || strings.Contains(err.Error(), token) {
+		t.Fatalf("browser token scan returned unsafe error %q", err)
+	}
+}
+
+func TestTokenTreeScannerFindsChunkBoundaryAndRejectsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	token := "boundary-secret-token"
+	contents := append(bytes.Repeat([]byte{'x'}, (32<<10)-5), []byte(token)...)
+	if err := os.WriteFile(filepath.Join(root, "state"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertTokenAbsentFromTrees(token, root); err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("tree token scan error = %q, want static exposure error", err)
+	}
+	if err := os.Remove(filepath.Join(root, "state")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/null", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertTokenAbsentFromTrees(token, root); err == nil {
+		t.Fatal("tree token scan accepted a symlink")
+	}
+}
+
+func TestBrowserClientDisablesProxiesAndRedirects(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newBrowserClient(jar)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatal("browser client transport did not disable proxies")
+	}
+	if err := client.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("redirect policy error = %v, want http.ErrUseLastResponse", err)
+	}
+}
+
+func TestResolveTrustedExecutableRejectsFinalSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "artisan-real")
+	if err := os.WriteFile(target, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveTrustedExecutable(target)
+	if err != nil || resolved != target {
+		t.Fatalf("regular executable = (%q, %v), want exact resolved path", resolved, err)
+	}
+	link := filepath.Join(root, "artisan-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTrustedExecutable(link); err == nil {
+		t.Fatal("final-component executable symlink unexpectedly accepted")
+	}
+}
+
+func TestCLIRunnerUsesIsolatedCWDAndBoundsChildPipeWait(t *testing.T) {
+	root := t.TempDir()
+	runDirectory := filepath.Join(root, "run")
+	if err := os.Mkdir(runDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwdScript := filepath.Join(root, "cwd-command")
+	if err := os.WriteFile(cwdScript, []byte("#!/bin/sh\nprintf '{\"ok\":true,\"data\":{\"cwd\":\"%s\"}}\\n' \"$PWD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := cliRunner{binary: cwdScript, baseURL: "http://127.0.0.1", cwd: runDirectory, env: []string{"PATH=" + os.Getenv("PATH")}}
+	execution := runner.execute("")
+	if execution.err != nil || execution.overflow || execution.timedOut || !strings.Contains(execution.record.Stdout, `"cwd":"`+runDirectory+`"`) {
+		t.Fatalf("isolated cwd execution = %+v", execution)
+	}
+
+	holderScript := filepath.Join(root, "pipe-holder")
+	if err := os.WriteFile(holderScript, []byte("#!/bin/sh\n(sleep 5) &\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner = cliRunner{
+		binary: holderScript, baseURL: "http://127.0.0.1", cwd: runDirectory,
+		env: []string{"PATH=" + os.Getenv("PATH")}, commandTimeout: 50 * time.Millisecond, commandWaitDelay: 50 * time.Millisecond,
+	}
+	started := time.Now()
+	execution = runner.execute("")
+	if !execution.timedOut || time.Since(started) > time.Second {
+		t.Fatalf("child pipe holder execution = timedOut %v duration %s, want bounded", execution.timedOut, time.Since(started))
+	}
+}
+
 func TestIntegrationWorkflowContract(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "integration.yml"))
 	if err != nil {
@@ -180,26 +424,120 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 	for _, required := range []string{
 		"permissions:\n  contents: read", pinnedServerRef, "repository: fr3akX/artisan-server",
 		"integration/artisan-server.ref", "CGO_ENABLED: \"0\"", "go-version: 1.23.x",
-		"scripts/e2e_compose.py", "compose.yaml", "compose.e2e.yaml", "down -v --remove-orphans",
-		"if: always()", "ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080",
+		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow missing %q", required)
 		}
 	}
-	if strings.Contains(text, "workflow_dispatch") || strings.Contains(text, "docker compose") {
+	if strings.Contains(text, "workflow_dispatch") || strings.Contains(text, "docker compose") || strings.Contains(text, "docker-compose") {
 		t.Error("workflow must not expose dispatch targets or bypass the guarded Compose wrapper")
 	}
-	usesLine := regexp.MustCompile(`(?m)^\s*uses:\s*[^@\s]+@([^\s#]+)`)
-	matches := usesLine.FindAllStringSubmatch(text, -1)
-	if len(matches) < 3 {
-		t.Fatalf("workflow has %d action uses, want checkout twice and setup-go", len(matches))
-	}
-	for _, match := range matches {
-		if !fullSHA.MatchString(match[1]) {
-			t.Errorf("action is not pinned by a full commit SHA: %s", match[0])
+	usesCount := 0
+	pinnedUse := regexp.MustCompile(`^[^@[:space:]]+@[0-9a-f]{40}$`)
+	for lineNumber, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "uses:") {
+			continue
+		}
+		usesCount++
+		target := strings.TrimSpace(strings.TrimPrefix(trimmed, "uses:"))
+		if !pinnedUse.MatchString(target) {
+			t.Errorf("workflow uses line %d is not exactly action@full-SHA: %q", lineNumber+1, line)
 		}
 	}
+	if usesCount != 3 {
+		t.Fatalf("workflow has %d action uses, want exactly checkout twice and setup-go", usesCount)
+	}
+	wrapperCount := 0
+	for lineNumber, line := range strings.Split(text, "\n") {
+		if !strings.Contains(line, "./scripts/e2e_compose.py") {
+			continue
+		}
+		wrapperCount++
+		if !regexp.MustCompile(`^\s*timeout --signal=TERM --kill-after=[^ ]+ [^ ]+ \./scripts/e2e_compose\.py `).MatchString(line) {
+			t.Errorf("Compose wrapper line %d is not directly timeout-bounded: %q", lineNumber+1, line)
+		}
+	}
+	if wrapperCount != 6 {
+		t.Errorf("workflow Compose wrapper count = %d, want config, start down/up, bootstrap, logs, teardown", wrapperCount)
+	}
+	for index, invocation := range composeInvocations(text) {
+		if !strings.Contains(invocation, `-f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml"`) || strings.Count(invocation, " -f ") != 2 {
+			t.Errorf("workflow Compose invocation %d does not use exactly the two absolute pinned files: %q", index, invocation)
+		}
+	}
+
+	start := workflowStep(t, text, "Start disposable Artisan Server")
+	assertGuardedComposeStep(t, start, false, "down -v --remove-orphans", "up -d --build")
+	teardown := workflowStep(t, text, "Tear down disposable stack")
+	assertGuardedComposeStep(t, teardown, true, "down -v --remove-orphans")
+	logs := workflowStep(t, text, "Print bounded server logs on failure")
+	for _, required := range []string{"timeout --signal=TERM --kill-after=", "logs --no-color --tail 200", "head -c 65536"} {
+		if !strings.Contains(logs, required) {
+			t.Errorf("failure log step missing %q", required)
+		}
+	}
+}
+
+func workflowStep(t *testing.T, workflow, name string) string {
+	t.Helper()
+	marker := "      - name: " + name + "\n"
+	start := strings.Index(workflow, marker)
+	if start < 0 {
+		t.Fatalf("workflow step %q not found", name)
+	}
+	rest := workflow[start+len(marker):]
+	if end := strings.Index(rest, "\n      - name: "); end >= 0 {
+		rest = rest[:end]
+	}
+	return marker + rest
+}
+
+func assertGuardedComposeStep(t *testing.T, step string, always bool, operations ...string) {
+	t.Helper()
+	if (strings.Contains(step, "        if: always()")) != always {
+		t.Errorf("step always condition = %v, want %v", strings.Contains(step, "        if: always()"), always)
+	}
+	if !strings.Contains(step, "working-directory: artisan-server") {
+		t.Error("guarded Compose step does not use the pinned server directory")
+	}
+	invocations := composeInvocations(step)
+	if len(invocations) != len(operations) {
+		t.Fatalf("guarded Compose invocation count = %d, want %d", len(invocations), len(operations))
+	}
+	for index, invocation := range invocations {
+		for _, required := range []string{
+			"timeout --signal=TERM --kill-after=",
+			"./scripts/e2e_compose.py --project \"$ARTISAN_SERVER_E2E_PROJECT_NAME\"",
+			"-f \"$PWD/compose.yaml\" -f \"$PWD/compose.e2e.yaml\"",
+			operations[index],
+		} {
+			if !strings.Contains(invocation, required) {
+				t.Errorf("guarded Compose invocation %d missing %q: %q", index, required, invocation)
+			}
+		}
+		if strings.Count(invocation, " -f ") != 2 {
+			t.Errorf("guarded Compose invocation %d does not contain exactly two files: %q", index, invocation)
+		}
+	}
+}
+
+func composeInvocations(step string) []string {
+	lines := strings.Split(step, "\n")
+	var invocations []string
+	for index := 0; index < len(lines); index++ {
+		if !strings.Contains(lines[index], "./scripts/e2e_compose.py") {
+			continue
+		}
+		invocation := strings.TrimSpace(lines[index])
+		for strings.HasSuffix(invocation, "\\") && index+1 < len(lines) {
+			index++
+			invocation = strings.TrimSuffix(invocation, "\\") + " " + strings.TrimSpace(lines[index])
+		}
+		invocations = append(invocations, invocation)
+	}
+	return invocations
 }
 
 func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
@@ -210,53 +548,58 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if !configured {
 		t.Skip("live integration environment is not configured")
 	}
-	binary, err := filepath.Abs(config.binary)
+	binary, err := resolveTrustedExecutable(config.binary)
 	if err != nil {
-		t.Fatal("ARTISAN_CLI_BINARY must resolve to an absolute path")
-	}
-	info, err := os.Stat(binary)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
-		t.Fatal("ARTISAN_CLI_BINARY must name an existing executable regular file")
+		t.Fatal(err)
 	}
 
 	root := t.TempDir()
-	for _, directory := range []string{"home", "config", "state", "tmp"} {
-		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+	paths := make(map[string]string)
+	for _, directory := range []string{"home", "config", "state", "tmp", "run"} {
+		paths[directory] = filepath.Join(root, directory)
+		if err := os.Mkdir(paths[directory], 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	runner := cliRunner{
 		binary:  binary,
 		baseURL: config.baseURL,
+		cwd:     paths["run"],
 		env: []string{
 			"PATH=" + os.Getenv("PATH"),
-			"HOME=" + filepath.Join(root, "home"),
-			"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
-			"XDG_STATE_HOME=" + filepath.Join(root, "state"),
-			"TMPDIR=" + filepath.Join(root, "tmp"),
-			"NO_PROXY=localhost,127.0.0.1,::1",
+			"HOME=" + paths["home"],
+			"XDG_CONFIG_HOME=" + paths["config"],
+			"XDG_STATE_HOME=" + paths["state"],
+			"TMPDIR=" + paths["tmp"],
 		},
 	}
 
 	httpClient, csrf, token, credentialID := issueCredential(t, config)
 	runner.forbiddenToken = token
-	defer revokeCredential(t, httpClient, config.baseURL, csrf, credentialID)
+	defer revokeCredential(t, httpClient, config.baseURL, csrf, credentialID, token)
 	defer func() {
 		if err := assertTokenAbsent(token, runner.records, nil); err != nil {
 			t.Error(err)
 		}
+		if err := assertTokenAbsentFromTrees(token, paths["config"], paths["state"], paths["home"], paths["tmp"], paths["run"]); err != nil {
+			t.Error(err)
+		}
+	}()
+	needsLogout := true
+	defer func() {
+		if needsLogout {
+			if err := runner.cleanupLogout(); err != nil {
+				t.Error(err)
+			}
+		}
 	}()
 
-	var identity map[string]any
+	var identity authIdentity
 	runner.runJSON(t, token+"\n", &identity, "auth", "login", "--token-stdin")
-	if identity["role"] != "admin" {
-		t.Fatalf("login identity role = %v, want admin", identity["role"])
-	}
-	var status map[string]any
+	assertExpectedIdentity(t, identity, config)
+	var status authIdentity
 	runner.runJSON(t, "", &status, "auth", "status")
-	if status["role"] != "admin" {
-		t.Fatalf("auth status role = %v, want admin", status["role"])
-	}
+	assertExpectedIdentity(t, status, config)
 
 	runID := randomHex(t, 12)
 	lotName := "CLI integration " + runID
@@ -290,7 +633,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	)
 	assertLotBalance(t, adjusted, 5750, 0, 5750)
 
-	imagePath := filepath.Join(root, "fixture.png")
+	imagePath := filepath.Join(paths["run"], "fixture.png")
 	writePNG(t, imagePath)
 	var withImage lot
 	runner.runJSON(t, "", &withImage,
@@ -300,7 +643,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if len(withImage.Images) != 1 || !withImage.Images[0].IsCover {
 		t.Fatalf("image add result = %+v, want one cover image", withImage.Images)
 	}
-	downloadPath := filepath.Join(root, "download.webp")
+	downloadPath := filepath.Join(paths["run"], "download.webp")
 	var downloaded struct {
 		Path    string `json:"path"`
 		Variant string `json:"variant"`
@@ -313,7 +656,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if downloaded.Bytes != int64(len(downloadBytes)) || downloaded.Variant != "display" || len(downloadBytes) < 12 || string(downloadBytes[:4]) != "RIFF" || string(downloadBytes[8:12]) != "WEBP" {
+	if downloaded.Path != downloadPath || downloaded.Bytes != int64(len(downloadBytes)) || downloaded.Variant != "display" || len(downloadBytes) < 12 || string(downloadBytes[:4]) != "RIFF" || string(downloadBytes[8:12]) != "WEBP" {
 		t.Fatalf("downloaded image is not the exact reported WebP result")
 	}
 
@@ -337,6 +680,13 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	var authoritative lot
 	runner.runJSON(t, "", &authoritative, "inventory", "lot", "show", created.LotID)
 	assertLotBalance(t, authoritative, 5750, 1000, 4750)
+	if authoritative.Name != lotName || len(authoritative.Images) != 1 {
+		t.Fatalf("authoritative lot content = name %q images %+v", authoritative.Name, authoritative.Images)
+	}
+	authoritativeImage := authoritative.Images[0]
+	if authoritativeImage.ImageID != withImage.Images[0].ImageID || !authoritativeImage.IsCover || authoritativeImage.Position != 0 || authoritativeImage.Caption == nil || *authoritativeImage.Caption != "Disposable integration image" || authoritativeImage.AltText == nil || *authoritativeImage.AltText != "Coffee sample" {
+		t.Fatalf("authoritative image metadata = %+v", authoritativeImage)
+	}
 	var ledger ledgerPage
 	runner.runJSON(t, "", &ledger, "inventory", "lot", "ledger", created.LotID, "--all")
 	assertLedger(t, ledger)
@@ -353,10 +703,10 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if !logout.LoggedOut {
 		t.Fatal("auth logout did not report success")
 	}
+	needsLogout = false
 	if err := assertTokenAbsent(token, runner.records, nil); err != nil {
 		t.Fatal(err)
 	}
-	assertTreeTokenAbsent(t, root, token)
 }
 
 func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
@@ -395,32 +745,95 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 }
 
 func validateLoopbackBaseURL(raw string) (string, error) {
+	const invalidOrigin = "integration base URL must be a canonical numeric loopback HTTP(S) origin"
 	if raw == "" || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "\r\n\x00") {
-		return "", errors.New("integration base URL must be a canonical loopback HTTP(S) origin")
+		return "", errors.New(invalidOrigin)
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Path != "" {
-		return "", errors.New("integration base URL must be a canonical loopback HTTP(S) origin")
+		return "", errors.New(invalidOrigin)
 	}
 	hostname := parsed.Hostname()
-	loopback := hostname == "localhost"
-	if ip := net.ParseIP(hostname); ip != nil {
-		loopback = ip.IsLoopback()
+	ip := net.ParseIP(hostname)
+	if ip == nil || !ip.IsLoopback() || strings.Contains(hostname, "%") {
+		return "", errors.New(invalidOrigin)
 	}
-	if !loopback {
-		return "", errors.New("integration base URL host must be an exact loopback address")
+	// Reject IPv4-mapped IPv6 and noncanonical alternate spellings so URL and
+	// transport layers cannot disagree about the exact destination literal.
+	if strings.Contains(hostname, ":") && ip.To4() != nil {
+		return "", errors.New(invalidOrigin)
 	}
-	if port := parsed.Port(); port != "" {
+	if ip.String() != hostname {
+		return "", errors.New(invalidOrigin)
+	}
+	port := parsed.Port()
+	if strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New(invalidOrigin)
+	}
+	if port != "" {
 		value, portErr := strconv.Atoi(port)
 		if portErr != nil || value < 1 || value > 65535 {
-			return "", errors.New("integration base URL port is invalid")
+			return "", errors.New(invalidOrigin)
 		}
 	}
-	return parsed.String(), nil
+	expectedHost := hostname
+	if strings.Contains(hostname, ":") {
+		expectedHost = "[" + hostname + "]"
+	}
+	if port != "" {
+		expectedHost += ":" + port
+	}
+	if parsed.Host != expectedHost || parsed.String() != raw {
+		return "", errors.New(invalidOrigin)
+	}
+	return raw, nil
+}
+
+func resolveTrustedExecutable(raw string) (string, error) {
+	absolute, err := filepath.Abs(raw)
+	if err != nil {
+		return "", errors.New("ARTISAN_CLI_BINARY must resolve to an absolute path")
+	}
+	absolute = filepath.Clean(absolute)
+	linkInfo, err := os.Lstat(absolute)
+	if err != nil {
+		return "", errors.New("ARTISAN_CLI_BINARY must name an existing executable regular file")
+	}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("ARTISAN_CLI_BINARY final path must not be a symbolic link")
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", errors.New("ARTISAN_CLI_BINARY could not be resolved")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return "", errors.New("ARTISAN_CLI_BINARY must name an existing executable regular file")
+	}
+	return resolved, nil
 }
 
 func newCommandRecord(args []string, exitCode int, stdout, stderr []byte) commandRecord {
 	return commandRecord{Args: append([]string(nil), args...), ExitCode: exitCode, Stdout: string(stdout), Stderr: string(stderr)}
+}
+
+func decodeExactlyOneJSON(contents []byte, target any, disallowUnknown bool) error {
+	trimmed := bytes.TrimSpace(contents)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("response was not one JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	if disallowUnknown {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(target); err != nil {
+		return errors.New("response was not one JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("response contained data after its JSON object")
+	}
+	return nil
 }
 
 func assertTokenAbsent(token string, records []commandRecord, commandErr error) error {
@@ -442,15 +855,25 @@ func assertTokenAbsent(token string, records []commandRecord, commandErr error) 
 	return nil
 }
 
-func (runner *cliRunner) runJSON(t *testing.T, stdin string, target any, commandArgs ...string) {
-	t.Helper()
+func (runner *cliRunner) execute(stdin string, commandArgs ...string) commandExecution {
 	args := append([]string{"--json", "--server", runner.baseURL}, commandArgs...)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	timeout := runner.commandTimeout
+	if timeout == 0 {
+		timeout = cliCommandTimeout
+	}
+	waitDelay := runner.commandWaitDelay
+	if waitDelay == 0 {
+		waitDelay = cliCommandWaitDelay
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, runner.binary, args...)
+	command.Dir = runner.cwd
 	command.Env = append([]string(nil), runner.env...)
 	command.Stdin = strings.NewReader(stdin)
-	var stdout, stderr bytes.Buffer
+	command.WaitDelay = waitDelay
+	stdout := boundedCapture{limit: maxCLIOutputBytes}
+	stderr := boundedCapture{limit: maxCLIOutputBytes}
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	err := command.Run()
@@ -462,29 +885,75 @@ func (runner *cliRunner) runJSON(t *testing.T, stdin string, target any, command
 			exitCode = exitError.ExitCode()
 		}
 	}
-	runner.records = append(runner.records, newCommandRecord(args, exitCode, stdout.Bytes(), stderr.Bytes()))
+	record := newCommandRecord(args, exitCode, stdout.Bytes(), stderr.Bytes())
+	runner.records = append(runner.records, record)
+	return commandExecution{record: record, err: err, timedOut: ctx.Err() != nil, overflow: stdout.overflow || stderr.overflow}
+}
+
+func (runner *cliRunner) runJSON(t *testing.T, stdin string, target any, commandArgs ...string) {
+	t.Helper()
+	execution := runner.execute(stdin, commandArgs...)
+	commandIndex := len(runner.records) - 1
 	if runner.forbiddenToken != "" {
-		if scanErr := assertTokenAbsent(runner.forbiddenToken, runner.records, err); scanErr != nil {
+		if scanErr := assertTokenAbsent(runner.forbiddenToken, runner.records, execution.err); scanErr != nil {
 			t.Fatal(scanErr)
 		}
 	}
-	if ctx.Err() != nil {
-		t.Fatalf("CLI command %d exceeded its bounded timeout", len(runner.records)-1)
+	if execution.overflow {
+		t.Fatalf("CLI command %d exceeded the bounded output limit", commandIndex)
 	}
-	if err != nil {
-		t.Fatalf("CLI command %d exited with status %d; safe stdout=%q stderr=%q", len(runner.records)-1, exitCode, bounded(stdout.String()), bounded(stderr.String()))
+	if execution.timedOut {
+		t.Fatalf("CLI command %d exceeded its bounded timeout", commandIndex)
+	}
+	if execution.err != nil {
+		t.Fatalf("CLI command %d exited with status %d; safe stdout=%q stderr=%q", commandIndex, execution.record.ExitCode, bounded(execution.record.Stdout), bounded(execution.record.Stderr))
 	}
 	var envelope struct {
 		OK   bool            `json:"ok"`
 		Data json.RawMessage `json:"data"`
 	}
-	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(stdout.Bytes()), 2<<20))
-	decoder.DisallowUnknownFields()
-	if decodeErr := decoder.Decode(&envelope); decodeErr != nil || !envelope.OK || len(envelope.Data) == 0 {
-		t.Fatalf("CLI command %d returned an invalid success envelope", len(runner.records)-1)
+	if decodeErr := decodeExactlyOneJSON([]byte(execution.record.Stdout), &envelope, true); decodeErr != nil || !envelope.OK || len(envelope.Data) == 0 {
+		t.Fatalf("CLI command %d returned an invalid single success envelope", commandIndex)
 	}
-	if decodeErr := json.Unmarshal(envelope.Data, target); decodeErr != nil {
-		t.Fatalf("CLI command %d returned unexpected structured data", len(runner.records)-1)
+	if decodeErr := decodeExactlyOneJSON(envelope.Data, target, false); decodeErr != nil {
+		t.Fatalf("CLI command %d returned unexpected structured data", commandIndex)
+	}
+}
+
+func (runner *cliRunner) cleanupLogout() error {
+	execution := runner.execute("", "auth", "logout")
+	if runner.forbiddenToken != "" {
+		if err := assertTokenAbsent(runner.forbiddenToken, runner.records, execution.err); err != nil {
+			return err
+		}
+	}
+	if execution.overflow {
+		return errors.New("cleanup logout exceeded the bounded output limit")
+	}
+	if execution.timedOut {
+		return errors.New("cleanup logout exceeded its bounded timeout")
+	}
+	if execution.err != nil {
+		return errors.New("cleanup logout failed")
+	}
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			LoggedOut bool `json:"logged_out"`
+		} `json:"data"`
+	}
+	if err := decodeExactlyOneJSON([]byte(execution.record.Stdout), &envelope, true); err != nil || !envelope.OK || !envelope.Data.LoggedOut {
+		return errors.New("cleanup logout returned an invalid response")
+	}
+	return nil
+}
+
+func newBrowserClient(jar http.CookieJar) *http.Client {
+	return &http.Client{
+		Jar:           jar,
+		Timeout:       20 * time.Second,
+		Transport:     &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
 
@@ -494,21 +963,16 @@ func issueCredential(t *testing.T, config liveConfig) (*http.Client, string, str
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{
-		Jar:           jar,
-		Timeout:       20 * time.Second,
-		Transport:     &http.Transport{Proxy: nil},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	client := newBrowserClient(jar)
 	var csrfResponse struct {
 		CSRFToken string `json:"csrf_token"`
 	}
-	doJSON(t, client, http.MethodGet, config.baseURL+"/api/v1/session/csrf", "", nil, &csrfResponse, http.StatusOK)
+	doJSON(t, client, http.MethodGet, config.baseURL+"/api/v1/session/csrf", "", nil, &csrfResponse, http.StatusOK, "")
 	if csrfResponse.CSRFToken == "" {
 		t.Fatal("browser CSRF endpoint returned an empty token")
 	}
 	login := map[string]string{"email": config.adminEmail, "password": config.adminPassword, "organization": config.organizationSlug}
-	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/session/login", csrfResponse.CSRFToken, login, &map[string]any{}, http.StatusOK)
+	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/session/login", csrfResponse.CSRFToken, login, &map[string]any{}, http.StatusOK, "")
 	csrf := cookieValue(t, jar, config.baseURL, "artisan_server_csrf")
 	issued := struct {
 		Token      string `json:"token"`
@@ -516,8 +980,11 @@ func issueCredential(t *testing.T, config liveConfig) (*http.Client, string, str
 			ID string `json:"id"`
 		} `json:"credential"`
 	}{}
-	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/credentials", csrf, map[string]string{"name": "CLI integration " + randomHex(t, 8)}, &issued, http.StatusCreated)
+	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/credentials", csrf, map[string]string{"name": "CLI integration " + randomHex(t, 8)}, &issued, http.StatusCreated, "")
 	if strings.TrimSpace(issued.Token) == "" || strings.ContainsAny(issued.Token, "\r\n") || issued.Credential.ID == "" {
+		if issued.Credential.ID != "" {
+			revokeCredential(t, client, config.baseURL, csrf, issued.Credential.ID, issued.Token)
+		}
 		t.Fatal("credential issue response was incomplete")
 	}
 	return client, csrf, issued.Token, issued.Credential.ID
@@ -538,7 +1005,29 @@ func cookieValue(t *testing.T, jar http.CookieJar, baseURL, name string) string 
 	return ""
 }
 
-func revokeCredential(t *testing.T, client *http.Client, baseURL, csrf, credentialID string) {
+var (
+	errBrowserResponseTooLarge = errors.New("browser response exceeded the bounded size limit")
+	errBrowserTokenExposure    = errors.New("issued token appeared in a browser response")
+)
+
+func readBoundedJSON(body io.Reader, limit int64, forbiddenToken string, target any) error {
+	contents, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return errors.New("browser response could not be read")
+	}
+	if int64(len(contents)) > limit {
+		return errBrowserResponseTooLarge
+	}
+	if forbiddenToken != "" && bytes.Contains(contents, []byte(forbiddenToken)) {
+		return errBrowserTokenExposure
+	}
+	if err := decodeExactlyOneJSON(contents, target, false); err != nil {
+		return errors.New("browser response was not exactly one JSON object")
+	}
+	return nil
+}
+
+func revokeCredential(t *testing.T, client *http.Client, baseURL, csrf, credentialID, forbiddenToken string) {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/credentials/"+url.PathEscape(credentialID), nil)
 	if err != nil {
@@ -552,13 +1041,25 @@ func revokeCredential(t *testing.T, client *http.Client, baseURL, csrf, credenti
 		return
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	contents, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	if readErr != nil {
+		t.Error("credential cleanup response could not be read")
+		return
+	}
+	if forbiddenToken != "" && bytes.Contains(contents, []byte(forbiddenToken)) {
+		t.Error(errBrowserTokenExposure)
+		return
+	}
+	if len(contents) > 64<<10 {
+		t.Error("credential cleanup response exceeded the bounded size limit")
+		return
+	}
 	if response.StatusCode != http.StatusNoContent {
 		t.Errorf("credential cleanup returned HTTP %d", response.StatusCode)
 	}
 }
 
-func doJSON(t *testing.T, client *http.Client, method, target, csrf string, payload, responseTarget any, expectedStatus int) {
+func doJSON(t *testing.T, client *http.Client, method, target, csrf string, payload, responseTarget any, expectedStatus int, forbiddenToken string) {
 	t.Helper()
 	var body io.Reader
 	if payload != nil {
@@ -583,16 +1084,18 @@ func doJSON(t *testing.T, client *http.Client, method, target, csrf string, payl
 		t.Fatal("browser API request failed")
 	}
 	defer response.Body.Close()
+	var decoded json.RawMessage
+	if err := readBoundedJSON(response.Body, maxBrowserJSONBytes, forbiddenToken, &decoded); err != nil {
+		t.Fatal(err)
+	}
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
 		t.Fatal("browser API redirect was rejected")
 	}
 	if response.StatusCode != expectedStatus {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
 		t.Fatalf("browser API returned HTTP %d, want %d", response.StatusCode, expectedStatus)
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
-	if err := decoder.Decode(responseTarget); err != nil {
-		t.Fatal("browser API returned invalid JSON")
+	if err := decodeExactlyOneJSON(decoded, responseTarget, false); err != nil {
+		t.Fatal("browser API returned invalid JSON object")
 	}
 }
 
@@ -622,6 +1125,13 @@ func writePNG(t *testing.T, path string) {
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertExpectedIdentity(t *testing.T, identity authIdentity, config liveConfig) {
+	t.Helper()
+	if identity.User.Email != config.adminEmail || identity.User.Nickname != config.adminNickname || identity.Organization.Name != config.organization || identity.Organization.Slug != config.organizationSlug || identity.Role != "admin" {
+		t.Fatalf("authenticated identity = user %q <%s>, organization %q (%s), role %q; want configured administrator", identity.User.Nickname, identity.User.Email, identity.Organization.Name, identity.Organization.Slug, identity.Role)
 	}
 }
 
@@ -658,26 +1168,64 @@ func assertLedger(t *testing.T, page ledgerPage) {
 	}
 }
 
-func assertTreeTokenAbsent(t *testing.T, root, token string) {
-	t.Helper()
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
+func assertTokenAbsentFromTrees(token string, roots ...string) error {
+	if token == "" {
+		return errors.New("issued token was blank")
+	}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
+				return errors.New("isolated CLI tree contained a non-regular file")
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			found, err := readerContains(file, []byte(token))
+			if err != nil {
+				return err
+			}
+			if found {
+				return errors.New("issued token remained in an isolated CLI tree after cleanup")
+			}
 			return nil
-		}
-		contents, err := os.ReadFile(path)
+		})
 		if err != nil {
 			return err
 		}
-		if bytes.Contains(contents, []byte(token)) {
-			return errors.New("issued token remained in isolated CLI files after logout")
+	}
+	return nil
+}
+
+func readerContains(reader io.Reader, needle []byte) (bool, error) {
+	buffer := make([]byte, 32<<10)
+	carry := make([]byte, 0, len(needle)-1)
+	for {
+		count, err := reader.Read(buffer)
+		if count > 0 {
+			chunk := append(carry, buffer[:count]...)
+			if bytes.Contains(chunk, needle) {
+				return true, nil
+			}
+			keep := len(needle) - 1
+			if keep > len(chunk) {
+				keep = len(chunk)
+			}
+			carry = append(carry[:0], chunk[len(chunk)-keep:]...)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
 	}
 }
 

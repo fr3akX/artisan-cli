@@ -10,7 +10,7 @@ permissions:
 jobs:
   live-integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080
       ARTISAN_INTEGRATION_ADMIN_EMAIL: owner@example.com
@@ -75,7 +75,7 @@ jobs:
         working-directory: artisan-server
         run: |
           set -euo pipefail
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+          timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
             -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" config --quiet
 
       - name: Start disposable Artisan Server
@@ -83,16 +83,16 @@ jobs:
         working-directory: artisan-server
         run: |
           set -euo pipefail
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+          timeout --signal=TERM --kill-after=10s 90s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
             -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+          timeout --signal=TERM --kill-after=30s 12m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
             -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" up -d --build
 
       - name: Wait for bounded readiness
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          timeout --signal=TERM --kill-after=5s 125s python3 - <<'PY'
           import json
           import time
           import urllib.error
@@ -104,16 +104,19 @@ jobs:
 
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
           target = "http://127.0.0.1:18080/api/v1/health/ready"
-          for _ in range(90):
+          deadline = time.monotonic() + 120
+          while True:
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise SystemExit("Artisan Server did not become ready within 120 seconds")
               try:
-                  with opener.open(target, timeout=2) as response:
-                      if response.status == 200 and json.load(response).get("components") == {"database": "ok", "object_store": "ok"}:
+                  with opener.open(target, timeout=min(2, remaining)) as response:
+                      body = response.read(65537)
+                      if len(body) <= 65536 and response.status == 200 and json.loads(body).get("components") == {"database": "ok", "object_store": "ok"}:
                           break
               except (OSError, urllib.error.URLError, json.JSONDecodeError):
                   pass
-              time.sleep(1)
-          else:
-              raise SystemExit("Artisan Server did not become ready within 90 seconds")
+              time.sleep(min(1, max(0, deadline - time.monotonic())))
           PY
 
       - name: Bootstrap disposable administrator
@@ -121,7 +124,7 @@ jobs:
         working-directory: artisan-server
         run: |
           set -euo pipefail
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+          timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
             -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" \
             run --rm api python -m app.cli bootstrap-admin \
             --email "$ARTISAN_INTEGRATION_ADMIN_EMAIL" \
@@ -137,26 +140,28 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          go build -trimpath -o "$GITHUB_WORKSPACE/dist/artisan-integration" ./cmd/artisan
+          timeout --signal=TERM --kill-after=10s 5m go build -trimpath -o "$GITHUB_WORKSPACE/dist/artisan-integration" ./cmd/artisan
 
       - name: Run pinned live integration
         shell: bash
         env:
           ARTISAN_CLI_BINARY: ${{ github.workspace }}/dist/artisan-integration
-        run: go test ./integration -count=1 -v
+        run: timeout --signal=TERM --kill-after=10s 12m go test ./integration -count=1 -v
 
       - name: Print bounded server logs on failure
         if: failure()
         shell: bash
         working-directory: artisan-server
         run: |
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
-            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" logs --no-color --tail 200 || true
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" logs --no-color --tail 200 2>&1 | head -c 65536 || true
 
       - name: Tear down disposable stack
         if: always()
         shell: bash
         working-directory: artisan-server
         run: |
-          ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=15s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
             -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans

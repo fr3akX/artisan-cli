@@ -1,8 +1,10 @@
 # Pinned Artisan Server integration
 
-`inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test accepts only an HTTP(S) loopback origin, disables proxies and redirects, uses an isolated temporary CLI home, and skips when none of its opt-in environment is present. A partially configured environment fails instead of skipping.
+`inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
 
-The test logs in through the browser CSRF/session APIs, issues a disposable desktop credential, and passes its one-time token only to the compiled CLI's `auth login --token-stdin`. Captured CLI records never include stdin and are scanned for the raw token. Successful cleanup logs the CLI out and revokes the server credential; stack teardown remains the final cleanup boundary.
+The harness resolves a trusted locally built CLI binary before execution and rejects a symlink in its final path component. Parent-directory symlink resolution and replacement races remain within the trusted local build/workspace premise; the harness is not a sandbox for an attacker-controlled binary. Every command runs from a separate temporary working directory with isolated home, config, state, and temp directories. Each invocation has a context deadline, bounded child-pipe wait, and bounded stdout/stderr capture.
+
+The test logs in through the browser CSRF/session APIs, issues a disposable desktop credential, and passes its one-time token only to the compiled CLI's `auth login --token-stdin`. Captured CLI records never include stdin and are scanned for the raw token before diagnostics. Deferred cleanup attempts logout on every post-issuance failure, then scans every isolated tree and captured record, while credential revocation and Compose teardown remain additional cleanup boundaries.
 
 ## Local run
 
@@ -41,7 +43,8 @@ printf '%s' "$ARTISAN_INTEGRATION_ADMIN_PASSWORD" > secrets/admin_password.txt
 chmod 0444 secrets/*.txt
 
 compose_guard() {
-  "$SERVER_ROOT/scripts/e2e_compose.py" \
+  timeout --signal=TERM --kill-after=30s 12m \
+    "$SERVER_ROOT/scripts/e2e_compose.py" \
     --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
     -f "$SERVER_ROOT/compose.yaml" -f "$SERVER_ROOT/compose.e2e.yaml" "$@"
 }
@@ -60,16 +63,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
         return None
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-for _ in range(90):
+deadline = time.monotonic() + 120
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit('Artisan Server did not become ready within 120 seconds')
     try:
-        with opener.open('http://127.0.0.1:18080/api/v1/health/ready', timeout=2) as response:
-            if response.status == 200 and json.load(response).get('components') == {'database': 'ok', 'object_store': 'ok'}:
+        with opener.open('http://127.0.0.1:18080/api/v1/health/ready', timeout=min(2, remaining)) as response:
+            body = response.read(65537)
+            if len(body) <= 65536 and response.status == 200 and json.loads(body).get('components') == {'database': 'ok', 'object_store': 'ok'}:
                 break
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         pass
-    time.sleep(1)
-else:
-    raise SystemExit('Artisan Server did not become ready within 90 seconds')
+    time.sleep(min(1, max(0, deadline - time.monotonic())))
 PY
 ```
 
