@@ -427,9 +427,19 @@ func TestWorkflowActionPinGuardMutations(t *testing.T) {
 		t.Helper()
 		return strings.Replace(workflow, "    steps:\n", "    steps:\n"+snippet, 1)
 	}
-	pinned := "      - uses: actions/cache@ABCDEF0123456789abcdef0123456789ABCDEF01 # audited\n"
-	if err := validateWorkflowActionPins(insert(pinned), 4); err != nil {
-		t.Fatalf("nameless pinned action rejected: %v", err)
+	pinnedTarget := "actions/cache@ABCDEF0123456789abcdef0123456789ABCDEF01"
+	pinned := "      - uses: " + pinnedTarget + " # audited\n"
+	positiveMutations := map[string]string{
+		"nameless plain":         pinned,
+		"nameless double quoted": "      - uses: \"" + pinnedTarget + "\" # audited\n",
+		"named single quoted":    "      - name: quoted pinned action\n        uses: '" + pinnedTarget + "' # audited\n",
+	}
+	for name, snippet := range positiveMutations {
+		t.Run(name, func(t *testing.T) {
+			if err := validateWorkflowActionPins(insert(snippet), 4); err != nil {
+				t.Fatalf("valid pinned action rejected: %v", err)
+			}
+		})
 	}
 	mutations := []struct {
 		name     string
@@ -439,11 +449,16 @@ func TestWorkflowActionPinGuardMutations(t *testing.T) {
 		{name: "nameless branch", snippet: "      - uses: actions/cache@main\n", wantUses: 4},
 		{name: "nameless tag", snippet: "      - uses: actions/cache@v4\n", wantUses: 4},
 		{name: "named unpinned", snippet: "      - name: bypass\n        uses: actions/cache@main\n", wantUses: 4},
+		{name: "double quoted unpinned", snippet: "      - uses: \"actions/cache@main\"\n", wantUses: 4},
+		{name: "single quoted unpinned", snippet: "      - uses: 'actions/cache@v4'\n", wantUses: 4},
 		{name: "missing at", snippet: "      - uses: actions/cache\n", wantUses: 4},
 		{name: "malformed at", snippet: "      - uses: actions/cache@@ABCDEF0123456789abcdef0123456789ABCDEF01\n", wantUses: 4},
 		{name: "expression", snippet: "      - uses: ${{ github.event.action }}\n", wantUses: 4},
 		{name: "local action", snippet: "      - uses: ./local-action\n", wantUses: 4},
 		{name: "docker action", snippet: "      - uses: docker://alpine:3\n", wantUses: 4},
+		{name: "mapping value", snippet: "      - uses: {action: " + pinnedTarget + "}\n", wantUses: 4},
+		{name: "sequence value", snippet: "      - uses: [" + pinnedTarget + "]\n", wantUses: 4},
+		{name: "alias value", snippet: "      - name: alias seed\n        env:\n          ACTION: &pinned " + pinnedTarget + "\n      - uses: *pinned\n", wantUses: 4},
 		{name: "exact count", snippet: pinned, wantUses: 3},
 	}
 	for _, mutation := range mutations {
@@ -456,6 +471,28 @@ func TestWorkflowActionPinGuardMutations(t *testing.T) {
 	insideRunBlock := insert("      - name: text is not an action\n        run: |\n          uses: actions/cache@main\n")
 	if err := validateWorkflowActionPins(insideRunBlock, 3); err != nil {
 		t.Fatalf("uses text inside a run block was treated as an action: %v", err)
+	}
+	if err := validateWorkflowActionPins(workflow+"\n# trailing audit comment\n   \n\n", 3); err != nil {
+		t.Fatalf("trailing comments and whitespace rejected: %v", err)
+	}
+	secondDocuments := map[string]string{
+		"unpinned uses": "steps:\n  - uses: actions/cache@main\n",
+		"pinned uses":   "steps:\n  - uses: " + pinnedTarget + "\n",
+		"inert mapping": "review: inert\n",
+	}
+	for name, secondDocument := range secondDocuments {
+		t.Run("second document "+name, func(t *testing.T) {
+			if err := validateWorkflowActionPins(workflow+"\n---\n"+secondDocument, 3); err == nil {
+				t.Fatal("second YAML document bypassed the single-document workflow guard")
+			}
+		})
+	}
+	for name, emptyWorkflow := range map[string]string{"empty stream": "", "empty document": "---\n# comment only\n"} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateWorkflowActionPins(emptyWorkflow, 0); err == nil {
+				t.Fatal("empty YAML workflow bypassed the nonempty-document guard")
+			}
+		})
 	}
 }
 
@@ -512,9 +549,20 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 }
 
 func validateWorkflowActionPins(workflow string, expectedCount int) error {
+	decoder := yaml.NewDecoder(strings.NewReader(workflow))
 	var document yaml.Node
-	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
-		return errors.New("integration workflow was not valid YAML")
+	if err := decoder.Decode(&document); err != nil {
+		return errors.New("integration workflow must contain one nonempty YAML document")
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 || isEmptyYAMLDocument(document.Content[0]) {
+		return errors.New("integration workflow must contain one nonempty YAML document")
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return errors.New("integration workflow was not valid YAML")
+		}
+		return errors.New("integration workflow must contain exactly one YAML document")
 	}
 	pinnedUse := regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9A-Fa-f]{40}$`)
 	usesCount := 0
@@ -537,7 +585,7 @@ func validateWorkflowActionPins(workflow string, expectedCount int) error {
 				key, value := node.Content[index], node.Content[index+1]
 				if key.Kind == yaml.ScalarNode && key.Value == "uses" {
 					usesCount++
-					if value.Kind != yaml.ScalarNode || value.Style != 0 || !pinnedUse.MatchString(value.Value) {
+					if value.Kind != yaml.ScalarNode || !pinnedUse.MatchString(value.Value) {
 						return fmt.Errorf("workflow uses line %d is not exactly owner/repo@full-SHA", value.Line)
 					}
 				}
@@ -557,6 +605,10 @@ func validateWorkflowActionPins(workflow string, expectedCount int) error {
 		return fmt.Errorf("workflow has %d action uses, want exactly %d", usesCount, expectedCount)
 	}
 	return nil
+}
+
+func isEmptyYAMLDocument(root *yaml.Node) bool {
+	return root == nil || root.Kind == 0 || (root.Kind == yaml.ScalarNode && root.Tag == "!!null")
 }
 
 func workflowStep(t *testing.T, workflow, name string) string {
