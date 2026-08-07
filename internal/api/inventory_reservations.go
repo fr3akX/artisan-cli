@@ -176,7 +176,7 @@ func (c *Client) CreateInventoryReservation(ctx context.Context, request Reserva
 		return ReservationMutationResponse{}, failure
 	}
 	reservation := response.Reservation
-	if reservation.ClientReservationUUID != request.ClientReservationUUID || reservation.ClientInstanceUUID != request.ClientInstanceUUID || reservation.RoastUUID != request.RoastUUID || reservation.LotID != request.LotID || reservation.PlannedGrams != request.PlannedGrams || reservation.ReservedAt != request.OccurredAt || reservation.State != "reserved" {
+	if reservation.ClientReservationUUID != request.ClientReservationUUID || reservation.ClientInstanceUUID != request.ClientInstanceUUID || reservation.RoastUUID != request.RoastUUID || reservation.LotID != request.LotID || reservation.PlannedGrams != request.PlannedGrams || reservation.ReservedAt != request.OccurredAt {
 		return ReservationMutationResponse{}, invalidServerResponse(http.StatusCreated)
 	}
 	return response, nil

@@ -299,10 +299,6 @@ func TestReservationMutationResponsesAreBoundToEachRequest(t *testing.T) {
 			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
 			return f
 		}},
-		{name: "create state", status: http.StatusCreated, response: reservationMutationJSON("finalized", false), call: func(c *Client) *output.Error {
-			_, f := c.CreateInventoryReservation(context.Background(), create, "key")
-			return f
-		}},
 		{name: "finalize client reservation", status: http.StatusOK, response: strings.Replace(reservationMutationJSON("finalized", false), inventoryEntryID, inventoryImageID, 1), call: func(c *Client) *output.Error {
 			_, f := c.FinalizeInventoryReservation(context.Background(), inventoryEntryID, ReservationFinalize{ActualGrams: &actual, OccurredAt: inventoryTimestamp}, "key")
 			return f
@@ -342,6 +338,48 @@ func TestReservationMutationResponsesAreBoundToEachRequest(t *testing.T) {
 			client, _ := NewClient(server.URL, "token", time.Second)
 			if failure := test.call(client); failure == nil || failure.Code != "invalid_server_response" {
 				t.Fatalf("failure = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestCreateReservationAcceptsLifecycleCoherentCurrentProjectionStates(t *testing.T) {
+	create := ReservationCreate{ClientReservationUUID: inventoryEntryID, ClientInstanceUUID: reservationClientInstanceID, RoastUUID: reservationRoastID, LotID: inventoryLotID, PlannedGrams: 1250, OccurredAt: inventoryTimestamp}
+	for _, state := range []string{"reserved", "finalized", "released"} {
+		for _, replay := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replay=%t", state, replay), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, reservationMutationJSON(state, replay))
+				}))
+				defer server.Close()
+				client, _ := NewClient(server.URL, "token", time.Second)
+				response, failure := client.CreateInventoryReservation(context.Background(), create, "key")
+				if failure != nil || response.Reservation.State != state || response.IdempotentReplay != replay {
+					t.Fatalf("response=%#v failure=%#v", response, failure)
+				}
+			})
+		}
+	}
+}
+
+func TestCreateReservationRejectsLifecycleIncoherentCurrentProjection(t *testing.T) {
+	create := ReservationCreate{ClientReservationUUID: inventoryEntryID, ClientInstanceUUID: reservationClientInstanceID, RoastUUID: reservationRoastID, LotID: inventoryLotID, PlannedGrams: 1250, OccurredAt: inventoryTimestamp}
+	responses := []string{
+		strings.Replace(reservationMutationJSON("reserved", false), `"actual_grams":null`, `"actual_grams":1200`, 1),
+		strings.Replace(reservationMutationJSON("finalized", false), `"actual_grams":1200`, `"actual_grams":null`, 1),
+		strings.Replace(reservationMutationJSON("released", false), `"completed_at":"`+inventoryTimestamp+`"`, `"completed_at":null`, 1),
+	}
+	for index, response := range responses {
+		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "token", time.Second)
+			if _, failure := client.CreateInventoryReservation(context.Background(), create, "key"); failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure=%#v", failure)
 			}
 		})
 	}
