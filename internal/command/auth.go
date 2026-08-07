@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fr3akX/artisan-cli/internal/api"
-	"github.com/fr3akX/artisan-cli/internal/auth"
 	"github.com/fr3akX/artisan-cli/internal/config"
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
@@ -129,8 +128,8 @@ func runAuthLogout(runtime Runtime, jsonMode bool) int {
 	if err := recoverLoginTransaction(runtime.ConfigDir); err != nil {
 		return writeFailure(runtime, jsonMode, configurationLoadFailure(err))
 	}
-	if err := auth.NewFileStore(runtime.ConfigDir).Remove(); err != nil {
-		return writeFailure(runtime, jsonMode, *transactionConfigurationFailure())
+	if failure := persistLogout(runtime.ConfigDir); failure != nil {
+		return writeFailure(runtime, jsonMode, *failure)
 	}
 	data := struct {
 		LoggedOut bool `json:"logged_out"`
@@ -245,14 +244,7 @@ func persistLogin(configDir, token, serverURL string) *output.Error {
 	if serverURL != "" {
 		return persistExplicitLogin(configDir, token, serverURL, nil)
 	}
-	if err := auth.NewFileStore(configDir).Save(token); err != nil {
-		return credentialStoreFailure()
-	}
-	return nil
-}
-
-func credentialStoreFailure() *output.Error {
-	return transactionConfigurationFailure()
+	return persistStoredToken(configDir, token)
 }
 
 func configurationLoadFailure(error) output.Error {
