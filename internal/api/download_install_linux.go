@@ -9,20 +9,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func atomicInstallDownloadNoReplace(from, to string) error {
+func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
 	err := unix.Renameat2(unix.AT_FDCWD, from, unix.AT_FDCWD, to, unix.RENAME_NOREPLACE)
+	if err == nil {
+		return true, nil
+	}
 	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) {
 		if linkErr := os.Link(from, to); linkErr != nil {
-			return linkErr
+			return false, linkErr
 		}
-		// The destination is already complete and atomically visible. Cleanup is
-		// also retried by the caller's unconditional temporary-file defer.
-		_ = os.Remove(from)
-		return nil
+		if removeErr := os.Remove(from); removeErr != nil {
+			return true, removeErr
+		}
+		return true, nil
 	}
-	return err
+	return false, err
 }
 
-func atomicReplaceDownload(from, to string) error {
-	return os.Rename(from, to)
+func atomicReplaceDownload(from, to string) (bool, error) {
+	if err := os.Rename(from, to); err != nil {
+		return false, err
+	}
+	return true, nil
 }

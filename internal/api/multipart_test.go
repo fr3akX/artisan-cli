@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -229,6 +230,260 @@ func TestManifestMultipartRejectsReplacedSymlinkBeforeReplay(t *testing.T) {
 		_ = body.Close()
 		t.Fatal("replaced symlink was accepted")
 	}
+}
+
+func TestManifestMultipartDetectsActiveStreamSourceMutation(t *testing.T) {
+	const imageSize = 1 << 20
+	for _, test := range []struct {
+		name    string
+		prepare func(t *testing.T, dir string) (string, func())
+	}{
+		{
+			name: "append",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				path := writeMultipartActiveSource(t, dir, "append.jpg", imageSize)
+				return path, func() {
+					file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := file.Write([]byte("appended")); err != nil {
+						file.Close()
+						t.Fatal(err)
+					}
+					if err := file.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "truncate",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				path := writeMultipartActiveSource(t, dir, "truncate.jpg", imageSize)
+				return path, func() {
+					if err := os.Truncate(path, imageSize/2); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "same size content with restored mtime",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				path := writeMultipartActiveSource(t, dir, "content.jpg", imageSize)
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return path, func() {
+					file, err := os.OpenFile(path, os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := file.WriteAt(bytes.Repeat([]byte("z"), 4096), 3*imageSize/4); err != nil {
+						file.Close()
+						t.Fatal(err)
+					}
+					if err := file.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "mtime only",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				path := writeMultipartActiveSource(t, dir, "mtime.jpg", imageSize)
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return path, func() {
+					changed := info.ModTime().Add(3 * time.Second)
+					if err := os.Chtimes(path, changed, changed); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "path replacement",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				path := writeMultipartActiveSource(t, dir, "replace.jpg", imageSize)
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return path, func() {
+					replacement := filepath.Join(dir, "replacement.jpg")
+					if err := os.WriteFile(replacement, bytes.Repeat([]byte("a"), imageSize), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(replacement, path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "symlink retarget",
+			prepare: func(t *testing.T, dir string) (string, func()) {
+				first := writeMultipartActiveSource(t, dir, "first.jpg", imageSize)
+				second := writeMultipartActiveSource(t, dir, "second.jpg", imageSize)
+				link := filepath.Join(dir, "link.jpg")
+				if err := os.Symlink(first, link); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+				return link, func() {
+					if err := os.Remove(link); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(second, link); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, mutate := test.prepare(t, dir)
+			factory, err := NewManifestMultipartBody([]byte(`{"images":[{"upload_index":0}]}`), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, contentType, err := factory()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, parameters, err := mime.ParseMediaType(contentType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader := multipart.NewReader(body, parameters["boundary"])
+			manifest, err := reader.NextPart()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.Copy(io.Discard, manifest); err != nil {
+				t.Fatal(err)
+			}
+			image, err := reader.NextPart()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(image, make([]byte, imageSize/4)); err != nil {
+				t.Fatal(err)
+			}
+			mutate()
+			_, readErr := io.Copy(io.Discard, image)
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- body.Close() }()
+			var closeErr error
+			select {
+			case closeErr = <-closeDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("active mutation leaked a blocked multipart producer")
+			}
+			if !isChangedMultipartError(readErr) && !isChangedMultipartError(closeErr) {
+				t.Fatalf("read error = %v, close error = %v", readErr, closeErr)
+			}
+			assertNoOpenMultipartDescriptor(t, dir)
+		})
+	}
+}
+
+func writeMultipartActiveSource(t *testing.T, dir, name string, size int) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), size), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func isChangedMultipartError(err error) bool {
+	var failure *multipartFileError
+	return errors.As(err, &failure) && failure.changed
+}
+
+func assertNoOpenMultipartDescriptor(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return
+	}
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot inspect descriptors: %v", err)
+	}
+	prefix := filepath.Clean(dir) + string(filepath.Separator)
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+		if err != nil {
+			continue
+		}
+		target = strings.TrimSuffix(target, " (deleted)")
+		if strings.HasPrefix(filepath.Clean(target), prefix) {
+			t.Fatalf("multipart source descriptor remained open: %s", entry.Name())
+		}
+	}
+}
+
+func TestManifestMultipartRechecksEarlierImagesBeforeFinalBoundary(t *testing.T) {
+	dir := t.TempDir()
+	first := writeMultipartActiveSource(t, dir, "first.jpg", 64<<10)
+	second := writeMultipartActiveSource(t, dir, "second.jpg", 1<<20)
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewManifestMultipartBody([]byte(`{"images":[{"upload_index":0},{"upload_index":1}]}`), first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, contentType, err := factory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parameters, _ := mime.ParseMediaType(contentType)
+	reader := multipart.NewReader(body, parameters["boundary"])
+	manifest, _ := reader.NextPart()
+	_, _ = io.Copy(io.Discard, manifest)
+	firstPart, _ := reader.NextPart()
+	if _, err := io.Copy(io.Discard, firstPart); err != nil {
+		t.Fatal(err)
+	}
+	secondPart, _ := reader.NextPart()
+	if _, err := io.ReadFull(secondPart, make([]byte, 1<<18)); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(first, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt(bytes.Repeat([]byte("z"), 4096), 0); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(first, firstInfo.ModTime(), firstInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, secondPart)
+	closeErr := body.Close()
+	if !isChangedMultipartError(readErr) && !isChangedMultipartError(closeErr) {
+		t.Fatalf("earlier image mutation was accepted: read=%v close=%v", readErr, closeErr)
+	}
+	assertNoOpenMultipartDescriptor(t, dir)
 }
 
 func TestManifestMultipartPartialCloseStopsProducerAndReleasesResources(t *testing.T) {

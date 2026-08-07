@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -217,6 +218,50 @@ func TestInventoryImageUploadRetryReopensIdenticalFilesAndRejectsReplacement(t *
 	}
 }
 
+func TestInventoryImageUploadDoesNotRetryAfterActiveSourceMutation(t *testing.T) {
+	const imageSize = 1 << 20
+	path := filepath.Join(t.TempDir(), "active.jpg")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), imageSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts atomic.Int32
+	client, _ := NewClient("http://127.0.0.1", "active-secret", time.Second)
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		if _, err := io.ReadFull(request.Body, make([]byte, imageSize/4)); err != nil {
+			return nil, err
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteAt(bytes.Repeat([]byte("z"), 4096), 3*imageSize/4); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		_, readErr := io.Copy(io.Discard, request.Body)
+		_ = request.Body.Close()
+		return nil, readErr
+	})
+	_, failure := client.AddInventoryImages(context.Background(), mutationLotID, []ImageUploadManifest{{UploadIndex: 0}}, []string{path}, "active-key")
+	if failure == nil || failure.ExitCode != 2 || failure.Code != "image_file_changed" || failure.Message != "An image file changed after upload preparation" {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
 func TestInventoryImageValidationIsLocalAndStrict(t *testing.T) {
 	valid := filepath.Join(t.TempDir(), "valid.jpg")
 	if err := os.WriteFile(valid, []byte("x"), 0o600); err != nil {
@@ -311,6 +356,296 @@ func TestDownloadInventoryImageRetriesTransientStatusIntoSameAtomicDestination(t
 	assertNoDownloadTemps(t, destination)
 }
 
+func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		wantRequests int32
+		force        bool
+		inject       func(*Client)
+	}{
+		{
+			name: "create",
+			inject: func(client *Client) {
+				client.downloadOps.createTemp = func(string, string) (*os.File, error) {
+					return nil, errors.New("create ENOSPC local-secret destination-secret")
+				}
+			},
+		},
+		{
+			name: "protect",
+			inject: func(client *Client) {
+				client.downloadOps.protect = func(*os.File) error {
+					return errors.New("protect local-secret destination-secret")
+				}
+			},
+		},
+		{
+			name:         "writer ENOSPC",
+			wantRequests: 1,
+			inject: func(client *Client) {
+				client.downloadOps.writer = func(*os.File) io.Writer {
+					return failingDownloadWriter{err: errors.New("ENOSPC local-secret destination-secret")}
+				}
+			},
+		},
+		{
+			name:         "short write",
+			wantRequests: 1,
+			inject: func(client *Client) {
+				client.downloadOps.writer = func(*os.File) io.Writer { return shortDownloadWriter{} }
+			},
+		},
+		{
+			name:         "sync",
+			wantRequests: 1,
+			inject: func(client *Client) {
+				client.downloadOps.syncFile = func(*os.File) error {
+					return errors.New("sync local-secret destination-secret")
+				}
+			},
+		},
+		{
+			name:         "close",
+			wantRequests: 1,
+			inject: func(client *Client) {
+				client.downloadOps.closeFile = func(file *os.File) error {
+					_ = file.Close()
+					return errors.New("close local-secret destination-secret")
+				}
+			},
+		},
+		{
+			name:         "no-replace install",
+			wantRequests: 1,
+			inject: func(client *Client) {
+				client.downloadOps.installNoReplace = func(string, string) (bool, error) {
+					return false, errors.New("install local-secret destination-secret")
+				}
+			},
+		},
+		{
+			name:         "force install",
+			wantRequests: 1,
+			force:        true,
+			inject: func(client *Client) {
+				client.downloadOps.replace = func(string, string) (bool, error) {
+					return false, errors.New("replace local-secret destination-secret")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "destination-secret.webp")
+			if test.force {
+				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "image/webp")
+				_, _ = io.WriteString(w, "download-body")
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "local-secret", time.Second)
+			test.inject(client)
+			_, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, test.force)
+			assertLocalStorageFailure(t, failure, "Unable to store the image download safely")
+			if requests.Load() != test.wantRequests {
+				t.Fatalf("requests = %d, want %d", requests.Load(), test.wantRequests)
+			}
+			if test.force {
+				contents, err := os.ReadFile(destination)
+				if err != nil || string(contents) != "existing" {
+					t.Fatalf("existing destination changed: %q, %v", contents, err)
+				}
+			} else if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination unexpectedly exists: %v", err)
+			}
+			assertNoDownloadTemps(t, destination)
+		})
+	}
+}
+
+func TestDownloadInventoryImageRetriesOnlyNetworkResponseReadFailures(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "network-retry.webp")
+	var attempts atomic.Int32
+	var closes atomic.Int32
+	client, _ := NewClient("http://127.0.0.1", "network-secret", time.Second)
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+		header := make(http.Header)
+		header.Set("Content-Type", "image/webp")
+		if attempt < 3 {
+			return &http.Response{StatusCode: http.StatusOK, Header: header, Body: &failingDownloadReadCloser{data: []byte("partial"), err: errors.New("network read failed"), closes: &closes}}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: &failingDownloadReadCloser{data: []byte("complete"), closes: &closes}}, nil
+	})
+	result, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "complete" || result.Bytes != int64(len(contents)) {
+		t.Fatalf("result=%#v contents=%q err=%v", result, contents, err)
+	}
+	if attempts.Load() != 3 || closes.Load() != 3 {
+		t.Fatalf("attempts=%d closes=%d", attempts.Load(), closes.Load())
+	}
+	assertNoDownloadTemps(t, destination)
+}
+
+func TestDownloadInventoryImageSyncsParentAfterInstallInExactOrder(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		force    bool
+		fallback bool
+	}{
+		{name: "no replace"},
+		{name: "force replace", force: true},
+		{name: "hard link fallback", fallback: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "durable.webp")
+			if test.force {
+				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "image/webp")
+				_, _ = io.WriteString(w, "durable")
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "secret", time.Second)
+			defaults := client.downloadOps
+			var events []string
+			client.downloadOps.syncFile = func(file *os.File) error {
+				events = append(events, "sync-file")
+				return defaults.syncFile(file)
+			}
+			client.downloadOps.closeFile = func(file *os.File) error {
+				events = append(events, "close-file")
+				return defaults.closeFile(file)
+			}
+			client.downloadOps.syncParent = func(path string) error {
+				events = append(events, "sync-parent")
+				if path != dir {
+					t.Fatalf("sync parent = %q, want %q", path, dir)
+				}
+				return defaults.syncParent(path)
+			}
+			if test.force {
+				client.downloadOps.replace = func(from, to string) (bool, error) {
+					events = append(events, "install")
+					return defaults.replace(from, to)
+				}
+			} else if test.fallback {
+				client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+					events = append(events, "install")
+					if err := os.Link(from, to); err != nil {
+						return false, err
+					}
+					if err := os.Remove(from); err != nil {
+						return true, err
+					}
+					return true, nil
+				}
+			} else {
+				client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+					events = append(events, "install")
+					return defaults.installNoReplace(from, to)
+				}
+			}
+			if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, test.force); failure != nil {
+				t.Fatal(failure)
+			}
+			if !reflect.DeepEqual(events, []string{"sync-file", "close-file", "install", "sync-parent"}) {
+				t.Fatalf("events = %v", events)
+			}
+			contents, _ := os.ReadFile(destination)
+			if string(contents) != "durable" {
+				t.Fatalf("destination = %q", contents)
+			}
+			assertNoDownloadTemps(t, destination)
+		})
+	}
+}
+
+func TestDownloadInventoryImageParentSyncFailurePreservesInstalledDestination(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "visible.webp")
+			if force {
+				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "image/webp")
+				_, _ = io.WriteString(w, "installed")
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "sync-secret", time.Second)
+			client.downloadOps.syncParent = func(string) error { return errors.New("sync sync-secret " + destination) }
+			result, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, force)
+			assertLocalStorageFailure(t, failure, "The image download is installed, but storage durability is uncertain")
+			if result.Path != destination || result.Variant != "display" || result.Bytes != int64(len("installed")) {
+				t.Fatalf("installed result = %#v", result)
+			}
+			contents, err := os.ReadFile(destination)
+			if err != nil || string(contents) != "installed" {
+				t.Fatalf("installed destination = %q, %v", contents, err)
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("requests = %d", requests.Load())
+			}
+			assertNoDownloadTemps(t, destination)
+		})
+	}
+}
+
+func TestDownloadInventoryImageSyncsFallbackMetadataEvenWhenCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "fallback.webp")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = io.WriteString(w, "fallback")
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	defaults := client.downloadOps
+	var parentSynced atomic.Bool
+	client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+		if err := os.Link(from, to); err != nil {
+			return false, err
+		}
+		return true, errors.New("temporary link cleanup failed")
+	}
+	client.downloadOps.syncParent = func(path string) error {
+		parentSynced.Store(true)
+		return defaults.syncParent(path)
+	}
+	result, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false)
+	assertLocalStorageFailure(t, failure, "The image download is installed, but a local storage operation did not complete")
+	if result.Path != destination || result.Bytes != int64(len("fallback")) {
+		t.Fatalf("installed result = %#v", result)
+	}
+	if !parentSynced.Load() {
+		t.Fatal("fallback metadata was not synced")
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "fallback" {
+		t.Fatalf("destination = %q, %v", contents, err)
+	}
+	assertNoDownloadTemps(t, destination)
+}
+
 func TestDownloadInventoryImageNoClobberPrecheckAndInstallRace(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "race.webp")
@@ -331,7 +666,7 @@ func TestDownloadInventoryImageNoClobberPrecheckAndInstallRace(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "secret", time.Second)
-	if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false); failure == nil || failure.Code != "destination_exists" {
+	if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false); failure == nil || failure.ExitCode != 3 || failure.Code != "local_storage_error" || failure.Message != "Destination already exists; use --force to replace it" {
 		t.Fatalf("precheck failure = %#v", failure)
 	}
 	if requests.Load() != 0 {
@@ -342,7 +677,7 @@ func TestDownloadInventoryImageNoClobberPrecheckAndInstallRace(t *testing.T) {
 		t.Fatal(err)
 	}
 	createRacer.Store(true)
-	if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false); failure == nil || failure.Code != "destination_exists" {
+	if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false); failure == nil || failure.ExitCode != 3 || failure.Code != "local_storage_error" || failure.Message != "Destination already exists; use --force to replace it" {
 		t.Fatalf("race failure = %#v", failure)
 	}
 	contents, _ := os.ReadFile(destination)
@@ -434,12 +769,14 @@ func TestDownloadInventoryImageRefusesRedirectWithoutForwardingBearer(t *testing
 	assertNoDownloadTemps(t, destination)
 }
 
-func TestDownloadInventoryImageCancellationClosesResponseAndCleansTemp(t *testing.T) {
+func TestDownloadInventoryImageCancellationClosesResponseCleansTempAndDoesNotRetry(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "cancel.webp")
 	ctx, cancel := context.WithCancel(context.Background())
 	body := &cancelReadCloser{ctx: ctx}
+	var requests atomic.Int32
 	client, _ := NewClient("http://127.0.0.1", "secret", time.Second)
 	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
 		header := make(http.Header)
 		header.Set("Content-Type", "image/webp")
 		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: body}, nil
@@ -448,13 +785,118 @@ func TestDownloadInventoryImageCancellationClosesResponseAndCleansTemp(t *testin
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
-	if _, failure := client.DownloadInventoryImage(ctx, mutationLotID, commandAPIImageID, "display", destination, false); failure == nil {
-		t.Fatal("cancelled download succeeded")
+	_, failure := client.DownloadInventoryImage(ctx, mutationLotID, commandAPIImageID, "display", destination, false)
+	assertInterruptionFailure(t, failure)
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
 	}
 	if !body.closed.Load() {
 		t.Fatal("cancelled response body was not closed")
 	}
 	assertNoDownloadTemps(t, destination)
+}
+
+func TestDownloadInventoryImageCancellationBeforeInstallRemovesOnlyTemporary(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "cancel-before-install.webp")
+	ctx, cancel := context.WithCancel(context.Background())
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = io.WriteString(w, "complete")
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	defaults := client.downloadOps
+	client.downloadOps.syncFile = func(file *os.File) error {
+		err := defaults.syncFile(file)
+		cancel()
+		return err
+	}
+	_, failure := client.DownloadInventoryImage(ctx, mutationLotID, commandAPIImageID, "display", destination, false)
+	assertInterruptionFailure(t, failure)
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination unexpectedly exists: %v", err)
+	}
+	assertNoDownloadTemps(t, destination)
+}
+
+func TestDownloadInventoryImageExpiredDeadlineMakesZeroRequests(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "deadline.webp")
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	var requests atomic.Int32
+	client, _ := NewClient("http://127.0.0.1", "secret", time.Second)
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("request should not be made")
+	})
+	_, failure := client.DownloadInventoryImage(ctx, mutationLotID, commandAPIImageID, "display", destination, false)
+	assertInterruptionFailure(t, failure)
+	if requests.Load() != 0 {
+		t.Fatalf("requests = %d, want 0", requests.Load())
+	}
+	assertNoDownloadTemps(t, destination)
+}
+
+func assertLocalStorageFailure(t *testing.T, failure *output.Error, message string) {
+	t.Helper()
+	if failure == nil || failure.ExitCode != 3 || failure.Code != "local_storage_error" || failure.Message != message || failure.HTTPStatus != nil {
+		t.Fatalf("failure = %#v", failure)
+	}
+	for _, forbidden := range []string{"local-secret", "sync-secret", "destination-secret", "ENOSPC"} {
+		if strings.Contains(failure.Code, forbidden) || strings.Contains(failure.Message, forbidden) {
+			t.Fatalf("failure leaked %q: %#v", forbidden, failure)
+		}
+	}
+}
+
+func assertInterruptionFailure(t *testing.T, failure *output.Error) {
+	t.Helper()
+	if failure == nil || failure.ExitCode != 130 || failure.Code != "interrupted" || failure.Message != "Operation interrupted" || failure.HTTPStatus != nil {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+type failingDownloadWriter struct{ err error }
+
+func (writer failingDownloadWriter) Write([]byte) (int, error) { return 0, writer.err }
+
+type shortDownloadWriter struct{}
+
+func (shortDownloadWriter) Write(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	return len(buffer) - 1, nil
+}
+
+type failingDownloadReadCloser struct {
+	data   []byte
+	err    error
+	closes *atomic.Int32
+}
+
+func (reader *failingDownloadReadCloser) Read(buffer []byte) (int, error) {
+	if len(reader.data) != 0 {
+		n := copy(buffer, reader.data)
+		reader.data = reader.data[n:]
+		return n, nil
+	}
+	if reader.err != nil {
+		err := reader.err
+		reader.err = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (reader *failingDownloadReadCloser) Close() error {
+	reader.closes.Add(1)
+	return nil
 }
 
 const commandAPIImageID = "22222222222242228222222222222222"

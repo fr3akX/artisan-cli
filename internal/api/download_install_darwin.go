@@ -9,18 +9,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func atomicInstallDownloadNoReplace(from, to string) error {
+func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
 	err := unix.RenamexNp(from, to, unix.RENAME_EXCL)
+	if err == nil {
+		return true, nil
+	}
 	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EINVAL) {
 		if linkErr := os.Link(from, to); linkErr != nil {
-			return linkErr
+			return false, linkErr
 		}
-		_ = os.Remove(from)
-		return nil
+		if removeErr := os.Remove(from); removeErr != nil {
+			return true, removeErr
+		}
+		return true, nil
 	}
-	return err
+	return false, err
 }
 
-func atomicReplaceDownload(from, to string) error {
-	return os.Rename(from, to)
+func atomicReplaceDownload(from, to string) (bool, error) {
+	if err := os.Rename(from, to); err != nil {
+		return false, err
+	}
+	return true, nil
 }

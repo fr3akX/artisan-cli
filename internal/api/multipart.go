@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -34,12 +35,13 @@ type multipartImage struct {
 	contentType string
 	linkInfo    os.FileInfo
 	fileInfo    os.FileInfo
+	fingerprint [sha256.Size]byte
 }
 
 // NewManifestMultipartBody prepares a replayable streaming multipart body.
 // The manifest is always the first part and each image is reopened and checked
-// against its captured filesystem identity, size, and modification time before
-// every attempt. Image contents are never buffered in memory.
+// against its captured filesystem identity, size, modification time, and SHA-256
+// fingerprint before and during every attempt. Image contents are never buffered.
 func NewManifestMultipartBody(manifest []byte, imagePaths ...string) (func() (io.ReadCloser, string, error), error) {
 	if len(imagePaths) > maxMultipartImages {
 		return nil, &multipartFileError{}
@@ -78,8 +80,9 @@ func NewManifestMultipartBody(manifest []byte, imagePaths ...string) (func() (io
 
 		reader, writer := io.Pipe()
 		done := make(chan error, 1)
-		body := &streamingMultipartBody{reader: reader, done: done}
-		go writeMultipartBody(writer, done, boundary, manifestCopy, images, opened)
+		cancel := make(chan struct{})
+		body := &streamingMultipartBody{reader: reader, done: done, cancel: cancel}
+		go writeMultipartBody(writer, done, cancel, boundary, manifestCopy, images, opened)
 		return body, contentType, nil
 	}, nil
 }
@@ -102,13 +105,21 @@ func captureMultipartImage(path string) (multipartImage, error) {
 		return multipartImage{}, &multipartFileError{}
 	}
 	fileInfo, statErr := file.Stat()
-	closeErr := file.Close()
-	if statErr != nil || closeErr != nil || !fileInfo.Mode().IsRegular() {
+	if statErr != nil || !fileInfo.Mode().IsRegular() {
+		_ = file.Close()
 		return multipartImage{}, &multipartFileError{}
+	}
+	fingerprint, fingerprintErr := fingerprintMultipartFile(file, fileInfo.Size())
+	postFileInfo, postStatErr := file.Stat()
+	postLinkInfo, postLinkErr := os.Lstat(path)
+	closeErr := file.Close()
+	if fingerprintErr != nil || postStatErr != nil || postLinkErr != nil || closeErr != nil ||
+		!sameMultipartSnapshot(fileInfo, postFileInfo) || !os.SameFile(linkInfo, postLinkInfo) {
+		return multipartImage{}, &multipartFileError{changed: true}
 	}
 	return multipartImage{
 		path: path, filename: filename, contentType: contentType,
-		linkInfo: linkInfo, fileInfo: fileInfo,
+		linkInfo: linkInfo, fileInfo: fileInfo, fingerprint: fingerprint,
 	}, nil
 }
 
@@ -145,14 +156,58 @@ func (image multipartImage) openVerified() (*os.File, error) {
 		return nil, &multipartFileError{changed: true}
 	}
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !os.SameFile(image.fileInfo, info) || info.Size() != image.fileInfo.Size() || !info.ModTime().Equal(image.fileInfo.ModTime()) {
+	if err != nil || !info.Mode().IsRegular() || !sameMultipartSnapshot(image.fileInfo, info) {
 		_ = file.Close()
 		return nil, &multipartFileError{changed: true}
 	}
 	return file, nil
 }
 
-func writeMultipartBody(pipe *io.PipeWriter, done chan<- error, boundary string, manifest []byte, images []multipartImage, files []*os.File) {
+func sameMultipartSnapshot(expected, actual os.FileInfo) bool {
+	return expected != nil && actual != nil && os.SameFile(expected, actual) &&
+		expected.Size() == actual.Size() && expected.ModTime().Equal(actual.ModTime())
+}
+
+func fingerprintMultipartFile(file *os.File, size int64) ([sha256.Size]byte, error) {
+	return fingerprintMultipartFileCancelable(file, size, nil)
+}
+
+func fingerprintMultipartFileCancelable(file *os.File, size int64, cancel <-chan struct{}) ([sha256.Size]byte, error) {
+	hasher := sha256.New()
+	remaining := size
+	buffer := make([]byte, 32*1024)
+	for remaining > 0 {
+		if cancel != nil {
+			select {
+			case <-cancel:
+				return [sha256.Size]byte{}, io.ErrClosedPipe
+			default:
+			}
+		}
+		chunk := int64(len(buffer))
+		if remaining < chunk {
+			chunk = remaining
+		}
+		count, err := file.Read(buffer[:chunk])
+		if count > 0 {
+			_, _ = hasher.Write(buffer[:count])
+			remaining -= int64(count)
+		}
+		if err != nil || count == 0 {
+			return [sha256.Size]byte{}, &multipartFileError{changed: true}
+		}
+	}
+	var extra [1]byte
+	count, err := file.Read(extra[:])
+	if count != 0 || !errors.Is(err, io.EOF) {
+		return [sha256.Size]byte{}, &multipartFileError{changed: true}
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hasher.Sum(nil))
+	return fingerprint, nil
+}
+
+func writeMultipartBody(pipe *io.PipeWriter, done chan<- error, cancel <-chan struct{}, boundary string, manifest []byte, images []multipartImage, files []*os.File) {
 	var result error
 	defer func() {
 		closeMultipartFiles(files)
@@ -190,12 +245,81 @@ func writeMultipartBody(pipe *io.PipeWriter, done chan<- error, boundary string,
 			result = err
 			return
 		}
-		if _, err := io.Copy(part, files[index]); err != nil {
+		if err := image.streamVerified(part, files[index]); err != nil {
+			result = err
+			return
+		}
+	}
+	// Recheck every source after every part has streamed. This prevents a change
+	// to an earlier image while a later image is in flight from being accepted.
+	for index, image := range images {
+		if err := image.verifyCurrent(files[index], cancel); err != nil {
 			result = err
 			return
 		}
 	}
 	result = writer.Close()
+}
+
+func (image multipartImage) verifyCurrent(file *os.File, cancel <-chan struct{}) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return &multipartFileError{changed: true}
+	}
+	fingerprint, err := fingerprintMultipartFileCancelable(file, image.fileInfo.Size(), cancel)
+	if err != nil {
+		return err
+	}
+	postFileInfo, statErr := file.Stat()
+	postLinkInfo, linkErr := os.Lstat(image.path)
+	if statErr != nil || linkErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
+		!os.SameFile(image.linkInfo, postLinkInfo) || fingerprint != image.fingerprint {
+		return &multipartFileError{changed: true}
+	}
+	return nil
+}
+
+func (image multipartImage) streamVerified(destination io.Writer, file *os.File) error {
+	hasher := sha256.New()
+	remaining := image.fileInfo.Size()
+	buffer := make([]byte, 32*1024)
+	for remaining > 0 {
+		chunk := int64(len(buffer))
+		if remaining < chunk {
+			chunk = remaining
+		}
+		count, readErr := file.Read(buffer[:chunk])
+		if count > 0 {
+			_, _ = hasher.Write(buffer[:count])
+			written, writeErr := destination.Write(buffer[:count])
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != count {
+				return io.ErrShortWrite
+			}
+			remaining -= int64(count)
+		}
+		if readErr != nil {
+			return &multipartFileError{changed: true}
+		}
+		if count == 0 {
+			return &multipartFileError{changed: true}
+		}
+	}
+	var extra [1]byte
+	count, readErr := file.Read(extra[:])
+	if count != 0 || !errors.Is(readErr, io.EOF) {
+		return &multipartFileError{changed: true}
+	}
+	postFileInfo, statErr := file.Stat()
+	postLinkInfo, linkErr := os.Lstat(image.path)
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hasher.Sum(nil))
+	if statErr != nil || linkErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
+		!os.SameFile(image.linkInfo, postLinkInfo) || fingerprint != image.fingerprint {
+		return &multipartFileError{changed: true}
+	}
+	return nil
 }
 
 func escapeMultipartQuotes(value string) string {
@@ -212,6 +336,7 @@ func closeMultipartFiles(files []*os.File) {
 type streamingMultipartBody struct {
 	reader   *io.PipeReader
 	done     <-chan error
+	cancel   chan struct{}
 	once     sync.Once
 	closeErr error
 }
@@ -222,6 +347,7 @@ func (body *streamingMultipartBody) Read(buffer []byte) (int, error) {
 
 func (body *streamingMultipartBody) Close() error {
 	body.once.Do(func() {
+		close(body.cancel)
 		_ = body.reader.Close()
 		body.closeErr = <-body.done
 		if errors.Is(body.closeErr, io.ErrClosedPipe) {

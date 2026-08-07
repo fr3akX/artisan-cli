@@ -275,6 +275,46 @@ func TestInventoryImageUsageDocumentsUnambiguousIndexedMetadataSyntax(t *testing
 	}
 }
 
+func TestInventoryLotCreateHelpIsCompleteAndExact(t *testing.T) {
+	const want = `Usage: artisan inventory lot create [OPTIONS]
+
+Lot fields:
+  --name TEXT                         lot name (required unless --from-json)
+  --origin TEXT                       origin
+  --producer TEXT                     producer
+  --supplier TEXT                     supplier
+  --external-reference TEXT           external reference
+  --received-date YYYY-MM-DD           received date
+  --crop-year YEAR                    crop year
+  --varietal TEXT                     varietal (repeatable)
+  --sca-score SCORE                   SCA score
+  --processing-method TEXT            processing method
+  --processing-detail TEXT            processing detail
+  --altitude-min-metres METRES        minimum altitude
+  --altitude-max-metres METRES        maximum altitude
+  --notes TEXT                        notes
+
+Opening inventory:
+  --opening-grams GRAMS               opening grams
+  --opening-reason TEXT               opening reason
+  --opening-reference TEXT            opening reference
+
+Input and replay:
+  --from-json FILE|-                  strict request JSON (lot fields and image metadata)
+  --idempotency-key KEY               advanced idempotency key
+
+Images are declared in order with repeatable flags. Metadata uses an explicit zero-based declaration INDEX:
+  --image FILE                        JPEG/PNG image file (repeatable, maximum eight)
+  --image-caption INDEX=TEXT          caption for one image (repeatable)
+  --image-alt-text INDEX=TEXT         alt text for one image (repeatable)
+  --image-cover INDEX                 mark one image as the cover
+`
+	result := runAuthCommand(t, Runtime{}, "inventory", "lot", "create", "--help")
+	if result.code != 0 || result.stderr != "" || result.stdout != want {
+		t.Fatalf("result = %#v\nwant help:\n%s", result, want)
+	}
+}
+
 func TestInventoryImageHelpHonorsJSONOutputContract(t *testing.T) {
 	result := runAuthCommand(t, Runtime{}, "--json", "inventory", "image", "add", "--help")
 	if result.code != 0 || result.stderr != "" || !strings.HasPrefix(result.stdout, `{"ok":true,"data":{"usage":`) || strings.Count(result.stdout, "\n") != 1 {

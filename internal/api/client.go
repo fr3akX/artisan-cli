@@ -30,10 +30,11 @@ type Request struct {
 
 // Client is an authenticated Artisan API client.
 type Client struct {
-	serverURL  *url.URL
-	token      string
-	httpClient *http.Client
-	userAgent  string
+	serverURL   *url.URL
+	token       string
+	httpClient  *http.Client
+	userAgent   string
+	downloadOps downloadOperations
 }
 
 // NewClient validates its origin and credentials and creates a client that
@@ -63,7 +64,8 @@ func NewClient(serverURL, token string, timeout time.Duration) (*Client, error) 
 				return http.ErrUseLastResponse
 			},
 		},
-		userAgent: "artisan-cli/" + release.Info().Version,
+		userAgent:   "artisan-cli/" + release.Info().Version,
+		downloadOps: defaultDownloadOperations(),
 	}, nil
 }
 
@@ -119,6 +121,9 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 
 		response, err := c.httpClient.Do(httpRequest)
 		if err != nil {
+			if multipartSourceChanged(err) {
+				return imageFileChangedFailure()
+			}
 			if canRetry && attempt < maxAttempts-1 && ctx.Err() == nil {
 				if err := waitForRetry(ctx, attempt); err == nil {
 					continue
@@ -216,9 +221,8 @@ func openRequestBody(request Request) (io.ReadCloser, string, *output.Error) {
 		if body != nil {
 			_ = body.Close()
 		}
-		var fileFailure *multipartFileError
-		if errors.As(err, &fileFailure) && fileFailure.changed {
-			return nil, "", localFailure("image_file_changed", "An image file changed after upload preparation")
+		if multipartSourceChanged(err) {
+			return nil, "", imageFileChangedFailure()
 		}
 		return nil, "", localFailure("request_body_error", "Unable to prepare the request body")
 	}
@@ -230,6 +234,15 @@ func openRequestBody(request Request) (io.ReadCloser, string, *output.Error) {
 		return nil, "", localFailure("request_body_error", "Request content type is invalid")
 	}
 	return body, contentType, nil
+}
+
+func multipartSourceChanged(err error) bool {
+	var fileFailure *multipartFileError
+	return errors.As(err, &fileFailure) && fileFailure.changed
+}
+
+func imageFileChangedFailure() *output.Error {
+	return localFailure("image_file_changed", "An image file changed after upload preparation")
 }
 
 func readBoundedResponse(body io.ReadCloser) ([]byte, bool, error) {

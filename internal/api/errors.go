@@ -151,6 +151,14 @@ func networkFailure() *output.Error {
 	}
 }
 
+func interruptionFailure() *output.Error {
+	return &output.Error{
+		ExitCode: 130,
+		Code:     "interrupted",
+		Message:  "Operation interrupted",
+	}
+}
+
 func localFailure(code, message string) *output.Error {
 	return &output.Error{ExitCode: 2, Code: code, Message: message}
 }

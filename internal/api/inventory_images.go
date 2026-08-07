@@ -19,6 +19,30 @@ const (
 	maxImageDownloadBytes = int64(10 << 20)
 )
 
+type downloadOperations struct {
+	createTemp       func(string, string) (*os.File, error)
+	protect          func(*os.File) error
+	writer           func(*os.File) io.Writer
+	syncFile         func(*os.File) error
+	closeFile        func(*os.File) error
+	installNoReplace func(string, string) (bool, error)
+	replace          func(string, string) (bool, error)
+	syncParent       func(string) error
+}
+
+func defaultDownloadOperations() downloadOperations {
+	return downloadOperations{
+		createTemp:       os.CreateTemp,
+		protect:          securefile.ProtectPrivateFile,
+		writer:           func(file *os.File) io.Writer { return file },
+		syncFile:         func(file *os.File) error { return file.Sync() },
+		closeFile:        func(file *os.File) error { return file.Close() },
+		installNoReplace: atomicInstallDownloadNoReplace,
+		replace:          atomicReplaceDownload,
+		syncParent:       securefile.SyncParentDirectory,
+	}
+}
+
 // InventoryImagePatch preserves field presence, including caption and alt-text
 // clears represented by JSON null.
 type InventoryImagePatch struct {
@@ -251,11 +275,14 @@ func multipartPreparationFailure(err error) *output.Error {
 }
 
 // DownloadInventoryImage streams one private WebP variant through a protected
-// same-directory temporary file and installs it atomically.
+// same-directory temporary file and installs it atomically and durably.
 func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageID, variant, destination string, force bool) (result ImageDownload, failure *output.Error) {
 	defer func() { failure = c.failureWithoutSecrets(failure) }()
 	if ctx == nil {
 		return result, localFailure("invalid_request", "Request context is required")
+	}
+	if ctx.Err() != nil {
+		return result, interruptionFailure()
 	}
 	lotID, failure := normalizeInventoryUUID(rawLotID)
 	if failure != nil {
@@ -273,9 +300,9 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	}
 	if !force {
 		if _, err := os.Lstat(destination); err == nil {
-			return result, downloadLocalFailure("destination_exists", "Destination already exists; use --force to replace it")
+			return result, destinationExistsFailure()
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return result, downloadLocalFailure("download_write_failed", "Unable to inspect the download destination")
+			return result, localStorageFailure("Unable to store the image download safely")
 		}
 	}
 
@@ -284,9 +311,9 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		return result, localFailure("invalid_request", "A valid API path is required")
 	}
 	directory := filepath.Dir(destination)
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(destination)+".tmp-*")
+	temporary, err := c.downloadOps.createTemp(directory, "."+filepath.Base(destination)+".tmp-*")
 	if err != nil {
-		return result, downloadLocalFailure("download_write_failed", "Unable to create a private download file")
+		return result, localStorageFailure("Unable to store the image download safely")
 	}
 	temporaryPath := temporary.Name()
 	temporaryClosed := false
@@ -296,14 +323,17 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		}
 		_ = os.Remove(temporaryPath)
 	}()
-	if err := securefile.ProtectPrivateFile(temporary); err != nil {
-		return result, downloadLocalFailure("download_write_failed", "Unable to protect the private download file")
+	if err := c.downloadOps.protect(temporary); err != nil {
+		return result, localStorageFailure("Unable to store the image download safely")
 	}
 
 	var downloaded int64
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return result, interruptionFailure()
+		}
 		if err := resetDownloadTemp(temporary); err != nil {
-			return result, downloadLocalFailure("download_write_failed", "Unable to prepare the private download file")
+			return result, localStorageFailure("Unable to store the image download safely")
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
@@ -313,9 +343,15 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		request.Header.Set("User-Agent", c.userAgent)
 		response, err := c.httpClient.Do(request)
 		if err != nil {
-			if attempt < maxAttempts-1 && ctx.Err() == nil {
+			if ctx.Err() != nil {
+				return result, interruptionFailure()
+			}
+			if attempt < maxAttempts-1 {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
+				}
+				if ctx.Err() != nil {
+					return result, interruptionFailure()
 				}
 			}
 			return result, networkFailure()
@@ -327,9 +363,15 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		}
 		if status != http.StatusOK {
 			body, oversized, readErr := readBoundedResponse(response.Body)
-			if isTransientStatus(status) && attempt < maxAttempts-1 && readErr == nil && !oversized && ctx.Err() == nil {
+			if ctx.Err() != nil {
+				return result, interruptionFailure()
+			}
+			if isTransientStatus(status) && attempt < maxAttempts-1 && !oversized {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
+				}
+				if ctx.Err() != nil {
+					return result, interruptionFailure()
 				}
 			}
 			if readErr != nil || oversized || status < 400 || status >= 600 {
@@ -341,15 +383,25 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 			_ = response.Body.Close()
 			return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 		}
-		downloaded, err = io.Copy(temporary, io.LimitReader(response.Body, maxImageDownloadBytes+1))
+		var readErr, writeErr error
+		downloaded, readErr, writeErr = copyDownloadResponse(c.downloadOps.writer(temporary), response.Body)
 		closeErr := response.Body.Close()
-		if err == nil {
-			err = closeErr
+		if writeErr != nil {
+			return result, localStorageFailure("Unable to store the image download safely")
 		}
-		if err != nil {
-			if attempt < maxAttempts-1 && ctx.Err() == nil {
+		if readErr == nil {
+			readErr = closeErr
+		}
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return result, interruptionFailure()
+			}
+			if attempt < maxAttempts-1 {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
+				}
+				if ctx.Err() != nil {
+					return result, interruptionFailure()
 				}
 			}
 			return result, networkFailure()
@@ -360,26 +412,72 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		break
 	}
 
-	if err := temporary.Sync(); err != nil {
-		return result, downloadLocalFailure("download_write_failed", "Unable to sync the private download file")
+	if ctx.Err() != nil {
+		return result, interruptionFailure()
 	}
-	if err := temporary.Close(); err != nil {
-		return result, downloadLocalFailure("download_write_failed", "Unable to close the private download file")
+	if err := c.downloadOps.syncFile(temporary); err != nil {
+		return result, localStorageFailure("Unable to store the image download safely")
+	}
+	if err := c.downloadOps.closeFile(temporary); err != nil {
+		return result, localStorageFailure("Unable to store the image download safely")
 	}
 	temporaryClosed = true
+	if ctx.Err() != nil {
+		return result, interruptionFailure()
+	}
+	var installed bool
 	if force {
-		if err := atomicReplaceDownload(temporaryPath, destination); err != nil {
-			return result, downloadLocalFailure("download_write_failed", "Unable to atomically replace the download destination")
-		}
+		installed, err = c.downloadOps.replace(temporaryPath, destination)
 	} else {
-		if err := atomicInstallDownloadNoReplace(temporaryPath, destination); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return result, downloadLocalFailure("destination_exists", "Destination already exists; use --force to replace it")
+		installed, err = c.downloadOps.installNoReplace(temporaryPath, destination)
+	}
+	installedResult := ImageDownload{Path: destination, Variant: variant, Bytes: downloaded}
+	if installed {
+		if syncErr := c.downloadOps.syncParent(directory); syncErr != nil {
+			return installedResult, localStorageFailure("The image download is installed, but storage durability is uncertain")
+		}
+		if err != nil {
+			return installedResult, localStorageFailure("The image download is installed, but a local storage operation did not complete")
+		}
+		return installedResult, nil
+	}
+	if err != nil && errors.Is(err, os.ErrExist) {
+		return result, destinationExistsFailure()
+	}
+	return result, localStorageFailure("Unable to store the image download safely")
+}
+
+func copyDownloadResponse(destination io.Writer, source io.Reader) (written int64, readErr, writeErr error) {
+	buffer := make([]byte, 32*1024)
+	remaining := maxImageDownloadBytes + 1
+	for remaining > 0 {
+		chunk := int64(len(buffer))
+		if remaining < chunk {
+			chunk = remaining
+		}
+		count, err := source.Read(buffer[:chunk])
+		if count > 0 {
+			destinationCount, destinationErr := destination.Write(buffer[:count])
+			written += int64(destinationCount)
+			if destinationErr != nil {
+				return written, nil, destinationErr
 			}
-			return result, downloadLocalFailure("download_write_failed", "Unable to atomically install the download")
+			if destinationCount != count {
+				return written, nil, io.ErrShortWrite
+			}
+			remaining -= int64(count)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return written, nil, nil
+			}
+			return written, err, nil
+		}
+		if count == 0 {
+			return written, io.ErrNoProgress, nil
 		}
 	}
-	return ImageDownload{Path: destination, Variant: variant, Bytes: downloaded}, nil
+	return written, nil, nil
 }
 
 func resetDownloadTemp(file *os.File) error {
@@ -390,6 +488,10 @@ func resetDownloadTemp(file *os.File) error {
 	return err
 }
 
-func downloadLocalFailure(code, message string) *output.Error {
-	return &output.Error{ExitCode: 1, Code: code, Message: message}
+func localStorageFailure(message string) *output.Error {
+	return &output.Error{ExitCode: 3, Code: "local_storage_error", Message: message}
+}
+
+func destinationExistsFailure() *output.Error {
+	return localStorageFailure("Destination already exists; use --force to replace it")
 }

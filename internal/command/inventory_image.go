@@ -24,11 +24,36 @@ Per-image metadata uses an explicit zero-based file INDEX:
 
 const lotCreateImageUsage = `Usage: artisan inventory lot create [OPTIONS]
 
+Lot fields:
+  --name TEXT                         lot name (required unless --from-json)
+  --origin TEXT                       origin
+  --producer TEXT                     producer
+  --supplier TEXT                     supplier
+  --external-reference TEXT           external reference
+  --received-date YYYY-MM-DD           received date
+  --crop-year YEAR                    crop year
+  --varietal TEXT                     varietal (repeatable)
+  --sca-score SCORE                   SCA score
+  --processing-method TEXT            processing method
+  --processing-detail TEXT            processing detail
+  --altitude-min-metres METRES        minimum altitude
+  --altitude-max-metres METRES        maximum altitude
+  --notes TEXT                        notes
+
+Opening inventory:
+  --opening-grams GRAMS               opening grams
+  --opening-reason TEXT               opening reason
+  --opening-reference TEXT            opening reference
+
+Input and replay:
+  --from-json FILE|-                  strict request JSON (lot fields and image metadata)
+  --idempotency-key KEY               advanced idempotency key
+
 Images are declared in order with repeatable flags. Metadata uses an explicit zero-based declaration INDEX:
-  --image FILE                       image file (repeatable, maximum eight)
-  --image-caption INDEX=TEXT         caption for one image (repeatable)
-  --image-alt-text INDEX=TEXT        alt text for one image (repeatable)
-  --image-cover INDEX                mark one image as the cover
+  --image FILE                        JPEG/PNG image file (repeatable, maximum eight)
+  --image-caption INDEX=TEXT          caption for one image (repeatable)
+  --image-alt-text INDEX=TEXT         alt text for one image (repeatable)
+  --image-cover INDEX                 mark one image as the cover
 `
 
 type indexedImageText struct {

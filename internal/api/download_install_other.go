@@ -4,14 +4,19 @@ package api
 
 import "os"
 
-func atomicInstallDownloadNoReplace(from, to string) error {
+func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
 	if err := os.Link(from, to); err != nil {
-		return err
+		return false, err
 	}
-	_ = os.Remove(from)
-	return nil
+	if err := os.Remove(from); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
-func atomicReplaceDownload(from, to string) error {
-	return os.Rename(from, to)
+func atomicReplaceDownload(from, to string) (bool, error) {
+	if err := os.Rename(from, to); err != nil {
+		return false, err
+	}
+	return true, nil
 }

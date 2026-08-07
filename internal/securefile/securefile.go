@@ -49,6 +49,13 @@ func ProtectPrivateFile(file *os.File) error {
 	return protectPrivate(file, false)
 }
 
+// SyncParentDirectory establishes the platform-specific durability boundary
+// for metadata changes in path. On POSIX it fsyncs the exact opened directory;
+// on Windows callers pair this no-op with write-through file operations.
+func SyncParentDirectory(path string) error {
+	return syncParentDirectory(path)
+}
+
 // AtomicWrite durably replaces name in dir using a protected same-directory
 // temporary file. It syncs file contents and protection before replacement,
 // then establishes the platform-specific durable rename boundary.
