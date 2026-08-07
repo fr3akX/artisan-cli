@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"unsafe"
 
@@ -28,6 +29,24 @@ func durableReplace(from, to string) error {
 		return err
 	}
 	return windows.MoveFileEx(fromPointer, toPointer, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func durableRemove(dir, name string) error {
+	path := filepath.Join(dir, name)
+	// Windows has no parent-directory fsync equivalent for DeleteFile. A
+	// write-through rename durably removes the canonical name; deletion of the
+	// private tombstone is then cleanup-only because its resurrection cannot
+	// restore the canonical file.
+	tombstone := filepath.Join(dir, "."+name+".removed")
+	if err := durableReplace(path, tombstone); err != nil {
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) && !errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return fmt.Errorf("remove private file: %w", err)
+		}
+	}
+	if err := os.Remove(tombstone); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clean private removal tombstone: %w", err)
+	}
+	return nil
 }
 
 // MoveFileEx with MOVEFILE_WRITE_THROUGH provides the Windows durability

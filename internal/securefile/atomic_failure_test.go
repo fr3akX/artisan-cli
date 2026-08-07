@@ -2,6 +2,7 @@ package securefile
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -81,5 +82,76 @@ func TestAtomicWriteReportsParentSyncFailureAfterRename(t *testing.T) {
 	contents, readErr := os.ReadFile(filepath.Join(dir, "journal.json"))
 	if readErr != nil || string(contents) != "pending" {
 		t.Fatal("rename did not occur before injected parent sync failure")
+	}
+}
+
+func TestDurableRemoveOrdersRemovalBeforeParentSync(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(path, []byte("credential"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	var events []string
+	err := durableRemoveWithOperations(dir, path, func(gotPath string) error {
+		if gotPath != path {
+			t.Fatalf("remove path = %q, want %q", gotPath, path)
+		}
+		events = append(events, "remove")
+		return os.Remove(gotPath)
+	}, func(gotDir string) error {
+		if gotDir != dir {
+			t.Fatalf("sync dir = %q, want %q", gotDir, dir)
+		}
+		events = append(events, "sync-parent")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("durableRemoveWithOperations() error = %v", err)
+	}
+	if got := strings.Join(events, ","); got != "remove,sync-parent" {
+		t.Fatalf("operation order = %q, want remove,sync-parent", got)
+	}
+}
+
+func TestDurableRemoveFailureDoesNotSyncParent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	injected := errors.New("injected remove failure")
+	synced := false
+	err := durableRemoveWithOperations(dir, path, func(string) error {
+		return injected
+	}, func(string) error {
+		synced = true
+		return nil
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("durableRemoveWithOperations() error = %v, want injected failure", err)
+	}
+	if synced {
+		t.Fatal("parent sync ran after failed removal")
+	}
+}
+
+func TestDurableRemoveReportsParentSyncFailureAndSyncsExistingAbsence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	injected := errors.New("injected remove parent sync failure")
+	for _, initiallyPresent := range []bool{true, false} {
+		t.Run(fmt.Sprintf("present=%t", initiallyPresent), func(t *testing.T) {
+			if initiallyPresent {
+				if err := os.WriteFile(path, []byte("configuration"), 0o600); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+			}
+			err := durableRemoveWithOperations(dir, path, os.Remove, func(string) error {
+				return injected
+			})
+			if !errors.Is(err, injected) {
+				t.Fatalf("durableRemoveWithOperations() error = %v, want injected failure", err)
+			}
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("path remains after visible removal: %v", statErr)
+			}
+		})
 	}
 }

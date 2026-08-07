@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -27,6 +28,10 @@ func OpenPrivate(path string) (*os.File, error) {
 
 func durableReplace(from, to string) error {
 	return os.Rename(from, to)
+}
+
+func durableRemove(dir, name string) error {
+	return durableRemoveWithOperations(dir, filepath.Join(dir, name), os.Remove, syncParentDirectory)
 }
 
 func syncParentDirectory(path string) error {

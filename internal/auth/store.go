@@ -95,7 +95,7 @@ func (s *fileStore) Remove() error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(dir, credentialsFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := securefile.DurableRemove(dir, credentialsFileName); err != nil {
 		return fmt.Errorf("remove credentials: %w", err)
 	}
 	return nil

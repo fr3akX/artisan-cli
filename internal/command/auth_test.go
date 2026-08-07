@@ -1256,3 +1256,183 @@ func TestTransactionRecoveryRestoresPriorPairWhenCurrentStateIsUnreadable(t *tes
 		t.Fatal("resolved unreadable state left journal")
 	}
 }
+
+func TestRecoveryRetainsJournalUntilPriorAbsenceIsDurable(t *testing.T) {
+	const priorServer = "http://127.0.0.1:45901"
+	const priorToken = "prior-token"
+	const intendedServer = "http://127.0.0.1:45902"
+	tests := []struct {
+		name          string
+		prior         storedLoginPair
+		failedRemoval string
+	}{
+		{
+			name:          "prior server absent",
+			prior:         storedLoginPair{TokenPresent: true, Token: priorToken},
+			failedRemoval: "server",
+		},
+		{
+			name:          "prior token absent",
+			prior:         storedLoginPair{ServerPresent: true, ServerURL: priorServer},
+			failedRemoval: "token",
+		},
+		{
+			name:          "both absent after server removal",
+			prior:         storedLoginPair{},
+			failedRemoval: "server",
+		},
+		{
+			name:          "both absent after token removal",
+			prior:         storedLoginPair{},
+			failedRemoval: "token",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.prior.ServerPresent {
+				if err := config.SaveServer(dir, tc.prior.ServerURL); err != nil {
+					t.Fatalf("SaveServer() error = %v", err)
+				}
+			}
+			if tc.prior.TokenPresent {
+				if err := auth.NewFileStore(dir).Save(tc.prior.Token); err != nil {
+					t.Fatalf("Save() error = %v", err)
+				}
+			}
+			failure := persistExplicitLogin(dir, commandTestToken, intendedServer, func(stage string) error {
+				if stage == loginStageTokenSaved {
+					return errSimulatedLoginCrash
+				}
+				return nil
+			})
+			if failure == nil {
+				t.Fatal("persistExplicitLogin() succeeded, want simulated crash")
+			}
+
+			ops := defaultLoginTransactionOperations()
+			journalRemoved := false
+			ops.removeJournal = func(string) error {
+				journalRemoved = true
+				return nil
+			}
+			injected := errors.New("injected post-remove parent sync failure")
+			if tc.failedRemoval == "server" {
+				ops.removeServer = func(configDir string) error {
+					dir, err := config.ResolveDir(configDir)
+					if err != nil {
+						return err
+					}
+					if err := os.Remove(filepath.Join(dir, "config.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+					return injected
+				}
+			} else {
+				ops.removeToken = func(configDir string) error {
+					dir, err := config.ResolveDir(configDir)
+					if err != nil {
+						return err
+					}
+					if err := os.Remove(filepath.Join(dir, "credentials.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+					return injected
+				}
+			}
+			if err := recoverLoginTransactionWithOperations(dir, ops); !errors.Is(err, injected) {
+				t.Fatalf("recoverLoginTransactionWithOperations() error = %v, want injected failure", err)
+			}
+			if journalRemoved {
+				t.Fatal("recovery removed journal before prior absence was durable")
+			}
+			journal, err := readLoginJournal(dir)
+			if err != nil {
+				t.Fatalf("readLoginJournal() after failed recovery error = %v", err)
+			}
+
+			// Model a crash resurrecting the deletion whose parent sync failed.
+			if tc.failedRemoval == "server" {
+				if err := config.SaveServer(dir, journal.IntendedServerURL); err != nil {
+					t.Fatalf("resurrect intended server: %v", err)
+				}
+			} else if err := auth.NewFileStore(dir).Save(journal.IntendedToken); err != nil {
+				t.Fatalf("resurrect intended token: %v", err)
+			}
+
+			_ = runAuthCommand(t, Runtime{ConfigDir: dir}, "--timeout", "100ms", "auth", "status")
+			got, err := readStoredLoginPair(dir)
+			if err != nil || got != tc.prior {
+				t.Fatalf("stored pair after fresh recovery = %#v, %v, want %#v", got, err, tc.prior)
+			}
+			if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("fresh auth operation did not converge and durably clean journal")
+			}
+		})
+	}
+}
+
+func TestCommittedRecoveryCleanupSurvivesJournalRemovalSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	const intendedServer = "http://127.0.0.1:45912"
+	failure := persistExplicitLogin(dir, commandTestToken, intendedServer, func(stage string) error {
+		if stage == loginStageCommitted {
+			return errSimulatedLoginCrash
+		}
+		return nil
+	})
+	if failure == nil {
+		t.Fatal("persistExplicitLogin() succeeded, want simulated crash")
+	}
+	journal, err := readLoginJournal(dir)
+	if err != nil || journal.State != loginTransactionCommitted {
+		t.Fatalf("committed journal = %#v, %v", journal, err)
+	}
+
+	ops := defaultLoginTransactionOperations()
+	writeJournal := ops.writeJournal
+	saveToken := ops.saveToken
+	saveServer := ops.saveServer
+	var events []string
+	ops.saveToken = func(configDir, token string) error {
+		events = append(events, "token-durable")
+		return saveToken(configDir, token)
+	}
+	ops.saveServer = func(configDir, serverURL string) error {
+		events = append(events, "server-durable")
+		return saveServer(configDir, serverURL)
+	}
+	ops.writeJournal = func(configDir string, journal loginTransactionJournal) error {
+		events = append(events, "committed-durable")
+		return writeJournal(configDir, journal)
+	}
+	injected := errors.New("injected journal parent sync failure")
+	ops.removeJournal = func(configDir string) error {
+		events = append(events, "journal-remove-visible")
+		dir, err := config.ResolveDir(configDir)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(dir, loginTransactionFileName)); err != nil {
+			return err
+		}
+		return injected
+	}
+	if err := recoverLoginTransactionWithOperations(dir, ops); err != nil {
+		t.Fatalf("recoverLoginTransactionWithOperations() cleanup error = %v", err)
+	}
+	if got := strings.Join(events, ","); got != "server-durable,token-durable,committed-durable,journal-remove-visible" {
+		t.Fatalf("recovery order = %q", got)
+	}
+	assertStoredAuthState(t, dir, intendedServer, commandTestToken)
+
+	// Model the committed marker resurrecting after the failed deletion sync.
+	if err := writeLoginJournal(dir, journal); err != nil {
+		t.Fatalf("resurrect committed journal: %v", err)
+	}
+	recoverThroughFreshAuthOperation(t, dir)
+	assertStoredAuthState(t, dir, intendedServer, commandTestToken)
+	if _, err := os.Stat(filepath.Join(dir, loginTransactionFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("fresh auth operation did not safely clean resurrected committed marker")
+	}
+}

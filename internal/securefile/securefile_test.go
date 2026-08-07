@@ -59,6 +59,23 @@ func TestOpenPrivateRemainsBoundToOpenedFileAfterPathReplacement(t *testing.T) {
 	}
 }
 
+func TestDurableRemoveIsIdempotentAndLeavesCanonicalPathAbsent(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "artisan")
+	if err := securefile.AtomicWrite(dir, "credentials.json", []byte("credential")); err != nil {
+		t.Fatalf("AtomicWrite() error = %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := securefile.DurableRemove(dir, "credentials.json"); err != nil {
+			t.Fatalf("DurableRemove() attempt %d error = %v", attempt, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+			t.Fatalf("canonical path after attempt %d error = %v, want not-exist", attempt, err)
+		}
+	}
+}
+
 func TestAtomicWriteCleansTemporaryFileWhenRenameFails(t *testing.T) {
 	t.Parallel()
 

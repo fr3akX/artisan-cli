@@ -47,6 +47,31 @@ func AtomicWrite(dir, name string, contents []byte) error {
 	return atomicWriteWithOperations(dir, name, contents, durableReplace, syncParentDirectory)
 }
 
+// DurableRemove makes name durably absent from dir. It succeeds when name is
+// already absent and establishes the platform-specific deletion boundary before
+// returning success.
+func DurableRemove(dir, name string) error {
+	if name == "" || filepath.Base(name) != name {
+		return errors.New("invalid private file name")
+	}
+	if err := EnsurePrivateDir(dir); err != nil {
+		return err
+	}
+	return durableRemove(dir, name)
+}
+
+func durableRemoveWithOperations(dir, path string, remove func(string) error, syncParent func(string) error) error {
+	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove private file: %w", err)
+	}
+	// Sync even when the file is already visibly absent. A prior interrupted
+	// deletion may have made that absence visible without making it durable.
+	if err := syncParent(dir); err != nil {
+		return fmt.Errorf("sync private file deletion: %w", err)
+	}
+	return nil
+}
+
 func atomicWriteWithRename(dir, name string, contents []byte, rename func(string, string) error) error {
 	return atomicWriteWithOperations(dir, name, contents, rename, syncParentDirectory)
 }

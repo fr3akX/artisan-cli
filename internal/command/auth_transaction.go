@@ -55,7 +55,9 @@ type loginTransactionOperations struct {
 	writeJournal  func(string, loginTransactionJournal) error
 	removeJournal func(string) error
 	saveToken     func(string, string) error
+	removeToken   func(string) error
 	saveServer    func(string, string) error
+	removeServer  func(string) error
 }
 
 func defaultLoginTransactionOperations() loginTransactionOperations {
@@ -65,7 +67,11 @@ func defaultLoginTransactionOperations() loginTransactionOperations {
 		saveToken: func(configDir, token string) error {
 			return auth.NewFileStore(configDir).Save(token)
 		},
-		saveServer: config.SaveServer,
+		removeToken: func(configDir string) error {
+			return auth.NewFileStore(configDir).Remove()
+		},
+		saveServer:   config.SaveServer,
+		removeServer: config.RemoveServer,
 	}
 }
 
@@ -336,6 +342,10 @@ type storedLoginPair struct {
 }
 
 func recoverLoginTransaction(configDir string) error {
+	return recoverLoginTransactionWithOperations(configDir, defaultLoginTransactionOperations())
+}
+
+func recoverLoginTransactionWithOperations(configDir string, operations loginTransactionOperations) error {
 	journal, err := readLoginJournal(configDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -354,14 +364,17 @@ func recoverLoginTransaction(configDir string) error {
 	if currentErr == nil && current == intended {
 		// Both intended values are visible. Rewrite them durably before marking
 		// committed so any earlier post-rename error is resolved by roll-forward.
-		if err := applyStoredLoginPair(configDir, intended); err != nil {
+		if err := applyStoredLoginPairWithOperations(configDir, intended, operations); err != nil {
 			return fmt.Errorf("roll forward login transaction: %w", err)
 		}
 		journal.State = loginTransactionCommitted
-		if err := writeLoginJournal(configDir, journal); err != nil {
+		if err := operations.writeJournal(configDir, journal); err != nil {
 			return fmt.Errorf("commit recovered login transaction: %w", err)
 		}
-		_ = removeLoginJournal(configDir)
+		// A failure can only resurrect this committed marker after the exact
+		// intended pair and marker have both been made durable. Retrying it is
+		// cleanup-only and cannot roll back a mixed pair.
+		_ = operations.removeJournal(configDir)
 		return nil
 	}
 
@@ -373,10 +386,10 @@ func recoverLoginTransaction(configDir string) error {
 		TokenPresent:  journal.TokenPresent,
 		Token:         journal.Token,
 	}
-	if err := applyStoredLoginPair(configDir, prior); err != nil {
+	if err := applyStoredLoginPairWithOperations(configDir, prior, operations); err != nil {
 		return fmt.Errorf("restore login transaction: %w", err)
 	}
-	if err := removeLoginJournal(configDir); err != nil {
+	if err := operations.removeJournal(configDir); err != nil {
 		return fmt.Errorf("complete login transaction recovery: %w", err)
 	}
 	return nil
@@ -401,18 +414,18 @@ func readStoredLoginPair(configDir string) (storedLoginPair, error) {
 	return pair, nil
 }
 
-func applyStoredLoginPair(configDir string, pair storedLoginPair) error {
+func applyStoredLoginPairWithOperations(configDir string, pair storedLoginPair, operations loginTransactionOperations) error {
 	journal := loginTransactionJournal{
 		ServerPresent: pair.ServerPresent,
 		ServerURL:     pair.ServerURL,
 		TokenPresent:  pair.TokenPresent,
 		Token:         pair.Token,
 	}
-	return restoreLoginState(configDir, journal)
+	return restoreLoginStateWithOperations(configDir, journal, operations)
 }
 
 func failAndRestoreLoginTransaction(configDir string, journal loginTransactionJournal, operations loginTransactionOperations) *output.Error {
-	if err := restoreLoginState(configDir, journal); err != nil {
+	if err := restoreLoginStateWithOperations(configDir, journal, operations); err != nil {
 		return transactionConfigurationFailure()
 	}
 	if err := operations.removeJournal(configDir); err != nil {
@@ -421,27 +434,26 @@ func failAndRestoreLoginTransaction(configDir string, journal loginTransactionJo
 	return transactionConfigurationFailure()
 }
 
-func restoreLoginState(configDir string, journal loginTransactionJournal) error {
+func restoreLoginStateWithOperations(configDir string, journal loginTransactionJournal, operations loginTransactionOperations) error {
 	var restoreErrors []error
 	if journal.ServerPresent {
-		if err := config.SaveServer(configDir, journal.ServerURL); err != nil {
+		if err := operations.saveServer(configDir, journal.ServerURL); err != nil {
 			restoreErrors = append(restoreErrors, err)
 		}
-	} else if err := config.RemoveServer(configDir); err != nil {
+	} else if err := operations.removeServer(configDir); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
 
-	store := auth.NewFileStore(configDir)
 	if journal.TokenPresent {
-		if err := store.Save(journal.Token); err != nil {
+		if err := operations.saveToken(configDir, journal.Token); err != nil {
 			restoreErrors = append(restoreErrors, err)
-			// If the prior token cannot be restored, remove the current file so
-			// the newly submitted token does not remain usable after failure.
-			if removeErr := store.Remove(); removeErr != nil {
+			// If the prior token cannot be restored, durably remove the current
+			// file so the submitted token does not remain usable after failure.
+			if removeErr := operations.removeToken(configDir); removeErr != nil {
 				restoreErrors = append(restoreErrors, removeErr)
 			}
 		}
-	} else if err := store.Remove(); err != nil {
+	} else if err := operations.removeToken(configDir); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
 	return errors.Join(restoreErrors...)
@@ -452,10 +464,7 @@ func removeLoginJournal(configDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(dir, loginTransactionFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return securefile.DurableRemove(dir, loginTransactionFileName)
 }
 
 func transactionConfigurationFailure() *output.Error {

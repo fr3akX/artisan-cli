@@ -189,7 +189,7 @@ func RemoveServer(configDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(dir, configFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := securefile.DurableRemove(dir, configFileName); err != nil {
 		return fmt.Errorf("remove configuration: %w", err)
 	}
 	return nil
