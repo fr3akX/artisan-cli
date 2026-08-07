@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,8 +53,10 @@ func TestInventoryAdjustNonTTYAndDeclineIssueZeroRequests(t *testing.T) {
 		json bool
 		code string
 	}{
-		{name: "non tty", code: "confirmation_required", json: true},
-		{name: "declined", tty: true, in: "no\n", code: "confirmation_declined", json: true},
+		{name: "non tty human", code: "confirmation_required"},
+		{name: "non tty JSON", code: "confirmation_required", json: true},
+		{name: "declined human", tty: true, in: "no\n", code: "confirmation_declined"},
+		{name: "declined JSON", tty: true, in: "no\n", code: "confirmation_declined", json: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime := inventoryRuntime(t, server.URL)
@@ -64,7 +67,11 @@ func TestInventoryAdjustNonTTYAndDeclineIssueZeroRequests(t *testing.T) {
 				args = append([]string{"--json"}, args...)
 			}
 			result := runAuthCommand(t, runtime, args...)
-			if result.code != 10 || !strings.Contains(result.stdout, `"code":"`+test.code+`"`) {
+			rendered := result.stderr
+			if test.json {
+				rendered = result.stdout
+			}
+			if result.code != 10 || (test.json && !strings.Contains(rendered, test.code)) {
 				t.Fatalf("result = %#v", result)
 			}
 		})
@@ -74,21 +81,52 @@ func TestInventoryAdjustNonTTYAndDeclineIssueZeroRequests(t *testing.T) {
 	}
 }
 
-func TestInventoryAdjustConfirmationOverflowIssuesZeroRequests(t *testing.T) {
+func TestInventoryAdjustIncompleteAndInvalidConfirmationsIssueZeroRequests(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
 	}))
 	defer server.Close()
-	runtime := inventoryRuntime(t, server.URL)
-	runtime.IsTerminal = func(int) bool { return true }
-	runtime.In = strings.NewReader("yes" + strings.Repeat(" ", 4096) + "trailing")
-	result := runAuthCommand(t, runtime, "inventory", "adjust", commandLotID, "--grams", "1", "--reason", "count", "--yes=false")
-	if result.code != 10 || requests.Load() != 0 {
-		t.Fatalf("result=%#v requests=%d", result, requests.Load())
+	tests := []struct {
+		name   string
+		reader func() io.Reader
+	}{
+		{name: "yes at EOF", reader: func() io.Reader { return strings.NewReader("yes") }},
+		{name: "bare CR at EOF", reader: func() io.Reader { return strings.NewReader("yes\r") }},
+		{name: "4096 content bare CR", reader: func() io.Reader { return strings.NewReader("yes" + strings.Repeat(" ", 4092) + "\r") }},
+		{name: "4097 content LF", reader: func() io.Reader { return strings.NewReader("yes" + strings.Repeat(" ", 4094) + "\n") }},
+		{name: "4097 content CRLF", reader: func() io.Reader { return strings.NewReader("yes" + strings.Repeat(" ", 4094) + "\r\n") }},
+		{name: "4097 content bare CR", reader: func() io.Reader { return strings.NewReader("yes" + strings.Repeat(" ", 4093) + "\r") }},
+		{name: "overlong prefix", reader: func() io.Reader { return strings.NewReader("yes" + strings.Repeat(" ", 4096) + "trailing") }},
+		{name: "reader error", reader: func() io.Reader { return commandErrorReader{err: errors.New("read failed")} }},
+	}
+	for _, test := range tests {
+		for _, jsonMode := range []bool{false, true} {
+			format := "human"
+			if jsonMode {
+				format = "JSON"
+			}
+			t.Run(test.name+" "+format, func(t *testing.T) {
+				runtime := inventoryRuntime(t, server.URL)
+				runtime.IsTerminal = func(int) bool { return true }
+				runtime.In = test.reader()
+				args := []string{"inventory", "adjust", commandLotID, "--grams", "1", "--reason", "count", "--yes=false"}
+				if jsonMode {
+					args = append([]string{"--json"}, args...)
+				}
+				result := runAuthCommand(t, runtime, args...)
+				if result.code != 10 || requests.Load() != 0 {
+					t.Fatalf("result=%#v requests=%d", result, requests.Load())
+				}
+			})
+		}
 	}
 }
+
+type commandErrorReader struct{ err error }
+
+func (reader commandErrorReader) Read([]byte) (int, error) { return 0, reader.err }
 
 func TestInventoryAdjustRejectsPresenceSensitiveEmptyFlagsLocally(t *testing.T) {
 	for _, args := range [][]string{

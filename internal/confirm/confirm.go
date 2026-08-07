@@ -26,13 +26,25 @@ func Ask(in io.Reader, out io.Writer, terminal, yes bool, prompt string) (bool, 
 	if _, err := fmt.Fprintf(out, "%s Type yes to continue: ", prompt); err != nil {
 		return false, err
 	}
-	line, err := bufio.NewReader(io.LimitReader(in, maxConfirmationResponseBytes+2)).ReadString('\n')
+	// Read at most one byte beyond the largest possible valid line: 4,096
+	// content bytes plus CRLF. This detects overflow without unbounded buffering.
+	line, err := bufio.NewReader(io.LimitReader(in, maxConfirmationResponseBytes+3)).ReadString('\n')
+	complete := strings.HasSuffix(line, "\n")
+	response := line
+	if complete {
+		response = strings.TrimSuffix(response, "\n")
+		if strings.HasSuffix(response, "\r") {
+			response = strings.TrimSuffix(response, "\r")
+		}
+	}
+	if len(response) > maxConfirmationResponseBytes {
+		return false, errConfirmationTooLong
+	}
 	if err != nil && err != io.EOF {
 		return false, err
 	}
-	response := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-	if len(response) > maxConfirmationResponseBytes {
-		return false, errConfirmationTooLong
+	if !complete {
+		return false, nil
 	}
 	return strings.EqualFold(strings.TrimSpace(response), "yes"), nil
 }
