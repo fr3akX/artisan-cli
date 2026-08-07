@@ -251,6 +251,26 @@ func TestKnownNonRetryStatusesClassifiedBeforeFailingBodyRead(t *testing.T) {
 	}
 }
 
+func TestClientExpectedStatusRejectsOtherSuccessfulStatusesWithoutChangingDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var destination any
+	failure := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/resource", ExpectedStatus: http.StatusOK}, &destination)
+	if failure == nil || failure.Code != "invalid_server_response" || failure.HTTPStatus == nil || *failure.HTTPStatus != http.StatusCreated {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if failure = client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/resource"}, &destination); failure != nil {
+		t.Fatalf("default read status handling changed: %#v", failure)
+	}
+}
+
 func TestHeadAllowsEmptySuccessfulResponse(t *testing.T) {
 	t.Parallel()
 

@@ -34,7 +34,7 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if !visited["grams"] || !visited["reason"] {
 		return inventoryUsageFailure(runtime, jsonMode, "inventory adjust requires --grams and --reason")
 	}
-	if *occurredAt == "" {
+	if !visited["occurred-at"] {
 		*occurredAt = time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	}
 	adjustment := api.InventoryAdjustmentWrite{QuantityGrams: *grams, Reason: *reason, OccurredAt: *occurredAt}
@@ -44,7 +44,7 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if failure := api.ValidateInventoryAdjustment(adjustment); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	if *idempotencyKey != "" {
+	if visited["idempotency-key"] {
 		if err := api.ValidateIdempotencyKey(*idempotencyKey); err != nil {
 			return inventoryUsageFailure(runtime, jsonMode, "Idempotency key is invalid")
 		}
@@ -57,7 +57,7 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if !approved {
 		return code
 	}
-	key, failure := mutationKey(*idempotencyKey)
+	key, failure := mutationKey(*idempotencyKey, visited["idempotency-key"])
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}

@@ -3,10 +3,15 @@ package confirm
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 )
+
+const maxConfirmationResponseBytes = 4096
+
+var errConfirmationTooLong = errors.New("confirmation response is too long")
 
 // Ask applies the noninteractive --yes gate or, on a terminal, asks the caller
 // to type the complete word "yes". It returns false for EOF and every other
@@ -21,9 +26,13 @@ func Ask(in io.Reader, out io.Writer, terminal, yes bool, prompt string) (bool, 
 	if _, err := fmt.Fprintf(out, "%s Type yes to continue: ", prompt); err != nil {
 		return false, err
 	}
-	line, err := bufio.NewReader(io.LimitReader(in, 4097)).ReadString('\n')
+	line, err := bufio.NewReader(io.LimitReader(in, maxConfirmationResponseBytes+2)).ReadString('\n')
 	if err != nil && err != io.EOF {
 		return false, err
 	}
-	return strings.EqualFold(strings.TrimSpace(line), "yes"), nil
+	response := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	if len(response) > maxConfirmationResponseBytes {
+		return false, errConfirmationTooLong
+	}
+	return strings.EqualFold(strings.TrimSpace(response), "yes"), nil
 }

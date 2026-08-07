@@ -484,12 +484,12 @@ func validOptionalEnum(value *string, allowed ...string) bool {
 }
 func validTimestamp(value string) bool {
 	parsed, err := time.Parse("2006-01-02T15:04:05.000000Z", value)
-	return err == nil && parsed.Format("2006-01-02T15:04:05.000000Z") == value
+	return err == nil && parsed.Year() >= 1 && parsed.Format("2006-01-02T15:04:05.000000Z") == value
 }
 func validDate(value string) bool {
 	if !canonicalDate.MatchString(value) {
 		return false
 	}
 	parsed, err := time.Parse("2006-01-02", value)
-	return err == nil && parsed.Format("2006-01-02") == value
+	return err == nil && parsed.Year() >= 1 && parsed.Format("2006-01-02") == value
 }

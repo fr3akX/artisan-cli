@@ -25,6 +25,7 @@ type Request struct {
 	Query          url.Values
 	Body           func() (io.ReadCloser, string, error)
 	IdempotencyKey string
+	ExpectedStatus int
 }
 
 // Client is an authenticated Artisan API client.
@@ -159,6 +160,9 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			continue
 		}
 		if status >= 200 && status < 300 {
+			if request.ExpectedStatus != 0 && status != request.ExpectedStatus {
+				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			}
 			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
 		if status >= 400 && status < 600 {

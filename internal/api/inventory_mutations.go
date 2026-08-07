@@ -54,6 +54,31 @@ type BeanLotPatch struct {
 	fields map[string]any
 }
 
+const maxBeanLotManifestBytes = 65_536
+
+func (manifest *BeanLotCreateManifest) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Fields           BeanLotFields   `json:"fields"`
+		OpeningGrams     int64           `json:"opening_grams"`
+		OpeningReason    *string         `json:"opening_reason"`
+		OpeningReference *string         `json:"opening_reference"`
+		Images           json.RawMessage `json:"images"`
+	}
+	var decoded wire
+	if err := decodeStrictMutationJSON(data, &decoded); err != nil {
+		return err
+	}
+	var images []ImageUploadManifest
+	if err := decodeRequiredArray(decoded.Images, &images); err != nil {
+		return err
+	}
+	*manifest = BeanLotCreateManifest{
+		Fields: decoded.Fields, OpeningGrams: decoded.OpeningGrams, OpeningReason: decoded.OpeningReason,
+		OpeningReference: decoded.OpeningReference, Images: images,
+	}
+	return nil
+}
+
 func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 	type wire struct {
 		Name              string          `json:"name"`
@@ -63,7 +88,7 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 		ExternalReference *string         `json:"external_reference"`
 		ReceivedDate      *string         `json:"received_date"`
 		CropYear          *int64          `json:"crop_year"`
-		Varietals         []string        `json:"varietals"`
+		Varietals         json.RawMessage `json:"varietals"`
 		SCAScore          json.RawMessage `json:"sca_score"`
 		ProcessingMethod  *string         `json:"processing_method"`
 		ProcessingDetail  *string         `json:"processing_detail"`
@@ -73,6 +98,10 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 	}
 	var decoded wire
 	if err := decodeStrictMutationJSON(data, &decoded); err != nil {
+		return err
+	}
+	var varietals []string
+	if err := decodeRequiredArray(decoded.Varietals, &varietals); err != nil {
 		return err
 	}
 	var score *string
@@ -86,7 +115,7 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 	*fields = BeanLotFields{
 		Name: decoded.Name, Origin: decoded.Origin, Producer: decoded.Producer, Supplier: decoded.Supplier,
 		ExternalReference: decoded.ExternalReference, ReceivedDate: decoded.ReceivedDate, CropYear: decoded.CropYear,
-		Varietals: decoded.Varietals, SCAScore: score, ProcessingMethod: decoded.ProcessingMethod,
+		Varietals: varietals, SCAScore: score, ProcessingMethod: decoded.ProcessingMethod,
 		ProcessingDetail: decoded.ProcessingDetail, AltitudeMinMetres: decoded.AltitudeMinMetres,
 		AltitudeMaxMetres: decoded.AltitudeMaxMetres, Notes: decoded.Notes,
 	}
@@ -153,91 +182,117 @@ func NewBeanLotPatch(fields map[string]any) (BeanLotPatch, *output.Error) {
 
 // ValidateBeanLotCreateManifest validates locally knowable strict server rules.
 func ValidateBeanLotCreateManifest(manifest BeanLotCreateManifest) *output.Error {
-	if !validRequestText(manifest.Fields.Name, 200, 800, true, false) {
-		return mutationUsage("invalid_name", "Bean lot name is required and must be valid")
+	_, failure := normalizeBeanLotCreateManifest(manifest)
+	return failure
+}
+
+func normalizeBeanLotCreateManifest(manifest BeanLotCreateManifest) (BeanLotCreateManifest, *output.Error) {
+	name, ok := normalizeRequestText(manifest.Fields.Name, 200, 800, true, false)
+	if !ok {
+		return manifest, mutationUsage("invalid_name", "Bean lot name is required and must be valid")
 	}
-	for value, limits := range map[*string][2]int{
-		manifest.Fields.Origin: {100, 400}, manifest.Fields.Producer: {200, 800}, manifest.Fields.Supplier: {200, 800},
-		manifest.Fields.ExternalReference: {200, 800}, manifest.Fields.ProcessingDetail: {200, 800}, manifest.OpeningReference: {200, 800},
-	} {
-		if value != nil && !validRequestText(*value, limits[0], limits[1], false, false) {
-			return mutationUsage("invalid_text", "Bean lot text field is invalid")
-		}
+	manifest.Fields.Name = name
+	optionalFields := []struct {
+		value      **string
+		codePoints int
+		bytesLimit int
+		multiline  bool
+	}{
+		{&manifest.Fields.Origin, 100, 400, false},
+		{&manifest.Fields.Producer, 200, 800, false},
+		{&manifest.Fields.Supplier, 200, 800, false},
+		{&manifest.Fields.ExternalReference, 200, 800, false},
+		{&manifest.Fields.ProcessingDetail, 200, 800, false},
+		{&manifest.Fields.Notes, 10000, 40000, true},
+		{&manifest.OpeningReason, 2000, 8000, true},
+		{&manifest.OpeningReference, 200, 800, false},
 	}
-	for value, limits := range map[*string][2]int{manifest.Fields.Notes: {10000, 40000}, manifest.OpeningReason: {2000, 8000}} {
-		if value != nil && !validRequestText(*value, limits[0], limits[1], false, true) {
-			return mutationUsage("invalid_text", "Bean lot multiline text field is invalid")
+	for _, field := range optionalFields {
+		normalized, valid := normalizeOptionalRequestText(*field.value, field.codePoints, field.bytesLimit, field.multiline)
+		if !valid {
+			return manifest, mutationUsage("invalid_text", "Bean lot text field is invalid")
 		}
+		*field.value = normalized
 	}
 	if manifest.Fields.ReceivedDate != nil && !validDate(*manifest.Fields.ReceivedDate) {
-		return mutationUsage("invalid_date", "Received date must use YYYY-MM-DD")
+		return manifest, mutationUsage("invalid_date", "Received date must use YYYY-MM-DD")
 	}
 	if manifest.Fields.CropYear != nil && !between(*manifest.Fields.CropYear, 1000, 9999) {
-		return mutationUsage("invalid_crop_year", "Crop year must be between 1000 and 9999")
+		return manifest, mutationUsage("invalid_crop_year", "Crop year must be between 1000 and 9999")
 	}
 	if manifest.Fields.SCAScore != nil && !validRequestScore(*manifest.Fields.SCAScore) {
-		return mutationUsage("invalid_sca_score", "SCA score must be between 0.00 and 100.00 with two decimal places")
+		return manifest, mutationUsage("invalid_sca_score", "SCA score must be between 0.00 and 100.00 with two decimal places")
 	}
 	if !validOptionalEnum(manifest.Fields.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") {
-		return mutationUsage("invalid_processing", "Processing method is invalid")
+		return manifest, mutationUsage("invalid_processing", "Processing method is invalid")
 	}
 	if manifest.Fields.ProcessingMethod != nil && *manifest.Fields.ProcessingMethod == "other" && manifest.Fields.ProcessingDetail == nil {
-		return mutationUsage("invalid_processing", "Processing detail is required when processing method is other")
+		return manifest, mutationUsage("invalid_processing", "Processing detail is required when processing method is other")
 	}
 	if !validAltitude(manifest.Fields.AltitudeMinMetres) || !validAltitude(manifest.Fields.AltitudeMaxMetres) || (manifest.Fields.AltitudeMinMetres != nil && manifest.Fields.AltitudeMaxMetres != nil && *manifest.Fields.AltitudeMinMetres > *manifest.Fields.AltitudeMaxMetres) {
-		return mutationUsage("invalid_altitude", "Altitude must be between 0 and 9000 and minimum must not exceed maximum")
+		return manifest, mutationUsage("invalid_altitude", "Altitude must be between 0 and 9000 and minimum must not exceed maximum")
 	}
-	if manifest.Fields.Varietals == nil {
-		manifest.Fields.Varietals = []string{}
+	if manifest.Fields.Varietals == nil || len(manifest.Fields.Varietals) > 16 {
+		return manifest, mutationUsage("invalid_varietals", "Varietals must be a non-null array of at most 16 items")
 	}
-	if len(manifest.Fields.Varietals) > 16 {
-		return mutationUsage("invalid_varietals", "At most 16 varietals may be supplied")
-	}
+	manifest.Fields.Varietals = append([]string{}, manifest.Fields.Varietals...)
 	seen := make(map[string]struct{}, len(manifest.Fields.Varietals))
-	for _, varietal := range manifest.Fields.Varietals {
-		if !validRequestText(varietal, 100, 400, true, false) {
-			return mutationUsage("invalid_varietals", "Varietals must be nonblank valid text")
+	for index, varietal := range manifest.Fields.Varietals {
+		normalized, valid := normalizeRequestText(varietal, 100, 400, true, false)
+		if !valid {
+			return manifest, mutationUsage("invalid_varietals", "Varietals must be nonblank valid text")
 		}
-		identity := strings.TrimSpace(varietal)
-		if _, exists := seen[identity]; exists {
-			return mutationUsage("invalid_varietals", "Varietals must be unique")
+		if _, exists := seen[normalized]; exists {
+			return manifest, mutationUsage("invalid_varietals", "Varietals must be unique")
 		}
-		seen[identity] = struct{}{}
+		seen[normalized] = struct{}{}
+		manifest.Fields.Varietals[index] = normalized
 	}
-	if !between(manifest.OpeningGrams, 0, maxInventoryGrams) || (manifest.OpeningGrams > 0 && (manifest.OpeningReason == nil || strings.TrimSpace(*manifest.OpeningReason) == "")) {
-		return mutationUsage("invalid_opening_balance", "Positive opening grams require an opening reason")
+	if !between(manifest.OpeningGrams, 0, maxInventoryGrams) || (manifest.OpeningGrams > 0 && manifest.OpeningReason == nil) {
+		return manifest, mutationUsage("invalid_opening_balance", "Positive opening grams require an opening reason")
 	}
 	if manifest.Images == nil || len(manifest.Images) != 0 {
-		return mutationUsage("invalid_images", "Lot creation supports zero images at this command boundary")
+		return manifest, mutationUsage("invalid_images", "Lot creation supports zero images at this command boundary")
 	}
-	return nil
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return manifest, mutationUsage("invalid_manifest", "Unable to encode bean lot manifest")
+	}
+	if len(encoded) > maxBeanLotManifestBytes {
+		return manifest, mutationUsage("manifest_too_large", "Encoded bean lot manifest exceeds 65,536 bytes")
+	}
+	return manifest, nil
 }
 
 // ValidateInventoryAdjustment validates exact integer grams and canonical time.
 func ValidateInventoryAdjustment(adjustment InventoryAdjustmentWrite) *output.Error {
+	_, failure := normalizeInventoryAdjustment(adjustment)
+	return failure
+}
+
+func normalizeInventoryAdjustment(adjustment InventoryAdjustmentWrite) (InventoryAdjustmentWrite, *output.Error) {
 	if adjustment.QuantityGrams == 0 || !validGrams(adjustment.QuantityGrams) {
-		return mutationUsage("invalid_grams", "Adjustment grams must be a nonzero integer within the supported range")
+		return adjustment, mutationUsage("invalid_grams", "Adjustment grams must be a nonzero integer within the supported range")
 	}
-	if !validRequestText(adjustment.Reason, 2000, 8000, true, true) {
-		return mutationUsage("invalid_reason", "Adjustment reason must be nonblank valid text")
+	reason, ok := normalizeRequestText(adjustment.Reason, 2000, 8000, true, true)
+	if !ok {
+		return adjustment, mutationUsage("invalid_reason", "Adjustment reason must be nonblank valid text")
 	}
-	if adjustment.Reference != nil && !validRequestText(*adjustment.Reference, 200, 800, false, false) {
-		return mutationUsage("invalid_reference", "Adjustment reference is invalid")
+	adjustment.Reason = reason
+	reference, ok := normalizeOptionalRequestText(adjustment.Reference, 200, 800, false)
+	if !ok {
+		return adjustment, mutationUsage("invalid_reference", "Adjustment reference is invalid")
 	}
+	adjustment.Reference = reference
 	if !validTimestamp(adjustment.OccurredAt) {
-		return mutationUsage("invalid_timestamp", "Occurred-at must use the canonical UTC timestamp format")
+		return adjustment, mutationUsage("invalid_timestamp", "Occurred-at must use the canonical UTC timestamp format")
 	}
-	return nil
+	return adjustment, nil
 }
 
 func (c *Client) CreateBeanLot(ctx context.Context, manifest BeanLotCreateManifest, key string) (BeanLotDetail, *output.Error) {
-	if manifest.Fields.Varietals == nil {
-		manifest.Fields.Varietals = []string{}
-	}
-	if manifest.Images == nil {
-		manifest.Images = []ImageUploadManifest{}
-	}
-	if failure := ValidateBeanLotCreateManifest(manifest); failure != nil {
+	manifest, failure := normalizeBeanLotCreateManifest(manifest)
+	if failure != nil {
 		return BeanLotDetail{}, failure
 	}
 	encoded, err := json.Marshal(manifest)
@@ -249,7 +304,7 @@ func (c *Client) CreateBeanLot(ctx context.Context, manifest BeanLotCreateManife
 		return BeanLotDetail{}, &output.Error{ExitCode: 1, Code: "request_body_error", Message: "Unable to prepare the request body"}
 	}
 	var lot BeanLotDetail
-	failure := c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots", Body: body, IdempotencyKey: key}, &lot)
+	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated}, &lot)
 	return lot, failure
 }
 
@@ -266,7 +321,7 @@ func (c *Client) PatchBeanLot(ctx context.Context, rawLotID string, patch BeanLo
 		return BeanLotDetail{}, mutationUsage("invalid_patch", "Unable to encode bean lot update")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{Method: http.MethodPatch, Path: inventoryAdminRoot + "/bean-lots/" + lotID, Body: body, IdempotencyKey: key}, &lot)
+	failure = c.Do(ctx, Request{Method: http.MethodPatch, Path: inventoryAdminRoot + "/bean-lots/" + lotID, Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot)
 	return lot, failure
 }
 
@@ -275,7 +330,8 @@ func (c *Client) AdjustBeanLot(ctx context.Context, rawLotID string, adjustment 
 	if failure != nil {
 		return BeanLotDetail{}, failure
 	}
-	if failure = ValidateInventoryAdjustment(adjustment); failure != nil {
+	adjustment, failure = normalizeInventoryAdjustment(adjustment)
+	if failure != nil {
 		return BeanLotDetail{}, failure
 	}
 	body, err := newJSONBody(adjustment)
@@ -283,23 +339,17 @@ func (c *Client) AdjustBeanLot(ctx context.Context, rawLotID string, adjustment 
 		return BeanLotDetail{}, mutationUsage("invalid_adjustment", "Unable to encode inventory adjustment")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/adjustments", Body: body, IdempotencyKey: key}, &lot)
+	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/adjustments", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot)
 	return lot, failure
 }
 
-// DecodeBeanLotCreateManifest strictly decodes one JSON object and canonicalizes defaults.
+// DecodeBeanLotCreateManifest strictly decodes and normalizes one JSON object.
 func DecodeBeanLotCreateManifest(data []byte) (BeanLotCreateManifest, *output.Error) {
 	var manifest BeanLotCreateManifest
 	if err := decodeStrictMutationJSON(data, &manifest); err != nil {
 		return manifest, mutationUsage("invalid_json", "Bean lot create JSON does not match the strict request model")
 	}
-	if manifest.Fields.Varietals == nil {
-		manifest.Fields.Varietals = []string{}
-	}
-	if manifest.Images == nil {
-		manifest.Images = []ImageUploadManifest{}
-	}
-	return manifest, ValidateBeanLotCreateManifest(manifest)
+	return normalizeBeanLotCreateManifest(manifest)
 }
 
 // DecodeBeanLotPatch strictly decodes one sparse JSON object.
@@ -341,6 +391,23 @@ func decodeStrictMutationJSON(data []byte, destination any) error {
 	return nil
 }
 
+func decodeRequiredArray(data json.RawMessage, destination any) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '[' {
+		return errors.New("required array is missing or invalid")
+	}
+	var elements []json.RawMessage
+	if err := json.Unmarshal(trimmed, &elements); err != nil {
+		return err
+	}
+	for _, element := range elements {
+		if bytes.Equal(bytes.TrimSpace(element), []byte("null")) {
+			return errors.New("array elements cannot be null")
+		}
+	}
+	return json.Unmarshal(trimmed, destination)
+}
+
 func canonicalPatchValue(name, kind string, value any) (any, bool) {
 	if value == nil {
 		if strings.HasPrefix(kind, "nullable-") || kind == "date" || kind == "integer" || kind == "varietals" || kind == "score" || kind == "processing" || kind == "altitude" {
@@ -351,8 +418,18 @@ func canonicalPatchValue(name, kind string, value any) (any, bool) {
 	switch kind {
 	case "string", "nullable-string":
 		text, ok := value.(string)
+		if !ok {
+			return nil, false
+		}
 		codePoints, bytesLimit, multiline := patchTextLimits(name)
-		return text, ok && validRequestText(text, codePoints, bytesLimit, kind == "string", multiline)
+		normalized, valid := normalizeRequestText(text, codePoints, bytesLimit, kind == "string", multiline)
+		if !valid {
+			return nil, false
+		}
+		if normalized == "" && kind == "nullable-string" {
+			return nil, true
+		}
+		return normalized, true
 	case "date":
 		text, ok := value.(string)
 		return text, ok && validDate(text)
@@ -380,15 +457,18 @@ func canonicalPatchValue(name, kind string, value any) (any, bool) {
 		seen := make(map[string]struct{}, len(items))
 		for index, item := range items {
 			text, textOK := item.(string)
-			if !textOK || !validRequestText(text, 100, 400, true, false) {
+			if !textOK {
 				return nil, false
 			}
-			identity := strings.TrimSpace(text)
-			if _, exists := seen[identity]; exists {
+			normalized, valid := normalizeRequestText(text, 100, 400, true, false)
+			if !valid {
 				return nil, false
 			}
-			seen[identity] = struct{}{}
-			result[index] = text
+			if _, exists := seen[normalized]; exists {
+				return nil, false
+			}
+			seen[normalized] = struct{}{}
+			result[index] = normalized
 		}
 		return result, true
 	case "score":
@@ -484,18 +564,40 @@ func patchTextLimits(name string) (int, int, bool) {
 	}
 }
 
-func validRequestText(value string, codePoints, bytesLimit int, required, multiline bool) bool {
-	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > codePoints || len(value) > bytesLimit {
-		return false
+func normalizeOptionalRequestText(value *string, codePoints, bytesLimit int, multiline bool) (*string, bool) {
+	if value == nil {
+		return nil, true
 	}
-	for _, character := range value {
+	normalized, ok := normalizeRequestText(*value, codePoints, bytesLimit, false, multiline)
+	if !ok {
+		return nil, false
+	}
+	if normalized == "" {
+		return nil, true
+	}
+	return &normalized, true
+}
+
+func normalizeRequestText(value string, codePoints, bytesLimit int, required, multiline bool) (string, bool) {
+	if !utf8.ValidString(value) {
+		return "", false
+	}
+	normalized := strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	normalized = strings.TrimSpace(normalized)
+	if normalized == "" {
+		return "", !required
+	}
+	if utf8.RuneCountInString(normalized) > codePoints || len(normalized) > bytesLimit {
+		return "", false
+	}
+	for _, character := range normalized {
 		point := uint32(character)
 		permittedMultiline := multiline && (character == '\n' || character == '\t')
 		if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)) && !permittedMultiline {
-			return false
+			return "", false
 		}
 	}
-	return !required || strings.TrimSpace(value) != ""
+	return normalized, true
 }
 
 func mutationUsage(code, message string) *output.Error {

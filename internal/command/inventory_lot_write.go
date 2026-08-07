@@ -61,11 +61,14 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 		return inventoryUsageFailure(runtime, jsonMode, "Invalid inventory lot create option")
 	}
 	visited := visitedFlagNames(flags)
-	if *fromJSON != "" && hasAnyOther(visited, "from-json", "idempotency-key") {
+	if visited["from-json"] && hasAnyOther(visited, "from-json", "idempotency-key") {
 		return inventoryUsageFailure(runtime, jsonMode, "--from-json cannot be combined with lot field flags")
 	}
+	if visited["from-json"] && *fromJSON == "" {
+		return inventoryUsageFailure(runtime, jsonMode, "--from-json requires a file path or -")
+	}
 	var manifest api.BeanLotCreateManifest
-	if *fromJSON != "" {
+	if visited["from-json"] {
 		contents, failure := readMutationJSON(runtime.In, *fromJSON)
 		if failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
@@ -83,7 +86,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 			return writeFailure(runtime, jsonMode, *failure)
 		}
 	}
-	key, failure := mutationKey(*idempotencyKey)
+	key, failure := mutationKey(*idempotencyKey, visited["idempotency-key"])
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
@@ -114,12 +117,15 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 		return inventoryUsageFailure(runtime, jsonMode, "Invalid inventory lot update option")
 	}
 	visited := visitedFlagNames(flags)
-	if *fromJSON != "" && hasAnyOther(visited, "from-json", "idempotency-key") {
+	if visited["from-json"] && hasAnyOther(visited, "from-json", "idempotency-key") {
 		return inventoryUsageFailure(runtime, jsonMode, "--from-json cannot be combined with lot field flags")
+	}
+	if visited["from-json"] && *fromJSON == "" {
+		return inventoryUsageFailure(runtime, jsonMode, "--from-json requires a file path or -")
 	}
 	var patch api.BeanLotPatch
 	var failure *output.Error
-	if *fromJSON != "" {
+	if visited["from-json"] {
 		contents, readFailure := readMutationJSON(runtime.In, *fromJSON)
 		if readFailure != nil {
 			return writeFailure(runtime, jsonMode, *readFailure)
@@ -138,7 +144,7 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	key, failure := mutationKey(*idempotencyKey)
+	key, failure := mutationKey(*idempotencyKey, visited["idempotency-key"])
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
@@ -167,7 +173,8 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 	if err := flags.Parse(args); err != nil || len(flags.Args()) != 0 {
 		return inventoryUsageFailure(runtime, jsonMode, "Invalid inventory lot "+state+" option")
 	}
-	if *idempotencyKey != "" {
+	visited := visitedFlagNames(flags)
+	if visited["idempotency-key"] {
 		if err := api.ValidateIdempotencyKey(*idempotencyKey); err != nil {
 			return inventoryUsageFailure(runtime, jsonMode, "Idempotency key is invalid")
 		}
@@ -178,7 +185,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 			return code
 		}
 	}
-	key, failure := mutationKey(*idempotencyKey)
+	key, failure := mutationKey(*idempotencyKey, visited["idempotency-key"])
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
@@ -270,7 +277,7 @@ func patchFieldsFromFlags(values lotFieldFlags, clears []string, visited map[str
 		fields["varietals"] = append([]string(nil), values.varietals...)
 	}
 	clearable := map[string]string{
-		"origin": "origin", "producer": "producer", "supplier": "supplier", "notes": "notes",
+		"origin": "origin", "producer": "producer", "supplier": "supplier", "notes": "notes", "varietals": "varietals",
 		"external-reference": "external_reference", "external_reference": "external_reference",
 		"received-date": "received_date", "received_date": "received_date",
 		"crop-year": "crop_year", "crop_year": "crop_year",
@@ -333,8 +340,8 @@ func readMutationJSON(stdin io.Reader, source string) ([]byte, *output.Error) {
 	return contents, nil
 }
 
-func mutationKey(provided string) (string, *output.Error) {
-	if provided != "" {
+func mutationKey(provided string, supplied bool) (string, *output.Error) {
+	if supplied {
 		if err := api.ValidateIdempotencyKey(provided); err != nil {
 			return "", &output.Error{ExitCode: 2, Code: "invalid_idempotency_key", Message: "Idempotency key is invalid"}
 		}

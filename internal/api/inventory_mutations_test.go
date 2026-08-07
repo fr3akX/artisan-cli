@@ -2,15 +2,21 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
 const mutationLotID = "11111111111141118111111111111111"
@@ -43,7 +49,7 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{"SL28", "Ruiru 11"}}, OpeningGrams: 25, OpeningReason: mutationStringPointer("count"), Images: []ImageUploadManifest{}}
+	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: " Lot ", Varietals: []string{" SL28 ", "Ruiru 11"}, ProcessingMethod: mutationStringPointer("washed"), ProcessingDetail: mutationStringPointer(" \t ")}, OpeningGrams: 25, OpeningReason: mutationStringPointer(" count\r\nline "), Images: []ImageUploadManifest{}}
 	if _, failure := client.CreateBeanLot(context.Background(), manifest, "same-key"); failure != nil {
 		t.Fatal(failure)
 	}
@@ -66,6 +72,11 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(types[0], "multipart/form-data; boundary=") || types[1] != "application/json" || types[2] != "application/json" {
 		t.Fatalf("content types = %v", types)
+	}
+	gotManifest := rawMutationManifest(t, bodies[0], types[0])
+	wantManifest := `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"varietals":["SL28","Ruiru 11"],"sca_score":null,"processing_method":"washed","processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":25,"opening_reason":"count\nline","opening_reference":null,"images":[]}`
+	if gotManifest != wantManifest {
+		t.Fatalf("manifest body = %q, want %q", gotManifest, wantManifest)
 	}
 	if bodies[1] != `{"notes":null,"received_date":"2026-08-07","varietals":["SL28","Ruiru 11"]}` {
 		t.Fatalf("patch body = %q", bodies[1])
@@ -121,6 +132,193 @@ func TestStrictMutationModelsRejectLocally(t *testing.T) {
 			t.Fatalf("accepted adjustment %#v", adjustment)
 		}
 	}
+}
+
+func TestStrictCreateJSONRequiresNonNullArrays(t *testing.T) {
+	valid := `{"fields":{"name":"Lot","varietals":[]},"images":[]}`
+	if _, failure := DecodeBeanLotCreateManifest([]byte(valid)); failure != nil {
+		t.Fatalf("valid manifest failure = %v", failure)
+	}
+	for _, raw := range []string{
+		`{"fields":{"name":"Lot"},"images":[]}`,
+		`{"fields":{"name":"Lot","varietals":null},"images":[]}`,
+		`{"fields":{"name":"Lot","varietals":"Typica"},"images":[]}`,
+		`{"fields":{"name":"Lot","varietals":[null]},"images":[]}`,
+		`{"fields":{"name":"Lot","varietals":[]}}`,
+		`{"fields":{"name":"Lot","varietals":[]},"images":null}`,
+		`{"fields":{"name":"Lot","varietals":[]},"images":{}}`,
+		`{"fields":{"name":"Lot","varietals":[]},"images":[null]}`,
+	} {
+		if _, failure := DecodeBeanLotCreateManifest([]byte(raw)); failure == nil {
+			t.Errorf("accepted strict create JSON %s", raw)
+		}
+	}
+}
+
+func TestMutationNormalizationAndRelatedProcessingRules(t *testing.T) {
+	manifest, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"  Lot  ","origin":"  Kenya  ","varietals":["  SL28  "],"processing_method":"washed","processing_detail":"  \t "},"opening_reason":" first\r\nsecond ","opening_reference":"  ","images":[]}`))
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if manifest.Fields.Name != "Lot" || *manifest.Fields.Origin != "Kenya" || manifest.Fields.Varietals[0] != "SL28" || manifest.Fields.ProcessingDetail != nil || manifest.OpeningReason == nil || *manifest.OpeningReason != "first\nsecond" || manifest.OpeningReference != nil {
+		t.Fatalf("normalized manifest = %#v", manifest)
+	}
+	if _, failure = DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","varietals":[],"processing_method":"other","processing_detail":"  "},"images":[]}`)); failure == nil {
+		t.Fatal("blank detail authorized other processing")
+	}
+	patch, failure := DecodeBeanLotPatch([]byte(`{"origin":" Kenya ","notes":" first\rsecond ","processing_method":"washed","processing_detail":"  "}`))
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	encoded, _ := json.Marshal(patch)
+	if string(encoded) != `{"notes":"first\nsecond","origin":"Kenya","processing_detail":null,"processing_method":"washed"}` {
+		t.Fatalf("normalized patch = %s", encoded)
+	}
+	if _, failure = DecodeBeanLotPatch([]byte(`{"processing_method":"other","processing_detail":" \t "}`)); failure == nil {
+		t.Fatal("blank patch detail authorized other processing")
+	}
+}
+
+func TestMutationDatesRejectYearZero(t *testing.T) {
+	if _, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","received_date":"0000-01-01","varietals":[]},"images":[]}`)); failure == nil {
+		t.Fatal("accepted year-zero create date")
+	}
+	if _, failure := DecodeBeanLotPatch([]byte(`{"received_date":"0000-01-01"}`)); failure == nil {
+		t.Fatal("accepted year-zero patch date")
+	}
+	if failure := ValidateInventoryAdjustment(InventoryAdjustmentWrite{QuantityGrams: 1, Reason: "count", OccurredAt: "0000-01-01T00:00:00.000000Z"}); failure == nil {
+		t.Fatal("accepted year-zero timestamp")
+	}
+}
+
+func TestMutationMethodsRequireExactSuccessStatusesAndBodies(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		call   func(*Client) *output.Error
+	}{
+		{name: "create 200", status: http.StatusOK, call: func(client *Client) *output.Error {
+			_, failure := client.CreateBeanLot(context.Background(), BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{}}, Images: []ImageUploadManifest{}}, "key")
+			return failure
+		}},
+		{name: "create 204", status: http.StatusNoContent, call: func(client *Client) *output.Error {
+			_, failure := client.CreateBeanLot(context.Background(), BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{}}, Images: []ImageUploadManifest{}}, "key")
+			return failure
+		}},
+		{name: "patch 201", status: http.StatusCreated, call: func(client *Client) *output.Error {
+			patch, _ := NewBeanLotPatch(map[string]any{"notes": nil})
+			_, failure := client.PatchBeanLot(context.Background(), mutationLotID, patch, "key")
+			return failure
+		}},
+		{name: "adjust 205", status: http.StatusResetContent, call: func(client *Client) *output.Error {
+			_, failure := client.AdjustBeanLot(context.Background(), mutationLotID, InventoryAdjustmentWrite{QuantityGrams: 1, Reason: "count", OccurredAt: mutationStamp}, "key")
+			return failure
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				if test.status != http.StatusNoContent && test.status != http.StatusResetContent {
+					_, _ = io.WriteString(w, mutationLotJSON(1))
+				}
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "secret", time.Second)
+			failure := test.call(client)
+			if failure == nil || failure.Code != "invalid_server_response" || failure.HTTPStatus == nil || *failure.HTTPStatus != test.status {
+				t.Fatalf("failure = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestCreateEnforcesEncodedManifestCapAtExactWireBoundary(t *testing.T) {
+	var requests atomic.Int64
+	var receivedManifestBytes int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		receivedManifestBytes = len(rawMutationManifest(t, string(body), r.Header.Get("Content-Type")))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, mutationLotJSON(1))
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	oversized := BeanLotCreateManifest{
+		Fields:        BeanLotFields{Name: "Lot", Varietals: []string{}, Notes: mutationStringPointer(strings.Repeat("<", 10_000))},
+		OpeningReason: mutationStringPointer(strings.Repeat("<", 2_000)), Images: []ImageUploadManifest{},
+	}
+	if _, failure := client.CreateBeanLot(context.Background(), oversized, "key"); failure == nil || failure.ExitCode != 2 {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("oversized requests = %d", requests.Load())
+	}
+
+	exact, ok := exactSizeMutationManifest(maxBeanLotManifestBytes)
+	if !ok {
+		t.Fatal("could not construct exact-limit manifest")
+	}
+	if _, failure := client.CreateBeanLot(context.Background(), exact, "key"); failure != nil {
+		t.Fatal(failure)
+	}
+	if requests.Load() != 1 || receivedManifestBytes != maxBeanLotManifestBytes {
+		t.Fatalf("requests=%d manifest bytes=%d", requests.Load(), receivedManifestBytes)
+	}
+}
+
+func TestCreateSendsDecomposedUnicodeSafelyAndReturnsValidatedAPIRejection(t *testing.T) {
+	decomposed := "Cafe\u0301"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(rawMutationManifest(t, string(body), r.Header.Get("Content-Type")), decomposed) {
+			t.Fatal("decomposed Unicode was lost or unsafely rewritten")
+		}
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"normalization_rejected","message":"Normalization rejected","details":null}}`)
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	_, failure := client.CreateBeanLot(context.Background(), BeanLotCreateManifest{Fields: BeanLotFields{Name: decomposed, Varietals: []string{}}, Images: []ImageUploadManifest{}}, "key")
+	if failure == nil || failure.Code != "normalization_rejected" || failure.ExitCode != 7 {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func exactSizeMutationManifest(size int) (BeanLotCreateManifest, bool) {
+	notes := strings.Repeat("<", 10_000)
+	for escaped := 1; escaped <= 2_000; escaped++ {
+		reason := strings.Repeat("<", escaped)
+		manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{}, Notes: &notes}, OpeningReason: &reason, Images: []ImageUploadManifest{}}
+		encoded, _ := json.Marshal(manifest)
+		remainder := size - len(encoded)
+		if remainder >= 0 && remainder <= 2_000-escaped {
+			reason += strings.Repeat("a", remainder)
+			manifest.OpeningReason = &reason
+			encoded, _ = json.Marshal(manifest)
+			if len(encoded) == size {
+				return manifest, true
+			}
+		}
+	}
+	return BeanLotCreateManifest{}, false
+}
+
+func rawMutationManifest(t *testing.T, body, contentType string) string {
+	t.Helper()
+	_, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := multipart.NewReader(strings.NewReader(body), parameters["boundary"]).NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := io.ReadAll(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
 }
 
 func mutationStringPointer(value string) *string { return &value }
