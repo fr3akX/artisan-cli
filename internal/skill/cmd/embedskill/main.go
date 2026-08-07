@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 func main() {
@@ -26,7 +28,21 @@ func main() {
 	}
 }
 
-func atomicWrite(destination string, contents []byte) (returnedErr error) {
+func atomicWrite(destination string, contents []byte) error {
+	return atomicWriteWithOperations(destination, contents,
+		func(file *os.File) error { return file.Sync() },
+		atomicReplace,
+		securefile.SyncParentDirectory,
+	)
+}
+
+func atomicWriteWithOperations(
+	destination string,
+	contents []byte,
+	syncFile func(*os.File) error,
+	replace func(string, string) error,
+	syncParent func(string) error,
+) (returnedErr error) {
 	directory := filepath.Dir(destination)
 	file, err := os.CreateTemp(directory, "."+filepath.Base(destination)+".tmp-*")
 	if err != nil {
@@ -34,10 +50,8 @@ func atomicWrite(destination string, contents []byte) (returnedErr error) {
 	}
 	temporary := file.Name()
 	defer func() {
-		if returnedErr != nil {
-			file.Close()
-		}
-		os.Remove(temporary)
+		_ = file.Close()
+		_ = os.Remove(temporary)
 	}()
 	if err := file.Chmod(0o644); err != nil {
 		return err
@@ -45,13 +59,19 @@ func atomicWrite(destination string, contents []byte) (returnedErr error) {
 	if _, err := file.Write(contents); err != nil {
 		return err
 	}
-	if err := file.Sync(); err != nil {
-		return err
+	if err := syncFile(file); err != nil {
+		return fmt.Errorf("sync generated skill: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return atomicReplace(temporary, destination)
+	if err := replace(temporary, destination); err != nil {
+		return err
+	}
+	if err := syncParent(directory); err != nil {
+		return &securefile.ReplacementError{Err: fmt.Errorf("sync generated skill directory: %w", err)}
+	}
+	return nil
 }
 
 func fatalf(format string, args ...any) {

@@ -82,6 +82,8 @@ func runSkillInstall(args []string, runtime Runtime, jsonMode bool) int {
 
 func skillInstallFailure(err error) output.Error {
 	switch {
+	case embeddedskill.InstallVisible(err):
+		return output.Error{ExitCode: 3, Code: "skill_install_durability_unknown", Message: "The skill became visible but directory durability is uncertain; inspect it before retrying"}
 	case errors.Is(err, embeddedskill.ErrInvalidDirectory):
 		return output.Error{ExitCode: usageExitCode, Code: "invalid_skill_directory", Message: "Skill directory must be an existing safe directory without parent traversal"}
 	case errors.Is(err, embeddedskill.ErrDifferentContent):

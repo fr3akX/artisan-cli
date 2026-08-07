@@ -39,25 +39,26 @@ func TestSkillContentContract(t *testing.T) {
 
 	required := []string{
 		"artisan --json auth status",
+		"artisan --json --server <EXPECTED_SERVER_URL> auth status",
 		"never request, read, print, persist, or pass a token",
 		"never run `artisan auth login`",
-		"expected user, organization, server, and role",
+		"exact expected user, organization, and role",
 		"integer grams",
 		"explicit human approval",
 		"--yes",
 		"one idempotency key",
 		"same key",
-		"artisan --json inventory lot list",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory lot list",
 		"--limit",
 		"--cursor",
 		"--all",
-		"artisan --json inventory lot show",
-		"artisan --json inventory lot ledger",
-		"artisan --json inventory image",
-		"artisan --json inventory reservation create",
-		"artisan --json inventory reservation finalize",
-		"artisan --json inventory conflict show",
-		"artisan --json inventory conflict resolve",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory lot show",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory image",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory reservation create",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory reservation finalize",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory conflict show",
+		"artisan --json --server <EXPECTED_SERVER_URL> inventory conflict resolve",
 		"409",
 		"Do not adjust",
 		"authoritative reread",
@@ -84,6 +85,17 @@ func TestSkillContentContract(t *testing.T) {
 		if strings.Contains(text, phrase) {
 			t.Errorf("skill contains forbidden credential/network instruction %q", phrase)
 		}
+	}
+
+	if count := strings.Count(text, "artisan --json auth status"); count != 1 {
+		t.Errorf("unbound initial auth status count = %d, want exactly 1", count)
+	}
+	if strings.Contains(text, "artisan --json inventory ") {
+		t.Error("skill contains an inventory command not bound to the expected server")
+	}
+	lots := text[strings.Index(text, "## Lots:"):strings.Index(text, "## Images:")]
+	if strings.Contains(strings.ToLower(lots), "organization") {
+		t.Error("lot workflow incorrectly claims lot responses contain organization")
 	}
 }
 
@@ -181,17 +193,32 @@ func TestInstallRejectsUnsafeTargets(t *testing.T) {
 
 func TestInstallConcurrentCallsLeaveWholeContent(t *testing.T) {
 	root := t.TempDir()
-	errs := make(chan error, 16)
-	for i := 0; i < cap(errs); i++ {
+	type outcome struct {
+		result InstallResult
+		err    error
+	}
+	outcomes := make(chan outcome, 16)
+	for i := 0; i < cap(outcomes); i++ {
 		go func() {
-			_, err := Install(root, false)
-			errs <- err
+			result, err := Install(root, false)
+			outcomes <- outcome{result: result, err: err}
 		}()
 	}
-	for i := 0; i < cap(errs); i++ {
-		if err := <-errs; err != nil {
-			t.Errorf("concurrent Install() failed: %v", err)
+	installed, unchanged := 0, 0
+	for i := 0; i < cap(outcomes); i++ {
+		outcome := <-outcomes
+		if outcome.err != nil {
+			t.Errorf("concurrent Install() failed: %v", outcome.err)
 		}
+		if outcome.result.Installed {
+			installed++
+		}
+		if outcome.result.Unchanged {
+			unchanged++
+		}
+	}
+	if installed != 1 || unchanged != cap(outcomes)-1 {
+		t.Fatalf("installed = %d, unchanged = %d, want one winner and identical idempotence", installed, unchanged)
 	}
 	targetDir := filepath.Join(root, "artisan-inventory")
 	got, err := os.ReadFile(filepath.Join(targetDir, "SKILL.md"))

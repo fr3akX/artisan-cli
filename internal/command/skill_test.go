@@ -2,11 +2,14 @@ package command
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 func TestSkillShowHumanAndJSON(t *testing.T) {
@@ -129,6 +132,13 @@ func TestSkillInstallRefusalForceAndStableJSONError(t *testing.T) {
 	got, _ = os.ReadFile(path)
 	if !strings.HasPrefix(string(got), "---\nname: artisan-inventory\n") {
 		t.Fatal("force did not install embedded content")
+	}
+}
+
+func TestSkillInstallFailureReportsVisibleDurabilityAmbiguity(t *testing.T) {
+	failure := skillInstallFailure(&securefile.ReplacementError{Err: errors.New("injected sync failure")})
+	if failure.ExitCode != 3 || failure.Code != "skill_install_durability_unknown" || !strings.Contains(failure.Message, "became visible") || !strings.Contains(failure.Message, "inspect") {
+		t.Fatalf("failure = %#v", failure)
 	}
 }
 
