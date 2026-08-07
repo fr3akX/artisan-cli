@@ -74,14 +74,17 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutation := range map[string][2]string{
-		"native OS":          {"windows-2022", "windows-missing"},
-		"race flags":         {"run: go test ./... -race", "run: go test -race"},
-		"build command":      {"go build -trimpath", "echo no-build"},
-		"smoke command":      {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
-		"permissions":        {"contents: read", "contents: write"},
-		"generation drift":   {"git diff --exit-code", "git status --short"},
-		"command in comment": {"run: go vet ./...", "run: echo vet-disabled\n      # go vet ./..."},
-		"wrong shell":        {"name: Check formatting\n        shell: bash", "name: Check formatting\n        shell: sh"},
+		"native OS":             {"windows-2022", "windows-missing"},
+		"race flags":            {"run: go test ./... -race", "run: go test -race"},
+		"build command":         {"go build -trimpath", "echo no-build"},
+		"smoke command":         {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
+		"permissions":           {"contents: read", "contents: write"},
+		"generation drift":      {"git diff --exit-code", "git status --short"},
+		"command in comment":    {"run: go vet ./...", "run: echo vet-disabled\n      # go vet ./..."},
+		"wrong shell":           {"name: Check formatting\n        shell: bash", "name: Check formatting\n        shell: sh"},
+		"test if false":         {"name: Test\n        run:", "name: Test\n        if: false\n        run:"},
+		"race false expression": {"name: Race test\n        run:", "name: Race test\n        if: ${{ false }}\n        run:"},
+		"quality continue":      {"quality:\n    runs-on:", "quality:\n    continue-on-error: ${{ matrix.allowed }}\n    runs-on:"},
 	} {
 		t.Run("CI missing "+name, func(t *testing.T) {
 			changed := bytes.Replace(ci, []byte(mutation[0]), []byte(mutation[1]), 1)
@@ -99,13 +102,16 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutation := range map[string][2]string{
-		"tag filter":        {"- 'v*'", "- '*'"},
-		"builder":           {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, "run: echo no-builder"},
-		"builder in text":   {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, `run: echo 'scripts/build-release.sh "$VERSION" "$COMMIT" release'`},
-		"wrong shell":       {"name: Build and verify static release archives\n        shell: bash", "name: Build and verify static release archives\n        shell: sh"},
-		"attestation":       {"actions/attest-build-provenance@", "actions/upload-artifact@"},
-		"attestation input": {"subject-path: 'dist/release/*'", "subject-path: 'dist/release/*.zip'"},
-		"publish":           {"softprops/action-gh-release@", "actions/upload-artifact@"},
+		"tag filter":           {"- 'v*'", "- '*'"},
+		"builder":              {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, "run: echo no-builder"},
+		"builder in text":      {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, `run: echo 'scripts/build-release.sh "$VERSION" "$COMMIT" release'`},
+		"wrong shell":          {"name: Build and verify static release archives\n        shell: bash", "name: Build and verify static release archives\n        shell: sh"},
+		"attestation":          {"actions/attest-build-provenance@", "actions/upload-artifact@"},
+		"attestation input":    {"subject-path: 'dist/release/*'", "subject-path: 'dist/release/*.zip'"},
+		"publish":              {"softprops/action-gh-release@", "actions/upload-artifact@"},
+		"builder if false":     {"name: Build and verify static release archives\n        shell:", "name: Build and verify static release archives\n        if: false\n        shell:"},
+		"attestation continue": {"name: Attest archives and checksums\n        uses:", "name: Attest archives and checksums\n        continue-on-error: true\n        uses:"},
+		"publish dynamic if":   {"name: Publish GitHub release\n        uses:", "name: Publish GitHub release\n        if: ${{ success() }}\n        uses:"},
 	} {
 		t.Run("release "+name, func(t *testing.T) {
 			changed := bytes.Replace(release, []byte(mutation[0]), []byte(mutation[1]), 1)
@@ -164,7 +170,7 @@ func TestReleaseArchives(t *testing.T) {
 		}
 	}
 	root := repositoryRoot(t)
-	leafA := "contract-test-a"
+	leafA := "work"
 	leafB := "contract-test-b"
 	output := filepath.Join(root, "dist", leafA)
 	outputB := filepath.Join(root, "dist", leafB)
@@ -353,6 +359,12 @@ func validateCIWorkflow(contents []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectDisableControls(quality); err != nil {
+		return fmt.Errorf("quality job: %w", err)
+	}
+	if err := rejectDisableControls(native); err != nil {
+		return fmt.Errorf("native job: %w", err)
+	}
 	_, qualityUses, err := jobSteps(quality)
 	if err != nil {
 		return err
@@ -452,6 +464,9 @@ func validateReleaseWorkflow(contents []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectDisableControls(release); err != nil {
+		return fmt.Errorf("release job: %w", err)
+	}
 	permissions, err := mappingLookup(release, "permissions")
 	if err != nil || !mappingEquals(permissions, map[string]string{"contents": "write", "id-token": "write", "attestations": "write"}) {
 		return errors.New("release job permissions drifted")
@@ -485,6 +500,20 @@ func validateReleaseWorkflow(contents []byte) error {
 		return errors.New("release must use Go 1.23.x")
 	}
 	return nil
+}
+
+func rejectDisableControls(node *yaml.Node) error {
+	return walkYAML(node, func(current *yaml.Node) error {
+		if current.Kind != yaml.MappingNode {
+			return nil
+		}
+		for index := 0; index+1 < len(current.Content); index += 2 {
+			if current.Content[index].Value == "if" || current.Content[index].Value == "continue-on-error" {
+				return fmt.Errorf("%s is forbidden on required jobs and steps", current.Content[index].Value)
+			}
+		}
+		return nil
+	})
 }
 
 func mappingLookup(node *yaml.Node, key string) (*yaml.Node, error) {

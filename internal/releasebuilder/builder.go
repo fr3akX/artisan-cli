@@ -1,16 +1,16 @@
 package releasebuilder
 
 import (
-	"archive/tar"
-	"archive/zip"
 	"bytes"
-	"compress/flate"
-	"compress/gzip"
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"debug/buildinfo"
 	"debug/elf"
 	"debug/macho"
 	"debug/pe"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +19,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	modulePath = "github.com/fr3akX/artisan-cli"
-	mainPath   = modulePath + "/cmd/artisan"
+	modulePath        = "github.com/fr3akX/artisan-cli"
+	mainPath          = modulePath + "/cmd/artisan"
+	maximumSourceSize = 2 << 20
+	maximumBinarySize = 64 << 20
+	maximumOutputSize = 64 << 10
 )
 
 var (
@@ -37,25 +40,27 @@ var (
 )
 
 type Options struct {
-	Root          string
-	Version       string
-	Commit        string
-	Destination   string
-	Go            string
-	BeforePublish func() error
+	Root                string
+	Version             string
+	Commit              string
+	Destination         string
+	Go                  string
+	FileTool            string
+	LDDTool             string
+	CommandTimeout      time.Duration
+	AfterSourceSnapshot func() error
+	AfterBinarySnapshot func(goos, goarch, path string) error
+	BeforePublish       func() error
+	AfterPublish        func() error
 }
 
-type target struct {
-	goos, goarch string
-}
+type target struct{ goos, goarch string }
 
-var releaseTargets = []target{
-	{"linux", "amd64"},
-	{"linux", "arm64"},
-	{"darwin", "amd64"},
-	{"darwin", "arm64"},
-	{"windows", "amd64"},
-	{"windows", "arm64"},
+var releaseTargets = []target{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "amd64"}, {"darwin", "arm64"}, {"windows", "amd64"}, {"windows", "arm64"}}
+
+type payloadSnapshot struct {
+	bytes  []byte
+	digest [sha256.Size]byte
 }
 
 func Build(options Options) (returnErr error) {
@@ -81,145 +86,147 @@ func Build(options Options) (returnErr error) {
 	if _, err := exec.LookPath(options.Go); err != nil {
 		return fmt.Errorf("Go tool is unavailable: %w", err)
 	}
+	if options.FileTool == "" {
+		options.FileTool = "file"
+	}
+	if options.LDDTool == "" {
+		options.LDDTool = "ldd"
+	}
+	if options.CommandTimeout <= 0 {
+		options.CommandTimeout = 10 * time.Second
+	}
 
-	sources := []string{"LICENSE", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"}
-	for _, source := range sources {
-		if err := requireRegularFile(filepath.Join(root, filepath.FromSlash(source))); err != nil {
-			return fmt.Errorf("required source %s is unsafe: %w", source, err)
+	sources := make(map[string]payloadSnapshot, 3)
+	for _, relative := range []string{"LICENSE", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"} {
+		contents, err := readRegularSnapshot(filepath.Join(root, filepath.FromSlash(relative)), maximumSourceSize)
+		if err != nil {
+			return fmt.Errorf("snapshot required source %s: %w", relative, err)
+		}
+		sources[relative] = payloadSnapshot{bytes: contents, digest: sha256.Sum256(contents)}
+	}
+	if options.AfterSourceSnapshot != nil {
+		if err := options.AfterSourceSnapshot(); err != nil {
+			return fmt.Errorf("after source snapshot: %w", err)
 		}
 	}
 
-	dist := filepath.Join(root, "dist")
-	distInfo, err := ensureRealDirectory(dist)
-	if err != nil {
+	distPath := filepath.Join(root, "dist")
+	if _, err := ensureRealDirectory(distPath); err != nil {
 		return fmt.Errorf("unsafe dist directory: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(dist); err != nil || filepath.Clean(resolved) != dist {
-		return errors.New("dist must be the canonical repository dist directory, not a link or reparse path")
+	resolved, err := filepath.EvalSymlinks(distPath)
+	if err != nil || filepath.Clean(resolved) != distPath {
+		return errors.New("dist must be the canonical repository dist directory")
 	}
-	final := filepath.Join(dist, options.Destination)
-	if err := requireAbsent(final); err != nil {
-		return fmt.Errorf("final destination must not pre-exist: %w", err)
+	dist, err := openHeldDist(distPath)
+	if err != nil {
+		return fmt.Errorf("hold canonical dist directory: %w", err)
+	}
+	defer dist.close()
+	if !dist.pathMatches() {
+		return errors.New("requested dist path does not match held directory")
+	}
+	exists, err := dist.finalExists(options.Destination)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return errors.New("final destination must not pre-exist")
 	}
 
-	published := false
-	staging, err := os.MkdirTemp(dist, ".release-build-")
+	stage, err := dist.createStaging()
 	if err != nil {
-		return fmt.Errorf("create private staging directory: %w", err)
+		return fmt.Errorf("create private held staging directory: %w", err)
 	}
-	if err := os.Chmod(staging, 0o700); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("protect staging directory: %w", err)
-	}
+	published := false
 	defer func() {
-		current, boundaryErr := os.Lstat(dist)
-		if boundaryErr != nil || isLinkOrReparse(current) || !current.IsDir() || !os.SameFile(distInfo, current) {
-			return
-		}
-		if err := os.RemoveAll(staging); err != nil && returnErr == nil && !published {
-			returnErr = fmt.Errorf("remove staging directory: %w", err)
+		if err := dist.cleanup(stage); err != nil && returnErr == nil && !published {
+			returnErr = fmt.Errorf("remove held staging directory: %w", err)
 		}
 	}()
-
-	publish := filepath.Join(staging, options.Destination)
-	work := filepath.Join(staging, "work")
-	if err := os.Mkdir(publish, 0o755); err != nil {
+	publishPath := filepath.Join(stage.path, "payload")
+	workPath := filepath.Join(stage.path, "build-work")
+	if err := os.Mkdir(publishPath, 0o755); err != nil {
 		return err
 	}
-	if err := os.Chmod(publish, 0o755); err != nil {
+	if err := os.Chmod(publishPath, 0o755); err != nil {
 		return err
 	}
-	if err := os.Mkdir(work, 0o700); err != nil {
+	if err := os.Mkdir(workPath, 0o700); err != nil {
 		return err
 	}
 
 	archives := make([]string, 0, len(releaseTargets))
 	for _, releaseTarget := range releaseTargets {
-		archiveName, err := buildTarget(root, work, publish, options, releaseTarget)
+		name, err := buildTarget(root, workPath, publishPath, options, releaseTarget, sources)
 		if err != nil {
 			return err
 		}
-		archives = append(archives, archiveName)
+		archives = append(archives, name)
 	}
-	checksumPath := filepath.Join(publish, "checksums.txt")
-	var checksumText strings.Builder
+	var manifest strings.Builder
 	for _, name := range archives {
-		contents, err := os.ReadFile(filepath.Join(publish, name))
+		contents, err := os.ReadFile(filepath.Join(publishPath, name))
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(&checksumText, "%x  %s\n", sha256.Sum256(contents), name)
+		fmt.Fprintf(&manifest, "%x  %s\n", sha256.Sum256(contents), name)
 	}
 	if len(archives) != 6 {
 		return errors.New("checksum manifest must contain exactly six archives")
 	}
-	if err := os.WriteFile(checksumPath, []byte(checksumText.String()), 0o644); err != nil {
+	checksumPath := filepath.Join(publishPath, "checksums.txt")
+	if err := os.WriteFile(checksumPath, []byte(manifest.String()), 0o644); err != nil {
 		return err
 	}
 	if err := os.Chmod(checksumPath, 0o644); err != nil {
 		return err
 	}
-	if err := verifyChecksums(publish, archives); err != nil {
+	if err := verifyChecksums(publishPath, archives); err != nil {
 		return err
+	}
+	if err := stage.preparePayload(); err != nil {
+		return fmt.Errorf("hold completed payload: %w", err)
 	}
 	if options.BeforePublish != nil {
 		if err := options.BeforePublish(); err != nil {
 			return fmt.Errorf("before publish: %w", err)
 		}
 	}
-
-	currentDistInfo, err := os.Lstat(dist)
-	if err != nil || isLinkOrReparse(currentDistInfo) || !currentDistInfo.IsDir() || !os.SameFile(distInfo, currentDistInfo) {
-		return errors.New("dist boundary changed before publish")
+	if !dist.pathMatches() {
+		return errors.New("requested dist identity changed before publish")
 	}
-	resolvedDist, err := filepath.EvalSymlinks(dist)
-	if err != nil || filepath.Clean(resolvedDist) != dist {
-		return errors.New("dist boundary became unsafe before publish")
-	}
-	if err := requireAbsent(final); err != nil {
-		return fmt.Errorf("final destination appeared before publish: %w", err)
-	}
-	if err := os.Rename(publish, final); err != nil {
-		return fmt.Errorf("atomically publish release: %w", err)
+	if err := dist.publish(stage, options.Destination); err != nil {
+		if isAlreadyExists(err) {
+			return fmt.Errorf("final destination appeared before atomic publish: %w", err)
+		}
+		return fmt.Errorf("atomic no-replace publish: %w", err)
 	}
 	published = true
-	for _, name := range append(append([]string(nil), archives...), "checksums.txt") {
-		fmt.Println(filepath.Join(final, name))
+	if options.AfterPublish != nil {
+		_ = options.AfterPublish()
 	}
+	if !dist.pathMatches() {
+		if rollbackErr := dist.rollback(stage, options.Destination); rollbackErr == nil {
+			published = false
+			return errors.New("requested dist identity changed after publish; publication rolled back")
+		}
+		return errors.New("requested dist identity changed after publish; publication status is confined to held original dist")
+	}
+	// Do not print lexical paths: the held directory is authoritative, while the
+	// requested path can be renamed by another process after the final check.
 	return nil
 }
 
-func buildTarget(root, work, publish string, options Options, releaseTarget target) (string, error) {
+func buildTarget(root, work, publish string, options Options, releaseTarget target, sources map[string]payloadSnapshot) (string, error) {
 	top := fmt.Sprintf("artisan-%s-%s-%s", options.Version, releaseTarget.goos, releaseTarget.goarch)
-	stage := filepath.Join(work, top)
-	if err := os.MkdirAll(filepath.Join(stage, "skills", "artisan-inventory"), 0o755); err != nil {
-		return "", err
-	}
-	for _, directory := range []string{stage, filepath.Join(stage, "skills"), filepath.Join(stage, "skills", "artisan-inventory")} {
-		if err := os.Chmod(directory, 0o755); err != nil {
-			return "", err
-		}
-	}
-	for _, relative := range []string{"LICENSE", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"} {
-		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
-		if err != nil {
-			return "", err
-		}
-		destination := filepath.Join(stage, filepath.FromSlash(relative))
-		if err := os.WriteFile(destination, contents, 0o644); err != nil {
-			return "", err
-		}
-		if err := os.Chmod(destination, 0o644); err != nil {
-			return "", err
-		}
-	}
 	binary := "artisan"
 	extension := ".tar.gz"
 	if releaseTarget.goos == "windows" {
 		binary = "artisan.exe"
 		extension = ".zip"
 	}
-	binaryPath := filepath.Join(stage, binary)
+	binaryPath := filepath.Join(work, top+"-"+binary)
 	identity := "artisan-release:" + options.Version + ":" + options.Commit
 	ldflags := fmt.Sprintf("-s -w -X %s/internal/release.Version=%s -X %s/internal/release.Commit=%s -X %s/internal/release.releaseIdentity=%s", modulePath, options.Version, modulePath, options.Commit, modulePath, identity)
 	command := exec.Command(options.Go, "build", "-trimpath", "-buildvcs=false", "-ldflags="+ldflags, "-o", binaryPath, "./cmd/artisan")
@@ -231,32 +238,66 @@ func buildTarget(root, work, publish string, options Options, releaseTarget targ
 	if err := os.Chmod(binaryPath, 0o755); err != nil {
 		return "", err
 	}
-	if err := InspectBinary(binaryPath, releaseTarget.goos, releaseTarget.goarch, options.Version, options.Commit); err != nil {
-		return "", fmt.Errorf("inspect %s/%s: %w", releaseTarget.goos, releaseTarget.goarch, err)
-	}
 	if releaseTarget.goos == runtime.GOOS && releaseTarget.goarch == runtime.GOARCH {
-		output, err := exec.Command(binaryPath, "--json", "version").CombinedOutput()
-		if err != nil || !strings.Contains(string(output), `"version":"`+options.Version+`"`) || !strings.Contains(string(output), `"commit":"`+options.Commit+`"`) {
-			return "", fmt.Errorf("native version smoke failed: %w: %s", err, output)
+		if err := runNativeSmoke(binaryPath, options.Version, options.Commit, options.CommandTimeout); err != nil {
+			return "", err
 		}
 	}
+	if runtime.GOOS == "linux" && releaseTarget.goos == "linux" && releaseTarget.goarch == "amd64" {
+		if err := verifyNativeLinuxTools(binaryPath, options.FileTool, options.LDDTool, options.CommandTimeout); err != nil {
+			return "", err
+		}
+	}
+	binaryBytes, err := readRegularSnapshot(binaryPath, maximumBinarySize)
+	if err != nil {
+		return "", fmt.Errorf("snapshot built binary %s/%s: %w", releaseTarget.goos, releaseTarget.goarch, err)
+	}
+	if err := InspectBinaryBytes(binaryBytes, releaseTarget.goos, releaseTarget.goarch, options.Version, options.Commit); err != nil {
+		return "", fmt.Errorf("inspect %s/%s snapshot: %w", releaseTarget.goos, releaseTarget.goarch, err)
+	}
+	if options.AfterBinarySnapshot != nil {
+		if err := options.AfterBinarySnapshot(releaseTarget.goos, releaseTarget.goarch, binaryPath); err != nil {
+			return "", err
+		}
+	}
+	payloads := make(map[string]payloadSnapshot, len(sources)+1)
+	for name, snapshot := range sources {
+		payloads[name] = snapshot
+	}
+	payloads[binary] = payloadSnapshot{bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}
 	archiveName := top + extension
 	archivePath := filepath.Join(publish, archiveName)
 	if releaseTarget.goos == "windows" {
-		if err := writeZIP(archivePath, stage, top, binary); err != nil {
-			return "", err
-		}
-	} else if err := writeTarGzip(archivePath, stage, top, binary); err != nil {
+		err = writeZIP(archivePath, top, binary, payloads)
+	} else {
+		err = writeTarGzip(archivePath, top, binary, payloads)
+	}
+	if err != nil {
 		return "", err
 	}
-	if err := InspectArchive(archivePath, options.Version, releaseTarget.goos, releaseTarget.goarch); err != nil {
+	expected := make(map[string][sha256.Size]byte)
+	for _, entry := range archiveEntries(top, binary, payloads) {
+		if !entry.directory {
+			expected[entry.name] = entry.payload.digest
+		}
+	}
+	if err := InspectArchivePayloads(archivePath, options.Version, releaseTarget.goos, releaseTarget.goarch, expected); err != nil {
 		return "", fmt.Errorf("inspect archive %s: %w", archiveName, err)
 	}
 	return archiveName, nil
 }
 
 func InspectBinary(path, goos, goarch, version, commit string) error {
-	info, err := buildinfo.ReadFile(path)
+	contents, err := readRegularSnapshot(path, maximumBinarySize)
+	if err != nil {
+		return err
+	}
+	return InspectBinaryBytes(contents, goos, goarch, version, commit)
+}
+
+func InspectBinaryBytes(contents []byte, goos, goarch, version, commit string) error {
+	reader := bytes.NewReader(contents)
+	info, err := buildinfo.Read(reader)
 	if err != nil {
 		return fmt.Errorf("read Go build info: %w", err)
 	}
@@ -272,21 +313,16 @@ func InspectBinary(path, goos, goarch, version, commit string) error {
 			return fmt.Errorf("build setting %s=%q, want %q", key, settings[key], want)
 		}
 	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	identity := []byte("artisan-release:" + version + ":" + commit)
-	if !bytes.Contains(contents, identity) {
+	if !bytes.Contains(contents, []byte("artisan-release:"+version+":"+commit)) {
 		return errors.New("exact linked VERSION/COMMIT identity is missing")
 	}
-	return inspectNativeHeader(path, goos, goarch)
+	return inspectNativeHeaderBytes(reader, goos, goarch)
 }
 
-func inspectNativeHeader(path, goos, goarch string) error {
+func inspectNativeHeaderBytes(reader io.ReaderAt, goos, goarch string) error {
 	switch goos {
 	case "linux":
-		file, err := elf.Open(path)
+		file, err := elf.NewFile(reader)
 		if err != nil {
 			return err
 		}
@@ -307,7 +343,7 @@ func inspectNativeHeader(path, goos, goarch string) error {
 			}
 		}
 	case "darwin":
-		file, err := macho.Open(path)
+		file, err := macho.NewFile(reader)
 		if err != nil {
 			return err
 		}
@@ -320,7 +356,7 @@ func inspectNativeHeader(path, goos, goarch string) error {
 			return fmt.Errorf("Mach-O CPU %v, want %v", file.Cpu, want)
 		}
 	case "windows":
-		file, err := pe.Open(path)
+		file, err := pe.NewFile(reader)
 		if err != nil {
 			return err
 		}
@@ -336,6 +372,111 @@ func inspectNativeHeader(path, goos, goarch string) error {
 		return fmt.Errorf("unsupported GOOS %q", goos)
 	}
 	return nil
+}
+
+func runNativeSmoke(binary, version, commit string, timeout time.Duration) error {
+	output, exitErr, runErr := runBounded(timeout, maximumOutputSize, nil, binary, "--json", "version")
+	if runErr != nil {
+		return fmt.Errorf("native version smoke: %w", runErr)
+	}
+	if exitErr != nil {
+		return fmt.Errorf("native version smoke exited unsuccessfully: %w: %s", exitErr, output)
+	}
+	var envelope struct {
+		Ok   bool `json:"ok"`
+		Data struct {
+			Version string `json:"version"`
+			Commit  string `json:"commit"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	if err := decoder.Decode(&envelope); err != nil {
+		return fmt.Errorf("native version JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("native version output must contain exactly one JSON value and EOF")
+	}
+	if !envelope.Ok || envelope.Data.Version != version || envelope.Data.Commit != commit {
+		return errors.New("native version envelope identity mismatch")
+	}
+	return nil
+}
+
+func verifyNativeLinuxTools(binary, fileTool, lddTool string, timeout time.Duration) error {
+	environment := replaceEnv(os.Environ(), map[string]string{"LC_ALL": "C", "LANG": "C"})
+	fileOutput, fileExit, err := runBounded(timeout, maximumOutputSize, environment, fileTool, binary)
+	if err != nil {
+		return fmt.Errorf("file validation: %w", err)
+	}
+	if fileExit != nil {
+		return fmt.Errorf("file validation exited unsuccessfully: %w: %s", fileExit, fileOutput)
+	}
+	fileText := string(fileOutput)
+	if !strings.Contains(fileText, "ELF 64-bit LSB executable") || !strings.Contains(fileText, "x86-64") || (!strings.Contains(fileText, "statically linked") && !strings.Contains(fileText, "static-pie linked")) {
+		return fmt.Errorf("file did not confirm exact static x86-64 ELF: %s", fileOutput)
+	}
+	lddOutput, lddExit, err := runBounded(timeout, maximumOutputSize, environment, lddTool, binary)
+	if err != nil {
+		return fmt.Errorf("ldd validation: %w", err)
+	}
+	if lddExit == nil {
+		return fmt.Errorf("ldd unexpectedly succeeded: %s", lddOutput)
+	}
+	lddText := strings.ToLower(string(lddOutput))
+	if !strings.Contains(lddText, "not a dynamic executable") && !strings.Contains(lddText, "not dynamically linked") && !strings.Contains(lddText, "statically linked") {
+		return fmt.Errorf("ldd did not confirm no dynamic linkage: %s", lddOutput)
+	}
+	return nil
+}
+
+type cappedBuffer struct {
+	mutex    sync.Mutex
+	bytes    []byte
+	maximum  int
+	overflow bool
+}
+
+func (buffer *cappedBuffer) Write(data []byte) (int, error) {
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+	available := buffer.maximum - len(buffer.bytes)
+	if available > 0 {
+		count := len(data)
+		if count > available {
+			count = available
+		}
+		buffer.bytes = append(buffer.bytes, data[:count]...)
+	}
+	if len(data) > available {
+		buffer.overflow = true
+	}
+	return len(data), nil
+}
+func runBounded(timeout time.Duration, maximum int, environment []string, name string, args ...string) ([]byte, error, error) {
+	contextValue, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	command := exec.CommandContext(contextValue, name, args...)
+	command.WaitDelay = 2 * time.Second
+	if environment != nil {
+		command.Env = environment
+	}
+	output := &cappedBuffer{maximum: maximum}
+	command.Stdout = output
+	command.Stderr = output
+	cleanup, startErr := startContainedProcess(command)
+	if startErr != nil {
+		return output.bytes, nil, startErr
+	}
+	defer cleanup()
+	exitErr := command.Wait()
+	if contextValue.Err() != nil {
+		return output.bytes, nil, fmt.Errorf("command timed out and was killed: %w", contextValue.Err())
+	}
+	if output.overflow {
+		return output.bytes, nil, errors.New("command output exceeded bound")
+	}
+	return output.bytes, exitErr, nil
 }
 
 func canonicalDirectory(path string) (string, error) {
@@ -356,7 +497,6 @@ func canonicalDirectory(path string) (string, error) {
 	}
 	return filepath.Clean(resolved), nil
 }
-
 func ensureRealDirectory(path string) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
@@ -376,29 +516,13 @@ func ensureRealDirectory(path string) (os.FileInfo, error) {
 	}
 	return info, nil
 }
-
-func requireRegularFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
+func randomStagingName() (string, error) {
+	data := make([]byte, 12)
+	if _, err := rand.Read(data); err != nil {
+		return "", err
 	}
-	if isLinkOrReparse(info) || !info.Mode().IsRegular() {
-		return errors.New("not a regular non-link file")
-	}
-	return nil
+	return ".release-build-" + hex.EncodeToString(data), nil
 }
-
-func requireAbsent(path string) error {
-	_, err := os.Lstat(path)
-	if err == nil {
-		return errors.New("path exists")
-	}
-	if !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 func verifyChecksums(directory string, names []string) error {
 	contents, err := os.ReadFile(filepath.Join(directory, "checksums.txt"))
 	if err != nil {
@@ -413,14 +537,12 @@ func verifyChecksums(directory string, names []string) error {
 		if err != nil {
 			return err
 		}
-		want := fmt.Sprintf("%x  %s", sha256.Sum256(data), name)
-		if lines[index] != want {
+		if lines[index] != fmt.Sprintf("%x  %s", sha256.Sum256(data), name) {
 			return fmt.Errorf("checksum mismatch for %s", name)
 		}
 	}
 	return nil
 }
-
 func replaceEnv(environment []string, replacements map[string]string) []string {
 	result := make([]string, 0, len(environment)+len(replacements))
 	for _, entry := range environment {
@@ -436,128 +558,4 @@ func replaceEnv(environment []string, replacements map[string]string) []string {
 		result = append(result, key+"="+value)
 	}
 	return result
-}
-
-func archiveEntries(top, binary string) []archiveEntry {
-	entries := []archiveEntry{
-		{name: top + "/", mode: 0o755, directory: true},
-		{name: top + "/LICENSE", mode: 0o644, source: "LICENSE"},
-		{name: top + "/THIRD_PARTY_NOTICES.txt", mode: 0o644, source: "THIRD_PARTY_NOTICES.txt"},
-		{name: top + "/" + binary, mode: 0o755, source: binary},
-		{name: top + "/skills/", mode: 0o755, directory: true},
-		{name: top + "/skills/artisan-inventory/", mode: 0o755, directory: true},
-		{name: top + "/skills/artisan-inventory/SKILL.md", mode: 0o644, source: "skills/artisan-inventory/SKILL.md"},
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
-	return entries
-}
-
-type archiveEntry struct {
-	name, source string
-	mode         int64
-	directory    bool
-}
-
-func writeTarGzip(path, stage, top, binary string) (returnErr error) {
-	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := output.Close(); err != nil && returnErr == nil {
-			returnErr = err
-		}
-	}()
-	gzipWriter, err := gzip.NewWriterLevel(output, gzip.BestCompression)
-	if err != nil {
-		return err
-	}
-	gzipWriter.Header.ModTime = archiveTime
-	gzipWriter.Header.OS = 255
-	tarWriter := tar.NewWriter(gzipWriter)
-	for _, entry := range archiveEntries(top, binary) {
-		header := &tar.Header{Name: entry.name, Mode: entry.mode, ModTime: archiveTime, Uid: 0, Gid: 0, Uname: "", Gname: "", Format: tar.FormatUSTAR}
-		if entry.directory {
-			header.Typeflag = tar.TypeDir
-		} else {
-			header.Typeflag = tar.TypeReg
-			info, err := os.Stat(filepath.Join(stage, filepath.FromSlash(entry.source)))
-			if err != nil {
-				return err
-			}
-			header.Size = info.Size()
-		}
-		if err := tarWriter.WriteHeader(header); err != nil {
-			return err
-		}
-		if !entry.directory {
-			input, err := os.Open(filepath.Join(stage, filepath.FromSlash(entry.source)))
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(tarWriter, input)
-			closeErr := input.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		}
-	}
-	if err := tarWriter.Close(); err != nil {
-		return err
-	}
-	if err := gzipWriter.Close(); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o644)
-}
-
-func writeZIP(path, stage, top, binary string) (returnErr error) {
-	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := output.Close(); err != nil && returnErr == nil {
-			returnErr = err
-		}
-	}()
-	writer := zip.NewWriter(output)
-	writer.RegisterCompressor(zip.Deflate, func(destination io.Writer) (io.WriteCloser, error) {
-		return flate.NewWriter(destination, flate.BestCompression)
-	})
-	for _, entry := range archiveEntries(top, binary) {
-		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
-		header.SetModTime(archiveTime)
-		mode := os.FileMode(entry.mode)
-		if entry.directory {
-			mode |= os.ModeDir
-			header.Method = zip.Store
-		}
-		header.SetMode(mode)
-		destination, err := writer.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-		if !entry.directory {
-			input, err := os.Open(filepath.Join(stage, filepath.FromSlash(entry.source)))
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(destination, input)
-			closeErr := input.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o644)
 }
