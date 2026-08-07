@@ -25,6 +25,18 @@ func runInventoryLot(ctx context.Context, args []string, runtime Runtime, jsonMo
 			return inventoryUsageFailure(runtime, jsonMode, "inventory lot show requires one LOT_ID")
 		}
 		return runInventoryLotShow(ctx, args[1], runtime, jsonMode, serverOverride, timeout)
+	case "create":
+		return runInventoryLotCreate(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
+	case "update":
+		if len(args) < 2 {
+			return inventoryUsageFailure(runtime, jsonMode, "inventory lot update requires one LOT_ID")
+		}
+		return runInventoryLotUpdate(ctx, args[1], args[2:], runtime, jsonMode, serverOverride, timeout)
+	case "archive", "restore":
+		if len(args) < 2 {
+			return inventoryUsageFailure(runtime, jsonMode, "inventory lot "+args[0]+" requires one LOT_ID")
+		}
+		return runInventoryLotState(ctx, args[0], args[1], args[2:], runtime, jsonMode, serverOverride, timeout)
 	case "ledger", "reservations", "conflicts":
 		return runInventoryLotHistory(ctx, args[0], args[1:], runtime, jsonMode, serverOverride, timeout)
 	default:
