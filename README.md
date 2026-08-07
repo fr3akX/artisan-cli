@@ -1,19 +1,61 @@
 # Artisan CLI
 
-`artisan` is the native command-line client for Artisan Roast Server.
+`artisan` is the native command-line client for Artisan Roast Server. The first
+release focuses on green-coffee inventory management and ships as a static
+single executable for Linux, macOS, and Windows on amd64 and arm64.
 
-The initial release focuses on green-coffee inventory management and ships as a
-single executable for Linux, macOS, and Windows.
+Artisan CLI requires Artisan Server commit
+`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later. Deploy the compatible
+server before releasing the CLI.
 
-The project is under design. See
+## Get started
+
+- [Download, verify, and install](docs/installation.md)
+- [Configure a server and use every command](docs/commands.md)
+- [JSON envelopes, pagination, idempotency, and exit codes](docs/json-and-exit-codes.md)
+- [Security and threat model](docs/security.md)
+- [Embedded agent skill](docs/agent-skill.md)
+
+After installation, select a server and provide the token on stdin rather than
+argv:
+
+```sh
+printf '%s\n' "$TOKEN" | artisan --server https://inventory.example auth login --token-stdin
+artisan --json auth status
+artisan --json inventory lot list --limit 100
+```
+
+Global flags such as `--json`, `--server`, and `--timeout` must precede the
+command. Release binaries are currently unsigned and macOS binaries are not
+notarized; verify checksums and GitHub build provenance, while recognizing that
+neither substitutes for OS code signing.
+
+## Agent skill
+
+Inspect or explicitly install the embedded `artisan-inventory` skill:
+
+```sh
+artisan skill show
+artisan skill install --directory /an/existing/agent/skill/root
+```
+
+The CLI does not assume an agent product or installation root. See the [agent
+skill boundaries](docs/agent-skill.md) before enabling it.
+
+## Development and integration
+
+The design record is
 [`docs/superpowers/specs/2026-08-07-artisan-inventory-cli-design.md`](docs/superpowers/specs/2026-08-07-artisan-inventory-cli-design.md).
-
-## Integration testing
-
 The [pinned Artisan Server integration](integration/README.md) documents the
 guarded disposable-stack test for the compiled CLI.
+
+```sh
+go test ./...
+go vet ./...
+CGO_ENABLED=0 go build -trimpath -o artisan ./cmd/artisan
+```
 
 ## License
 
 Artisan CLI is licensed under the GNU Affero General Public License version 3 or
-later. See [`LICENSE`](LICENSE).
+later. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt).
