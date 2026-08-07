@@ -14,6 +14,8 @@ func runInventory(ctx context.Context, args []string, runtime Runtime, jsonMode 
 		return runInventoryLot(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
 	case "conflict":
 		return runInventoryConflict(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
+	case "reservation":
+		return runInventoryReservation(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
 	case "adjust":
 		return runInventoryAdjust(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
 	default:

@@ -79,6 +79,11 @@ func runInventoryConflict(ctx context.Context, args []string, runtime Runtime, j
 			return writeFailure(runtime, jsonMode, *failure)
 		}
 		return writeInventorySuccess(runtime, jsonMode, conflict, func(w io.Writer) error { return writeConflictDetail(w, conflict) })
+	case "resolve":
+		if len(args) < 2 {
+			return inventoryUsageFailure(runtime, jsonMode, "inventory conflict resolve requires one CONFLICT_ID")
+		}
+		return runInventoryConflictResolve(ctx, args[1], args[2:], runtime, jsonMode, serverOverride, timeout)
 	default:
 		return inventoryUsageFailure(runtime, jsonMode, "Unknown inventory conflict command")
 	}
