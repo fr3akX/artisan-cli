@@ -14,6 +14,8 @@ const (
 	inventoryAdminRoot = "/api/v1/inventory/admin"
 	// MaxInventoryAggregateItems is the finite item ceiling for every --all traversal.
 	MaxInventoryAggregateItems = 10_000
+	// MaxInventoryAggregatePages bounds requests and cursor-tracking memory for every --all traversal.
+	MaxInventoryAggregatePages = 1_000
 )
 
 // LotListOptions contains every server-supported bean-lot list filter.
@@ -251,13 +253,18 @@ func collectInventoryPages[T any](initialCursor string, maxItems int, fetch func
 		return nil, inventoryUsageFailure("invalid_pagination_limit", "Pagination limit must be positive")
 	}
 	items := make([]T, 0)
-	seen := make(map[string]struct{})
+	seen := make(map[string]struct{}, MaxInventoryAggregatePages)
 	cursor := initialCursor
+	pages := 0
 	for {
+		if pages >= MaxInventoryAggregatePages {
+			return nil, &output.Error{ExitCode: 9, Code: "pagination_page_limit_exceeded", Message: "Inventory pagination exceeded the 1000 page safety limit"}
+		}
 		if _, exists := seen[cursor]; exists {
 			return nil, &output.Error{ExitCode: 9, Code: "invalid_server_response", Message: "The server repeated an inventory pagination cursor"}
 		}
 		seen[cursor] = struct{}{}
+		pages++
 		pageItems, nextCursor, failure := fetch(cursor)
 		if failure != nil {
 			return nil, failure

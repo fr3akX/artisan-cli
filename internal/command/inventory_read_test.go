@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -72,18 +73,32 @@ func TestInventoryLotListJSONRetainsPageAndCursor(t *testing.T) {
 	if result.code != 0 || result.stderr != "" {
 		t.Fatalf("result = %#v", result)
 	}
-	var envelope struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Items      []map[string]any `json:"items"`
-			NextCursor *string          `json:"next_cursor"`
-		} `json:"data"`
+	decoder := json.NewDecoder(strings.NewReader(result.stdout))
+	decoder.UseNumber()
+	var envelope map[string]any
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatalf("json.Decode() error = %v", err)
 	}
-	if err := json.Unmarshal([]byte(result.stdout), &envelope); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
+	assertInventoryJSONKeys(t, envelope, "data", "ok")
+	if ok, valid := envelope["ok"].(bool); !valid || !ok {
+		t.Fatalf("ok = %#v", envelope["ok"])
 	}
-	if !envelope.OK || len(envelope.Data.Items) != 1 || envelope.Data.NextCursor == nil || *envelope.Data.NextCursor != "next" {
-		t.Fatalf("envelope = %#v", envelope)
+	data, valid := envelope["data"].(map[string]any)
+	if !valid {
+		t.Fatalf("data = %#v", envelope["data"])
+	}
+	assertInventoryJSONKeys(t, data, "items", "next_cursor")
+	items, valid := data["items"].([]any)
+	if !valid || len(items) != 1 || data["next_cursor"] != "next" {
+		t.Fatalf("data = %#v", data)
+	}
+	item, valid := items[0].(map[string]any)
+	if !valid {
+		t.Fatalf("item = %#v", items[0])
+	}
+	assertInventoryJSONKeys(t, item, "available_grams", "cover_image", "crop_year", "lot_id", "name", "on_hand_grams", "origin", "processing_method", "reserved_grams", "state", "unresolved_conflict_count", "updated_at")
+	if item["lot_id"] != commandLotID || item["name"] != "Lot" || item["state"] != "active" || item["origin"] != nil || item["available_grams"] != json.Number("5000") {
+		t.Fatalf("typed item = %#v", item)
 	}
 }
 
@@ -106,8 +121,73 @@ func TestInventoryLotListAllFollowsOpaqueCursorsAndReturnsNullCursor(t *testing.
 	if !reflect.DeepEqual(cursors, []string{"", "opaque+/= cursor"}) {
 		t.Fatalf("cursors = %#v", cursors)
 	}
-	if !strings.Contains(result.stdout, `"next_cursor":null`) || strings.Count(result.stdout, `"lot_id"`) != 2 {
-		t.Fatalf("stdout = %q", result.stdout)
+	decoder := json.NewDecoder(strings.NewReader(result.stdout))
+	decoder.UseNumber()
+	var envelope map[string]any
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatalf("json.Decode() error = %v", err)
+	}
+	assertInventoryJSONKeys(t, envelope, "data", "ok")
+	data, valid := envelope["data"].(map[string]any)
+	if !valid {
+		t.Fatalf("data = %#v", envelope["data"])
+	}
+	assertInventoryJSONKeys(t, data, "items", "next_cursor")
+	items, valid := data["items"].([]any)
+	if !valid || len(items) != 2 || data["next_cursor"] != nil {
+		t.Fatalf("data = %#v", data)
+	}
+	for index, raw := range items {
+		item, valid := raw.(map[string]any)
+		if !valid {
+			t.Fatalf("item %d = %#v", index, raw)
+		}
+		assertInventoryJSONKeys(t, item, "available_grams", "cover_image", "crop_year", "lot_id", "name", "on_hand_grams", "origin", "processing_method", "reserved_grams", "state", "unresolved_conflict_count", "updated_at")
+	}
+	if items[0].(map[string]any)["available_grams"] != json.Number("10") || items[1].(map[string]any)["available_grams"] != json.Number("20") {
+		t.Fatalf("typed items = %#v", items)
+	}
+}
+
+func TestInventoryLotListAllPaginationFailureEmitsNoPartialData(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"same"}`, commandInventorySummary(commandLotID, "must-not-leak", 5000))
+	}))
+	defer server.Close()
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "list", "--all")
+	if result.code != 9 || result.stderr != "" || requests != 2 {
+		t.Fatalf("result/requests = %#v/%d", result, requests)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(result.stdout), &envelope); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	assertInventoryJSONKeys(t, envelope, "error", "ok")
+	if envelope["ok"] != false || strings.Contains(result.stdout, "must-not-leak") || strings.Contains(result.stdout, commandLotID) || strings.Count(strings.TrimSpace(result.stdout), "\n") != 0 {
+		t.Fatalf("partial or multiple output envelopes: %q", result.stdout)
+	}
+	errorObject, valid := envelope["error"].(map[string]any)
+	if !valid {
+		t.Fatalf("error = %#v", envelope["error"])
+	}
+	assertInventoryJSONKeys(t, errorObject, "code", "message")
+	if errorObject["code"] != "invalid_server_response" {
+		t.Fatalf("error = %#v", errorObject)
+	}
+}
+
+func assertInventoryJSONKeys(t *testing.T, object map[string]any, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(object))
+	for key := range object {
+		got = append(got, key)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys = %v, want %v; object = %#v", got, want, object)
 	}
 }
 

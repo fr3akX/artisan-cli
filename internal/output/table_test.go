@@ -33,4 +33,28 @@ func TestInventoryDetailsAreStableAndUntruncated(t *testing.T) {
 	}
 }
 
+func TestVisibleOutputEscapesStructuralAndControlCharacters(t *testing.T) {
+	const hostile = "slash\\tab\tcr\rlf\nnull\x00esc\x1bdel\x7fc1\u0085 café"
+	const escaped = `slash\\tab\tcr\rlf\nnull\x00esc\x1Bdel\x7Fc1\x85 café`
+	if got := EscapeVisible(hostile); got != escaped {
+		t.Fatalf("EscapeVisible() = %q, want %q", got, escaped)
+	}
+
+	var table bytes.Buffer
+	if err := WriteTable(&table, []string{"NAME", "NOTE\nLABEL"}, [][]string{{hostile, hostile}}); err != nil {
+		t.Fatalf("WriteTable() error = %v", err)
+	}
+	if strings.Count(table.String(), "\n") != 2 || strings.Count(table.String(), escaped) != 2 || strings.Contains(table.String(), "\u0085") {
+		t.Fatalf("table structure/value was not preserved: %q", table.String())
+	}
+
+	var details bytes.Buffer
+	if err := WriteDetails(&details, []DetailField{{Label: "Notes\nLabel", Value: hostile}}); err != nil {
+		t.Fatalf("WriteDetails() error = %v", err)
+	}
+	if strings.Count(details.String(), "\n") != 1 || details.String() != `Notes\nLabel: `+escaped+"\n" {
+		t.Fatalf("detail structure/value was not preserved: %q", details.String())
+	}
+}
+
 const inventoryOutputID = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"

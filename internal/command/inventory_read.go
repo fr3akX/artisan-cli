@@ -273,7 +273,7 @@ func writeNextCursor(w io.Writer, cursor *string) error {
 	if cursor == nil {
 		return nil
 	}
-	_, err := fmt.Fprintf(w, "Next cursor: %s\n", *cursor)
+	_, err := fmt.Fprintf(w, "Next cursor: %s\n", output.EscapeVisible(*cursor))
 	return err
 }
 

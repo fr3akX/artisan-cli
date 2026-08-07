@@ -150,6 +150,137 @@ func TestInventoryHistoryModelsValidateEnumsIDsTimestampsAndBalances(t *testing.
 	}
 }
 
+func TestInventoryModelsRejectNullForEveryRequiredNonNullField(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		fields  []string
+		new     func() any
+	}{
+		{name: "image", payload: validImageJSON(), fields: []string{"image_id", "position", "is_cover", "display_width", "display_height", "thumbnail_width", "thumbnail_height", "display_url", "thumbnail_url"}, new: func() any { return &InventoryImage{} }},
+		{name: "summary", payload: validSummaryJSON(), fields: []string{"lot_id", "name", "state", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count", "updated_at"}, new: func() any { return &BeanLotSummary{} }},
+		{name: "detail", payload: validDetailJSON(), fields: []string{"varietals", "images", "created_at", "links"}, new: func() any { return &BeanLotDetail{} }},
+		{name: "ledger", payload: validLedgerJSON(), fields: []string{"entry_id", "operation", "lot_id", "on_hand_delta", "reserved_delta", "resulting_on_hand_grams", "resulting_reserved_grams", "resulting_available_grams", "actor_kind", "occurred_at", "created_at"}, new: func() any { return &InventoryLedgerEntry{} }},
+		{name: "reservation", payload: validReservationJSON(), fields: []string{"reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "reserved_at", "created_at", "updated_at"}, new: func() any { return &InventoryReservation{} }},
+		{name: "conflict", payload: validConflictJSON(), fields: []string{"conflict_id", "lot_id", "source_ledger_entry_id", "trigger_operation", "available_grams_snapshot", "state", "created_at"}, new: func() any { return &InventoryConflict{} }},
+	}
+	for _, tt := range tests {
+		for _, field := range tt.fields {
+			t.Run(tt.name+"/"+field, func(t *testing.T) {
+				payload := mutateInventoryJSONField(t, tt.payload, field, nil, false)
+				if err := json.Unmarshal(payload, tt.new()); err == nil {
+					t.Fatalf("accepted null required non-null field %q", field)
+				}
+			})
+		}
+	}
+
+	t.Run("detail/varietals null element", func(t *testing.T) {
+		payload := strings.Replace(validDetailJSON(), `"varietals":["Heirloom"]`, `"varietals":[null]`, 1)
+		if err := json.Unmarshal([]byte(payload), &BeanLotDetail{}); err == nil {
+			t.Fatal("accepted null varietal element")
+		}
+	})
+	t.Run("detail/null nested link", func(t *testing.T) {
+		payload := strings.Replace(validDetailJSON(), `"self":"/api/v1/inventory/admin`, `"self":null,"discard":"/api/v1/inventory/admin`, 1)
+		if err := json.Unmarshal([]byte(payload), &BeanLotDetail{}); err == nil {
+			t.Fatal("accepted null required link")
+		}
+	})
+	for _, tt := range []struct {
+		name    string
+		payload string
+		target  any
+	}{
+		{name: "summary nullable explicit null", payload: mutateInventoryJSONString(t, validSummaryJSON(), "origin", nil, false), target: &BeanLotSummary{}},
+		{name: "detail nullable explicit null", payload: mutateInventoryJSONString(t, validDetailJSON(), "producer", nil, false), target: &BeanLotDetail{}},
+		{name: "ledger nullable explicit null", payload: mutateInventoryJSONString(t, validLedgerJSON(), "reason", nil, false), target: &InventoryLedgerEntry{}},
+		{name: "reservation nullable explicit null", payload: mutateInventoryJSONString(t, validReservationJSON(), "actual_grams", nil, false), target: &InventoryReservation{}},
+		{name: "conflict nullable explicit null", payload: mutateInventoryJSONString(t, validConflictJSON(), "resolved_at", nil, false), target: &InventoryConflict{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tt.payload), tt.target); err != nil {
+				t.Fatalf("explicit nullable field rejected: %v", err)
+			}
+		})
+	}
+	for _, field := range []string{"producer", "varietals"} {
+		t.Run("detail missing distinct/"+field, func(t *testing.T) {
+			payload := mutateInventoryJSONField(t, validDetailJSON(), field, nil, true)
+			if err := json.Unmarshal(payload, &BeanLotDetail{}); err == nil || !strings.Contains(err.Error(), "missing required field") {
+				t.Fatalf("missing field error = %v", err)
+			}
+		})
+	}
+}
+
+func TestInventoryPagesRejectNullItemsAndElementsButAllowNullCursor(t *testing.T) {
+	pageTests := []struct {
+		name    string
+		item    string
+		newPage func() any
+	}{
+		{name: "lots", item: validSummaryJSON(), newPage: func() any { return &BeanLotPage{} }},
+		{name: "ledger", item: validLedgerJSON(), newPage: func() any { return &InventoryLedgerEntryPage{} }},
+		{name: "reservations", item: validReservationJSON(), newPage: func() any { return &InventoryReservationPage{} }},
+		{name: "conflicts", item: validConflictJSON(), newPage: func() any { return &InventoryConflictPage{} }},
+	}
+	for _, tt := range pageTests {
+		t.Run(tt.name+"/null items", func(t *testing.T) {
+			if err := json.Unmarshal([]byte(`{"items":null,"next_cursor":null}`), tt.newPage()); err == nil {
+				t.Fatal("accepted null items")
+			}
+		})
+		t.Run(tt.name+"/null element", func(t *testing.T) {
+			if err := json.Unmarshal([]byte(`{"items":[null],"next_cursor":null}`), tt.newPage()); err == nil {
+				t.Fatal("accepted null item element")
+			}
+		})
+		t.Run(tt.name+"/null cursor", func(t *testing.T) {
+			if err := json.Unmarshal([]byte(`{"items":[`+tt.item+`],"next_cursor":null}`), tt.newPage()); err != nil {
+				t.Fatalf("nullable cursor rejected: %v", err)
+			}
+		})
+	}
+}
+
+func mutateInventoryJSONField(t *testing.T, payload, field string, value any, remove bool) []byte {
+	t.Helper()
+	var object map[string]any
+	if err := json.Unmarshal([]byte(payload), &object); err != nil {
+		t.Fatalf("fixture decode: %v", err)
+	}
+	if _, exists := object[field]; !exists {
+		t.Fatalf("fixture missing field %q", field)
+	}
+	if remove {
+		delete(object, field)
+	} else {
+		object[field] = value
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		t.Fatalf("fixture encode: %v", err)
+	}
+	return encoded
+}
+
+func mutateInventoryJSONString(t *testing.T, payload, field string, value any, remove bool) string {
+	return string(mutateInventoryJSONField(t, payload, field, value, remove))
+}
+
+func validLedgerJSON() string {
+	return `{"entry_id":"` + inventoryEntryID + `","operation":"manual_adjustment","lot_id":"` + inventoryLotID + `","roast_uuid":null,"reservation_id":null,"on_hand_delta":100,"reserved_delta":0,"resulting_on_hand_grams":5100,"resulting_reserved_grams":1250,"resulting_available_grams":3850,"reason":"count","reference":null,"actor_kind":"desktop","occurred_at":"` + inventoryTimestamp + `","created_at":"` + inventoryTimestamp + `"}`
+}
+
+func validReservationJSON() string {
+	return `{"reservation_id":"` + inventoryReservationID + `","client_reservation_uuid":"` + inventoryEntryID + `","lot_id":"` + inventoryLotID + `","roast_uuid":"` + inventoryImageID + `","client_instance_uuid":"` + inventoryConflictID + `","state":"reserved","planned_grams":1250,"actual_grams":null,"reserved_at":"` + inventoryTimestamp + `","completed_at":null,"created_at":"` + inventoryTimestamp + `","updated_at":"` + inventoryTimestamp + `","open_conflict_id":null}`
+}
+
+func validConflictJSON() string {
+	return `{"conflict_id":"` + inventoryConflictID + `","lot_id":"` + inventoryLotID + `","source_ledger_entry_id":"` + inventoryEntryID + `","roast_uuid":null,"reservation_id":null,"trigger_operation":"manual_adjustment","available_grams_snapshot":-1,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"` + inventoryTimestamp + `"}`
+}
+
 func TestInventoryPagesRequireItemsAndCursorWhileToleratingUnknownFields(t *testing.T) {
 	var page BeanLotPage
 	payload := `{"items":[` + validSummaryJSON() + `],"next_cursor":"opaque+/= cursor","future":true}`

@@ -180,6 +180,52 @@ func TestCollectInventoryPagesCompletesInOrderAndDetectsCursorLoopAndBound(t *te
 	}
 }
 
+func TestCollectInventoryPagesEnforcesIndependentPageCeiling(t *testing.T) {
+	if MaxInventoryAggregatePages != 1000 {
+		t.Fatalf("MaxInventoryAggregatePages = %d, want documented conservative ceiling 1000", MaxInventoryAggregatePages)
+	}
+
+	t.Run("exact ceiling may terminate", func(t *testing.T) {
+		calls := 0
+		items, failure := collectInventoryPages("", MaxInventoryAggregateItems, func(string) ([]int, *string, *output.Error) {
+			calls++
+			if calls == MaxInventoryAggregatePages {
+				return nil, nil, nil
+			}
+			return nil, stringPointer(fmt.Sprintf("cursor-%d", calls)), nil
+		})
+		if failure != nil || len(items) != 0 || calls != MaxInventoryAggregatePages {
+			t.Fatalf("collect = %#v, %#v, calls=%d", items, failure, calls)
+		}
+	})
+
+	t.Run("unique empty pages are bounded before next request", func(t *testing.T) {
+		calls := 0
+		items, failure := collectInventoryPages("", MaxInventoryAggregateItems, func(string) ([]int, *string, *output.Error) {
+			calls++
+			return nil, stringPointer(fmt.Sprintf("cursor-%d", calls)), nil
+		})
+		if failure == nil || failure.Code != "pagination_page_limit_exceeded" || items != nil || calls != MaxInventoryAggregatePages {
+			t.Fatalf("collect = %#v, %#v, calls=%d", items, failure, calls)
+		}
+	})
+
+	t.Run("failure cancels traversal without partial output", func(t *testing.T) {
+		calls := 0
+		canceled := &output.Error{ExitCode: 8, Code: "request_canceled", Message: "canceled"}
+		items, failure := collectInventoryPages("", MaxInventoryAggregateItems, func(string) ([]int, *string, *output.Error) {
+			calls++
+			if calls == 3 {
+				return nil, nil, canceled
+			}
+			return []int{calls}, stringPointer(fmt.Sprintf("cursor-%d", calls)), nil
+		})
+		if items != nil || failure != canceled || calls != 3 {
+			t.Fatalf("collect = %#v, %#v, calls=%d", items, failure, calls)
+		}
+	})
+}
+
 func TestMissingAdminNamespaceMapsToServerUpgradeWithoutMaskingEntityNotFound(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 )
 
@@ -36,7 +37,7 @@ func writeTableRow(w io.Writer, values []string) error {
 				return err
 			}
 		}
-		if _, err := io.WriteString(w, value); err != nil {
+		if _, err := io.WriteString(w, EscapeVisible(value)); err != nil {
 			return err
 		}
 	}
@@ -47,9 +48,34 @@ func writeTableRow(w io.Writer, values []string) error {
 // WriteDetails renders labeled values in caller-defined stable order.
 func WriteDetails(w io.Writer, fields []DetailField) error {
 	for _, field := range fields {
-		if _, err := fmt.Fprintf(w, "%s: %s\n", field.Label, field.Value); err != nil {
+		if _, err := fmt.Fprintf(w, "%s: %s\n", EscapeVisible(field.Label), EscapeVisible(field.Value)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// EscapeVisible renders structural and control characters as visible ASCII escapes.
+// Printable Unicode is preserved and values are never truncated.
+func EscapeVisible(value string) string {
+	var escaped strings.Builder
+	for _, character := range value {
+		switch character {
+		case '\\':
+			escaped.WriteString(`\\`)
+		case '\t':
+			escaped.WriteString(`\t`)
+		case '\r':
+			escaped.WriteString(`\r`)
+		case '\n':
+			escaped.WriteString(`\n`)
+		default:
+			if character <= 0x1f || (character >= 0x7f && character <= 0x9f) {
+				_, _ = fmt.Fprintf(&escaped, `\x%02X`, character)
+			} else {
+				escaped.WriteRune(character)
+			}
+		}
+	}
+	return escaped.String()
 }

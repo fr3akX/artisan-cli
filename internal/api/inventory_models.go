@@ -151,7 +151,7 @@ type InventoryConflictPage struct {
 func (value *InventoryImage) UnmarshalJSON(data []byte) error {
 	type wire InventoryImage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "image_id", "caption", "alt_text", "position", "is_cover", "display_width", "display_height", "thumbnail_width", "thumbnail_height", "display_url", "thumbnail_url"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"caption", "alt_text"}, "image_id", "caption", "alt_text", "position", "is_cover", "display_width", "display_height", "thumbnail_width", "thumbnail_height", "display_url", "thumbnail_url"); err != nil {
 		return err
 	}
 	*value = InventoryImage(decoded)
@@ -161,11 +161,21 @@ func (value *InventoryImage) UnmarshalJSON(data []byte) error {
 func (value *BeanLotSummary) UnmarshalJSON(data []byte) error {
 	type wire BeanLotSummary
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "lot_id", "name", "origin", "processing_method", "crop_year", "state", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count", "cover_image", "updated_at"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"origin", "processing_method", "crop_year", "cover_image"}, "lot_id", "name", "origin", "processing_method", "crop_year", "state", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count", "cover_image", "updated_at"); err != nil {
 		return err
 	}
 	*value = BeanLotSummary(decoded)
 	return value.validate()
+}
+
+func (value *BeanLotLinks) UnmarshalJSON(data []byte) error {
+	type wire BeanLotLinks
+	var decoded wire
+	if err := decodeRequiredObject(data, &decoded, nil, "self", "ledger", "reservations"); err != nil {
+		return err
+	}
+	*value = BeanLotLinks(decoded)
+	return nil
 }
 
 func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
@@ -191,7 +201,11 @@ func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
 	}
 	var decoded detailFields
 	if err := decodeRequiredObject(data, &decoded,
+		[]string{"producer", "supplier", "external_reference", "received_date", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "notes", "archived_at"},
 		"producer", "supplier", "external_reference", "received_date", "varietals", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "notes", "images", "created_at", "archived_at", "links"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "varietals", "images"); err != nil {
 		return err
 	}
 	*value = BeanLotDetail{
@@ -208,7 +222,7 @@ func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
 func (value *InventoryLedgerEntry) UnmarshalJSON(data []byte) error {
 	type wire InventoryLedgerEntry
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "entry_id", "operation", "lot_id", "roast_uuid", "reservation_id", "on_hand_delta", "reserved_delta", "resulting_on_hand_grams", "resulting_reserved_grams", "resulting_available_grams", "reason", "reference", "actor_kind", "occurred_at", "created_at"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"roast_uuid", "reservation_id", "reason", "reference"}, "entry_id", "operation", "lot_id", "roast_uuid", "reservation_id", "on_hand_delta", "reserved_delta", "resulting_on_hand_grams", "resulting_reserved_grams", "resulting_available_grams", "reason", "reference", "actor_kind", "occurred_at", "created_at"); err != nil {
 		return err
 	}
 	*value = InventoryLedgerEntry(decoded)
@@ -218,7 +232,7 @@ func (value *InventoryLedgerEntry) UnmarshalJSON(data []byte) error {
 func (value *InventoryReservation) UnmarshalJSON(data []byte) error {
 	type wire InventoryReservation
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "actual_grams", "reserved_at", "completed_at", "created_at", "updated_at", "open_conflict_id"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"actual_grams", "completed_at", "open_conflict_id"}, "reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "actual_grams", "reserved_at", "completed_at", "created_at", "updated_at", "open_conflict_id"); err != nil {
 		return err
 	}
 	*value = InventoryReservation(decoded)
@@ -228,7 +242,7 @@ func (value *InventoryReservation) UnmarshalJSON(data []byte) error {
 func (value *InventoryConflict) UnmarshalJSON(data []byte) error {
 	type wire InventoryConflict
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "conflict_id", "lot_id", "source_ledger_entry_id", "roast_uuid", "reservation_id", "trigger_operation", "available_grams_snapshot", "state", "resolution_note", "resolved_by_user_id", "resolved_at", "created_at"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"roast_uuid", "reservation_id", "resolution_note", "resolved_by_user_id", "resolved_at"}, "conflict_id", "lot_id", "source_ledger_entry_id", "roast_uuid", "reservation_id", "trigger_operation", "available_grams_snapshot", "state", "resolution_note", "resolved_by_user_id", "resolved_at", "created_at"); err != nil {
 		return err
 	}
 	*value = InventoryConflict(decoded)
@@ -238,7 +252,10 @@ func (value *InventoryConflict) UnmarshalJSON(data []byte) error {
 func (value *BeanLotPage) UnmarshalJSON(data []byte) error {
 	type wire BeanLotPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "items"); err != nil {
 		return err
 	}
 	*value = BeanLotPage(decoded)
@@ -248,7 +265,10 @@ func (value *BeanLotPage) UnmarshalJSON(data []byte) error {
 func (value *InventoryLedgerEntryPage) UnmarshalJSON(data []byte) error {
 	type wire InventoryLedgerEntryPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "items"); err != nil {
 		return err
 	}
 	*value = InventoryLedgerEntryPage(decoded)
@@ -258,7 +278,10 @@ func (value *InventoryLedgerEntryPage) UnmarshalJSON(data []byte) error {
 func (value *InventoryReservationPage) UnmarshalJSON(data []byte) error {
 	type wire InventoryReservationPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "items"); err != nil {
 		return err
 	}
 	*value = InventoryReservationPage(decoded)
@@ -268,25 +291,57 @@ func (value *InventoryReservationPage) UnmarshalJSON(data []byte) error {
 func (value *InventoryConflictPage) UnmarshalJSON(data []byte) error {
 	type wire InventoryConflictPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "items"); err != nil {
 		return err
 	}
 	*value = InventoryConflictPage(decoded)
 	return validatePage(value.Items, value.NextCursor)
 }
 
-func decodeRequiredObject(data []byte, destination any, required ...string) error {
+func decodeRequiredObject(data []byte, destination any, nullable []string, required ...string) error {
 	var fields map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&fields); err != nil || fields == nil {
 		return errors.New("invalid inventory object")
 	}
+	nullableSet := make(map[string]struct{}, len(nullable))
+	for _, field := range nullable {
+		nullableSet[field] = struct{}{}
+	}
 	for _, field := range required {
-		if _, ok := fields[field]; !ok {
+		raw, ok := fields[field]
+		if !ok {
 			return fmt.Errorf("missing required field %s", field)
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			if _, allowed := nullableSet[field]; !allowed {
+				return fmt.Errorf("required field %s must not be null", field)
+			}
 		}
 	}
 	return json.Unmarshal(data, destination)
+}
+
+func rejectNullArrayElements(data []byte, names ...string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, name := range names {
+		var elements []json.RawMessage
+		if err := json.Unmarshal(fields[name], &elements); err != nil {
+			return err
+		}
+		for _, element := range elements {
+			if bytes.Equal(bytes.TrimSpace(element), []byte("null")) {
+				return fmt.Errorf("array field %s must not contain null", name)
+			}
+		}
+	}
+	return nil
 }
 
 func (value InventoryImage) validate(expectedLot string) error {
