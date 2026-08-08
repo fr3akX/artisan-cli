@@ -435,6 +435,41 @@ func TestCobraImageDownloadForceAndVariantWithoutDestinationDoesNotExecute(t *te
 	}
 }
 
+func TestCobraImageDownloadLongOptionsAfterIDsNeverBecomeDestinations(t *testing.T) {
+	for _, option := range []string{"--variant=bogus", "--variant", "--unknown"} {
+		t.Run(option, func(t *testing.T) {
+			dir := t.TempDir()
+			oldWorkingDirectory, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				_, _ = io.WriteString(w, "must-not-download")
+			}))
+			defer server.Close()
+
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "image", "download", commandLotID, commandImageID, option)
+			if result.code != usageExitCode || result.stdout != "" || result.stderr != "inventory image download requires LOT_ID IMAGE_ID DESTINATION\n" {
+				t.Fatalf("result = %#v", result)
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("requests = %d, want 0", requests.Load())
+			}
+			entries, err := os.ReadDir(".")
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("working directory entries = %#v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestCobraImageHelpDocumentsEveryLeaf(t *testing.T) {
 	tests := []struct {
 		name string

@@ -138,7 +138,7 @@ func partitionInventoryImageArgs(args []string, path string, index, positionalCo
 		shieldAfter = 2
 	}
 	if !known {
-		if positionalCount >= shieldAfter {
+		if positionalCount >= shieldAfter && !strings.HasPrefix(raw, "--") {
 			return prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
 		}
 		return prependInventoryImageOption([]string{raw}, partitionInventoryImageArgs(args, path, index+1, positionalCount))
@@ -153,7 +153,7 @@ func partitionInventoryImageArgs(args []string, path string, index, positionalCo
 	best := prependInventoryImageOption(optionTokens, partitionInventoryImageArgs(args, path, next, positionalCount))
 	reservedHelp := name == "help" || name == "h"
 	reservedBoolean := !consumesValue && (strings.HasPrefix(raw, "--") || index == len(args)-1)
-	if path == "inventory image download" && positionalCount >= shieldAfter && !reservedHelp && !reservedBoolean {
+	if path == "inventory image download" && positionalCount >= shieldAfter && !strings.HasPrefix(raw, "--") && !reservedHelp && !reservedBoolean {
 		asPositional := prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
 		if asPositional.ok && (!best.ok || asPositional.optionCount >= best.optionCount) {
 			best = asPositional
@@ -411,24 +411,6 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	return root, state
 }
 
-func newLegacyGroupCommand(
-	ctx context.Context,
-	state *cobraState,
-	use string,
-	short string,
-	run func(context.Context, []string, Runtime, bool, string, time.Duration) int,
-) *cobra.Command {
-	return &cobra.Command{
-		Use:                use,
-		Short:              short,
-		Args:               cobra.ArbitraryArgs,
-		DisableFlagParsing: true,
-		Run: func(_ *cobra.Command, args []string) {
-			setCommandExit(state, run(ctx, args, state.runtime, state.jsonMode, state.serverOverride, state.timeout))
-		},
-	}
-}
-
 func newCompletionCommand(root *cobra.Command, state *cobraState) *cobra.Command {
 	completion := &cobra.Command{
 		Use:   "completion",
@@ -566,6 +548,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			message = "Unknown inventory reservation command"
 		case "inventory conflict":
 			message = "Unknown inventory conflict command"
+		case "inventory image":
+			message = "Unknown inventory image command"
 		case "":
 			if command := firstCommandArg(args); command != "" {
 				message = "Unknown command: " + command
@@ -575,6 +559,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 		jsonMode = cobraJSONModeForParseFailure(args)
 		if !isGlobalFlagParseError(err) {
 			switch path {
+			case "auth":
+				message = "Unknown auth command"
 			case "auth login":
 				message = "Invalid auth login option"
 			case "auth status":
@@ -583,10 +569,14 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 				message = "auth logout does not accept arguments"
 			case "version":
 				message = "version does not accept arguments"
-			case "skill", "skill install":
+			case "skill":
+				message = "Unknown skill command"
+			case "skill install":
 				message = "skill install requires --directory ROOT"
 			case "skill show":
 				message = "skill show does not accept arguments"
+			case "completion":
+				message = "Unknown completion command"
 			case "completion bash", "completion zsh", "completion fish", "completion powershell":
 				message = path + " does not accept arguments"
 			default:
@@ -658,38 +648,26 @@ func isGlobalFlagParseError(err error) bool {
 }
 
 func knownCommandPath(args []string) string {
-	command := firstCommandArg(args)
+	command, commandIndex, ok := nextRouteCommandToken(args, 0)
+	if !ok {
+		return ""
+	}
 	switch command {
 	case "auth":
-		for _, arg := range args {
-			switch arg {
-			case "login":
-				return "auth login"
-			case "status":
-				return "auth status"
-			case "logout":
-				return "auth logout"
-			}
+		if child, _, ok := nextRouteCommandToken(args, commandIndex+1); ok && stringIn(child, "login", "status", "logout") {
+			return "auth " + child
 		}
 		return "auth"
 	case "version":
 		return "version"
 	case "completion":
-		for _, arg := range args {
-			switch arg {
-			case "bash", "zsh", "fish", "powershell":
-				return "completion " + arg
-			}
+		if child, _, ok := nextRouteCommandToken(args, commandIndex+1); ok && stringIn(child, "bash", "zsh", "fish", "powershell") {
+			return "completion " + child
 		}
 		return "completion"
 	case "skill":
-		for _, arg := range args {
-			switch arg {
-			case "show":
-				return "skill show"
-			case "install":
-				return "skill install"
-			}
+		if child, _, ok := nextRouteCommandToken(args, commandIndex+1); ok && stringIn(child, "show", "install") {
+			return "skill " + child
 		}
 		return "skill"
 	case "inventory":
@@ -697,6 +675,26 @@ func knownCommandPath(args []string) string {
 	default:
 		return ""
 	}
+}
+
+func nextRouteCommandToken(args []string, start int) (string, int, bool) {
+	for index := start; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			return "", 0, false
+		}
+		name, _, hasValue, isFlag := splitGlobalFlag(arg)
+		if !isFlag {
+			return arg, index, true
+		}
+		if !isCobraGlobalFlag(name) {
+			return arg, index, true
+		}
+		if (name == "server" || name == "timeout") && !hasValue && index+1 < len(args) {
+			index++
+		}
+	}
+	return "", 0, false
 }
 
 func firstCommandArg(args []string) string {

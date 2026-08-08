@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,6 +48,60 @@ func TestCobraParserStateDoesNotLeakAcrossRuns(t *testing.T) {
 	human := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "version")
 	if human.code != 0 || human.stdout != "artisan dev (unknown)\n" || human.stderr != "" {
 		t.Fatalf("human version after JSON run = %#v", human)
+	}
+}
+
+func TestCobraUnknownChildAttributionIgnoresTrailingRecognizedWords(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		message string
+	}{
+		{name: "auth", args: []string{"auth", "bogus", "--bad", "status"}, message: "Unknown auth command"},
+		{name: "skill", args: []string{"skill", "bogus", "--bad", "show"}, message: "Unknown skill command"},
+		{name: "completion", args: []string{"completion", "bogus", "--bad", "bash"}, message: "Unknown completion command"},
+		{name: "inventory image", args: []string{"inventory", "image", "bogus"}, message: "Unknown inventory image command"},
+	} {
+		for _, jsonMode := range []bool{false, true} {
+			name := "text"
+			args := append([]string(nil), test.args...)
+			wantStdout := ""
+			wantStderr := test.message + "\n"
+			if jsonMode {
+				name = "JSON"
+				args = append([]string{"--json"}, args...)
+				wantStdout = "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":" + strconv.Quote(test.message) + "}}\n"
+				wantStderr = ""
+			}
+			t.Run(test.name+"/"+name, func(t *testing.T) {
+				result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, args...)
+				if result.code != usageExitCode || result.stdout != wantStdout || result.stderr != wantStderr {
+					t.Fatalf("result = %#v, want code %d, stdout %q, stderr %q", result, usageExitCode, wantStdout, wantStderr)
+				}
+			})
+		}
+	}
+}
+
+func TestCobraUnknownCommandMappingIncludesInventoryImage(t *testing.T) {
+	for _, jsonMode := range []bool{false, true} {
+		name := "text"
+		args := []string{"inventory", "image", "bogus"}
+		wantStdout := ""
+		wantStderr := "Unknown inventory image command\n"
+		if jsonMode {
+			name = "JSON"
+			args = append([]string{"--json"}, args...)
+			wantStdout = "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Unknown inventory image command\"}}\n"
+			wantStderr = ""
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := writeCobraFailure(Runtime{Out: &stdout, Err: &stderr}, &cobraState{}, args, errors.New("unknown command \"bogus\" for \"artisan inventory image\""))
+			if code != usageExitCode || stdout.String() != wantStdout || stderr.String() != wantStderr {
+				t.Fatalf("result = (%d, %q, %q), want (%d, %q, %q)", code, stdout.String(), stderr.String(), usageExitCode, wantStdout, wantStderr)
+			}
+		})
 	}
 }
 
