@@ -152,8 +152,8 @@ func partitionInventoryImageArgs(args []string, path string, index, positionalCo
 	}
 	best := prependInventoryImageOption(optionTokens, partitionInventoryImageArgs(args, path, next, positionalCount))
 	reservedHelp := name == "help" || name == "h"
-	trailingBoolean := !consumesValue && index == len(args)-1
-	if path == "inventory image download" && positionalCount >= shieldAfter && !reservedHelp && !trailingBoolean {
+	reservedBoolean := !consumesValue && (strings.HasPrefix(raw, "--") || index == len(args)-1)
+	if path == "inventory image download" && positionalCount >= shieldAfter && !reservedHelp && !reservedBoolean {
 		asPositional := prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
 		if asPositional.ok && (!best.ok || asPositional.optionCount >= best.optionCount) {
 			best = asPositional
