@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -724,12 +725,23 @@ func TestExplicitLoginTransactionRecoversCrashAtEveryStage(t *testing.T) {
 			if failure == nil {
 				t.Fatal("persistExplicitLogin() succeeded, want simulated crash failure")
 			}
-			journalInfo, err := os.Stat(filepath.Join(dir, loginTransactionFileName))
-			if err != nil {
-				t.Fatal("simulated crash did not leave recovery journal")
-			}
-			if journalInfo.Mode().Perm()&0o077 != 0 {
-				t.Fatalf("journal mode = %#o, grants group/other access", journalInfo.Mode().Perm())
+			journalPath := filepath.Join(dir, loginTransactionFileName)
+			if runtime.GOOS == "windows" {
+				journal, err := securefile.OpenPrivate(journalPath)
+				if err != nil {
+					t.Fatalf("open private recovery journal: %v", err)
+				}
+				if err := journal.Close(); err != nil {
+					t.Fatalf("close private recovery journal: %v", err)
+				}
+			} else {
+				journalInfo, err := os.Stat(journalPath)
+				if err != nil {
+					t.Fatal("simulated crash did not leave recovery journal")
+				}
+				if journalInfo.Mode().Perm()&0o077 != 0 {
+					t.Fatalf("journal mode = %#o, grants group/other access", journalInfo.Mode().Perm())
+				}
 			}
 			if err := recoverLoginTransaction(dir); err != nil {
 				t.Fatalf("recoverLoginTransaction() error = %v", err)

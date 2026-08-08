@@ -37,7 +37,7 @@ func TestSaveServerCreatesPrivateWindowsDirectoryAndFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("directory DACL: %v", err)
 	}
-	if dacl == nil || dacl.AceCount != 3 {
-		t.Fatalf("configuration directory ACE count = %v, want 3", dacl)
+	if dacl == nil || dacl.AceCount != 6 {
+		t.Fatalf("configuration directory ACE count = %v, want normalized count 6", dacl)
 	}
 }

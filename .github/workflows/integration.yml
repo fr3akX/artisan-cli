@@ -42,6 +42,7 @@ jobs:
           repository: fr3akX/artisan-server
           ref: 4c0136fe98f6728f4bb94e416c5abe570e7f4831
           path: artisan-server
+          token: ${{ secrets.ARTISAN_SERVER_REPOSITORY_TOKEN }}
 
       - name: Verify server checkout HEAD
         shell: bash
@@ -191,17 +192,21 @@ jobs:
       - name: Print bounded server logs on failure
         if: failure()
         shell: bash
-        working-directory: artisan-server
         run: |
           set -o pipefail
-          timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
-            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" logs --no-color --tail 200 2>&1 | head -c 65536 || true
+          if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then
+            cd artisan-server
+            timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+              -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" logs --no-color --tail 200 2>&1 | head -c 65536 || true
+          fi
 
       - name: Tear down disposable stack
         if: always()
         shell: bash
-        working-directory: artisan-server
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
-            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans
+          if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then
+            cd artisan-server
+            timeout --signal=TERM --kill-after=15s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+              -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans
+          fi

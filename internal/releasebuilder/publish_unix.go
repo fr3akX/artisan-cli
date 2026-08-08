@@ -102,7 +102,13 @@ func (d *heldDist) createStaging() (*heldStage, error) {
 			_ = unix.Unlinkat(int(d.file.Fd()), name, unix.AT_REMOVEDIR)
 			return nil, err
 		}
-		return &heldStage{file: file, info: info, name: name, path: directoryHandlePath(int(file.Fd()))}, nil
+		path, err := directoryHandlePath(int(file.Fd()))
+		if err != nil {
+			file.Close()
+			_ = unix.Unlinkat(int(d.file.Fd()), name, unix.AT_REMOVEDIR)
+			return nil, err
+		}
+		return &heldStage{file: file, info: info, name: name, path: path}, nil
 	}
 	return nil, errors.New("could not allocate staging directory")
 }
@@ -133,9 +139,9 @@ func (s *heldStage) closeStage() error {
 }
 func (s *heldStage) close() error        { return errors.Join(s.closePayload(), s.closeStage()) }
 func (s *heldStage) handlesClosed() bool { return s.file == nil && s.payload == nil }
-func (s *heldStage) payloadPath() string {
+func (s *heldStage) payloadPath() (string, error) {
 	if s.payload == nil {
-		return ""
+		return "", errors.New("payload handle is closed")
 	}
 	return directoryHandlePath(int(s.payload.Fd()))
 }

@@ -37,12 +37,14 @@ func (failure *multipartFileError) Error() string {
 }
 
 type multipartImage struct {
-	path        string
-	filename    string
-	contentType string
-	linkInfo    os.FileInfo
-	fileInfo    os.FileInfo
-	fingerprint [sha256.Size]byte
+	path         string
+	filename     string
+	contentType  string
+	linkInfo     os.FileInfo
+	symbolicLink bool
+	linkTarget   string
+	fileInfo     os.FileInfo
+	fingerprint  [sha256.Size]byte
 }
 
 // NewManifestMultipartBody prepares a replayable streaming multipart body.
@@ -117,6 +119,18 @@ func captureMultipartImage(path string, cancel <-chan struct{}) (multipartImage,
 	if err != nil {
 		return multipartImage{}, &multipartFileError{}
 	}
+	symbolicLink := linkInfo.Mode()&os.ModeSymlink != 0
+	var linkTarget string
+	if symbolicLink {
+		linkTarget, err = os.Readlink(path)
+		if err != nil {
+			return multipartImage{}, &multipartFileError{}
+		}
+	}
+	image := multipartImage{
+		path: path, filename: filename, contentType: contentType,
+		linkInfo: linkInfo, symbolicLink: symbolicLink, linkTarget: linkTarget,
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return multipartImage{}, &multipartFileError{}
@@ -128,7 +142,6 @@ func captureMultipartImage(path string, cancel <-chan struct{}) (multipartImage,
 	}
 	fingerprint, fingerprintErr := fingerprintMultipartFileHook(file, fileInfo.Size(), cancel)
 	postFileInfo, postStatErr := file.Stat()
-	postLinkInfo, postLinkErr := os.Lstat(path)
 	closeErr := file.Close()
 	if fingerprintErr != nil {
 		if errors.Is(fingerprintErr, io.ErrClosedPipe) {
@@ -136,14 +149,13 @@ func captureMultipartImage(path string, cancel <-chan struct{}) (multipartImage,
 		}
 		return multipartImage{}, &multipartFileError{changed: true}
 	}
-	if postStatErr != nil || postLinkErr != nil || closeErr != nil ||
-		!sameMultipartSnapshot(fileInfo, postFileInfo) || !os.SameFile(linkInfo, postLinkInfo) {
+	if postStatErr != nil || closeErr != nil ||
+		!sameMultipartSnapshot(fileInfo, postFileInfo) || !image.pathMatches() {
 		return multipartImage{}, &multipartFileError{changed: true}
 	}
-	return multipartImage{
-		path: path, filename: filename, contentType: contentType,
-		linkInfo: linkInfo, fileInfo: fileInfo, fingerprint: fingerprint,
-	}, nil
+	image.fileInfo = fileInfo
+	image.fingerprint = fingerprint
+	return image, nil
 }
 
 func validMultipartFilename(filename string) bool {
@@ -169,9 +181,24 @@ func imageContentType(filename string) string {
 	}
 }
 
+func (image multipartImage) pathMatches() bool {
+	current, err := os.Lstat(image.path)
+	if err != nil || !os.SameFile(image.linkInfo, current) {
+		return false
+	}
+	currentSymbolicLink := current.Mode()&os.ModeSymlink != 0
+	if image.symbolicLink != currentSymbolicLink {
+		return false
+	}
+	if !currentSymbolicLink {
+		return true
+	}
+	currentTarget, err := os.Readlink(image.path)
+	return err == nil && currentTarget == image.linkTarget
+}
+
 func (image multipartImage) openVerified() (*os.File, error) {
-	linkInfo, err := os.Lstat(image.path)
-	if err != nil || !os.SameFile(image.linkInfo, linkInfo) {
+	if !image.pathMatches() {
 		return nil, &multipartFileError{changed: true}
 	}
 	file, err := os.Open(image.path)
@@ -293,9 +320,8 @@ func (image multipartImage) verifyCurrent(file *os.File, cancel <-chan struct{})
 		return err
 	}
 	postFileInfo, statErr := file.Stat()
-	postLinkInfo, linkErr := os.Lstat(image.path)
-	if statErr != nil || linkErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
-		!os.SameFile(image.linkInfo, postLinkInfo) || fingerprint != image.fingerprint {
+	if statErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
+		!image.pathMatches() || fingerprint != image.fingerprint {
 		return &multipartFileError{changed: true}
 	}
 	return nil
@@ -335,11 +361,10 @@ func (image multipartImage) streamVerified(destination io.Writer, file *os.File)
 		return &multipartFileError{changed: true}
 	}
 	postFileInfo, statErr := file.Stat()
-	postLinkInfo, linkErr := os.Lstat(image.path)
 	var fingerprint [sha256.Size]byte
 	copy(fingerprint[:], hasher.Sum(nil))
-	if statErr != nil || linkErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
-		!os.SameFile(image.linkInfo, postLinkInfo) || fingerprint != image.fingerprint {
+	if statErr != nil || !sameMultipartSnapshot(image.fileInfo, postFileInfo) ||
+		!image.pathMatches() || fingerprint != image.fingerprint {
 		return &multipartFileError{changed: true}
 	}
 	return nil

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fr3akX/artisan-cli/internal/output"
 	"github.com/fr3akX/artisan-cli/internal/securefile"
 	embeddedskill "github.com/fr3akX/artisan-cli/internal/skill"
 )
@@ -73,12 +74,12 @@ func TestSkillHelpAndUsage(t *testing.T) {
 }
 
 func TestSkillInstallHumanJSONAndNoNetworkConfiguration(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalSkillFixtureRoot(t)
 	result := runAuthCommand(t, Runtime{
 		Getenv: func(string) string { return "not-a-network-configuration" },
 	}, "skill", "install", "--directory", root)
 	path := filepath.Join(root, "artisan-inventory", "SKILL.md")
-	if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, path) {
+	if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, output.EscapeVisible(path)) {
 		t.Fatalf("human install = %#v", result)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -106,7 +107,7 @@ func TestSkillInstallHumanJSONAndNoNetworkConfiguration(t *testing.T) {
 }
 
 func TestSkillInstallRefusalForceAndStableJSONError(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalSkillFixtureRoot(t)
 	dir := filepath.Join(root, "artisan-inventory")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -165,6 +166,16 @@ func TestSkillInstallFailureReportsVisibleDurabilityAmbiguity(t *testing.T) {
 	if failure.ExitCode != 3 || failure.Code != "skill_install_durability_unknown" || !strings.Contains(failure.Message, "became visible") || !strings.Contains(failure.Message, "inspect") {
 		t.Fatalf("failure = %#v", failure)
 	}
+}
+
+func canonicalSkillFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func TestSkillInstallRejectsTraversalAndSymlinks(t *testing.T) {

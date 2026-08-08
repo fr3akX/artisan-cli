@@ -233,7 +233,12 @@ func Build(options Options) (returnErr error) {
 		}
 		return fmt.Errorf("atomic no-replace publish: %w", err)
 	}
-	if err := os.Chmod(stage.payloadPath(), 0o555); err != nil {
+	heldPayloadPath, err := stage.payloadPath()
+	if err != nil {
+		stage.ambiguous = true
+		return fmt.Errorf("resolve published payload path before chmod: %w", err)
+	}
+	if err := os.Chmod(heldPayloadPath, 0o555); err != nil {
 		stage.ambiguous = true
 		return fmt.Errorf("make published payload directory non-writable: %w", err)
 	}
@@ -260,7 +265,12 @@ func Build(options Options) (returnErr error) {
 		stage.ambiguous = true
 		return errors.New("published-visible ambiguity immediately before held-payload validation")
 	}
-	if err := validatePublishedPayload(stage.payloadPath(), options.Version, archives, manifestSnapshot); err != nil {
+	heldPayloadPath, err = stage.payloadPath()
+	if err != nil {
+		stage.ambiguous = true
+		return fmt.Errorf("resolve published payload path before final validation: %w", err)
+	}
+	if err := validatePublishedPayload(heldPayloadPath, options.Version, archives, manifestSnapshot); err != nil {
 		stage.ambiguous = true
 		return fmt.Errorf("published-visible ambiguity: point-in-time held-payload validation failed: %w", err)
 	}

@@ -4,6 +4,7 @@ package releasebuilder
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -96,7 +97,7 @@ func (d *heldDist) createStaging() (*heldStage, error) {
 			}
 			return nil, err
 		}
-		handle, err := openDirectoryHandle(path, windows.GENERIC_READ|windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		handle, err := openDirectoryHandle(path, windows.GENERIC_READ|windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 		if err != nil {
 			os.Remove(path)
 			return nil, err
@@ -115,7 +116,7 @@ func (d *heldDist) createStaging() (*heldStage, error) {
 	return nil, errors.New("could not allocate staging directory")
 }
 func (s *heldStage) preparePayload() error {
-	handle, err := openDirectoryHandle(filepath.Join(s.path, "payload"), windows.DELETE|windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	handle, err := openDirectoryHandle(filepath.Join(s.path, "payload"), windows.DELETE|windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if err != nil {
 		return err
 	}
@@ -151,16 +152,22 @@ func (s *heldStage) close() error { return errors.Join(s.closePayload(), s.close
 func (s *heldStage) handlesClosed() bool {
 	return s.handle == windows.InvalidHandle && s.payload == windows.InvalidHandle
 }
-func (s *heldStage) payloadPath() string {
+func (s *heldStage) payloadPath() (string, error) {
 	if s.payload == windows.InvalidHandle {
-		return ""
+		return "", errors.New("payload handle is closed")
 	}
 	buffer := make([]uint16, windows.MAX_LONG_PATH)
 	n, err := windows.GetFinalPathNameByHandle(s.payload, &buffer[0], uint32(len(buffer)), 0)
-	if err != nil || n == 0 || n >= uint32(len(buffer)) {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return windows.UTF16ToString(buffer[:n])
+	if n == 0 {
+		return "", errors.New("resolved payload path is empty")
+	}
+	if n >= uint32(len(buffer)) {
+		return "", errors.New("resolved payload path exceeds buffer")
+	}
+	return windows.UTF16ToString(buffer[:n]), nil
 }
 func openMatchingDirectory(path string, want windows.ByHandleFileInformation) bool {
 	handle, err := openDirectoryHandle(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
@@ -176,6 +183,27 @@ func (s *heldStage) payloadMatches() bool {
 }
 func (d *heldDist) publishedMatches(s *heldStage, leaf string) bool {
 	return s.payload != windows.InvalidHandle && openMatchingDirectory(filepath.Join(d.path, leaf), s.payloadInfo)
+}
+func (d *heldDist) holdPublishedReadOnly(s *heldStage, leaf string) error {
+	path := filepath.Join(d.path, leaf)
+	handle, err := openDirectoryHandle(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	if err != nil {
+		return fmt.Errorf("open published payload with read-only held access: %w", err)
+	}
+	info, infoErr := handleInfo(handle)
+	if infoErr != nil || !validDirectoryInfo(info) || !sameWindowsFile(s.payloadInfo, info) {
+		closeErr := windows.CloseHandle(handle)
+		if infoErr != nil {
+			return errors.Join(fmt.Errorf("inspect read-only published payload handle: %w", infoErr), closeErr)
+		}
+		return errors.Join(errors.New("read-only published payload handle is reparse, not a directory, or has changed identity"), closeErr)
+	}
+	oldHandle := s.payload
+	if err := windows.CloseHandle(oldHandle); err != nil {
+		return errors.Join(fmt.Errorf("close DELETE-capable published payload handle: %w", err), windows.CloseHandle(handle))
+	}
+	s.payload = handle
+	return nil
 }
 func renameHandleNoReplace(source, destinationRoot windows.Handle, destination string) error {
 	name, err := windows.UTF16FromString(destination)
@@ -220,9 +248,33 @@ func (d *heldDist) publish(s *heldStage, leaf string, before, after func() error
 		s.ambiguous = true
 		return errors.New("published final identity is ambiguous: final name does not match verified payload")
 	}
+	if err := d.holdPublishedReadOnly(s, leaf); err != nil {
+		s.ambiguous = true
+		return fmt.Errorf("transition published payload to read-only held handle: %w", err)
+	}
 	return nil
 }
 func (d *heldDist) stageMatches(s *heldStage) bool { return openMatchingDirectory(s.path, s.info) }
+func (s *heldStage) readEntries() ([]os.DirEntry, error) {
+	handle, err := openDirectoryHandle(s.path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	if err != nil {
+		return nil, err
+	}
+	info, infoErr := handleInfo(handle)
+	if infoErr != nil || !validDirectoryInfo(info) || !sameWindowsFile(s.info, info) {
+		closeErr := windows.CloseHandle(handle)
+		if infoErr != nil {
+			return nil, errors.Join(infoErr, closeErr)
+		}
+		return nil, errors.Join(errors.New("staging enumeration handle is reparse, not a directory, or has changed identity"), closeErr)
+	}
+	file := os.NewFile(uintptr(handle), s.path)
+	if file == nil {
+		return nil, errors.Join(errors.New("wrap staging enumeration handle"), windows.CloseHandle(handle))
+	}
+	entries, readErr := file.ReadDir(-1)
+	return entries, errors.Join(readErr, file.Close())
+}
 func (d *heldDist) cleanup(s *heldStage, keepPayload bool) (returnErr error) {
 	if s.ambiguous {
 		return errors.Join(s.close(), errors.New("cleanup skipped because publication identity is ambiguous; safe staging residue retained"))
@@ -240,7 +292,7 @@ func (d *heldDist) cleanup(s *heldStage, keepPayload bool) (returnErr error) {
 			return err
 		}
 	}
-	entries, err := os.ReadDir(s.path)
+	entries, err := s.readEntries()
 	if err != nil {
 		return err
 	}

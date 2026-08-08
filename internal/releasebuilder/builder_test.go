@@ -591,7 +591,11 @@ func TestBuildHooksCannotChangeSnapshottedSourcesOrBinaries(t *testing.T) {
 func TestSnapshotBytesRemainBoundToInspectedArchivePayload(t *testing.T) {
 	root := repositoryRoot(t)
 	temporary := t.TempDir()
-	binaryPath := filepath.Join(temporary, "artisan")
+	binary := "artisan"
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	binaryPath := filepath.Join(temporary, binary)
 	ldflags := "-s -w -X github.com/fr3akX/artisan-cli/internal/release.Version=" + contractVersion + " -X github.com/fr3akX/artisan-cli/internal/release.Commit=" + contractCommit + " -X github.com/fr3akX/artisan-cli/internal/release.releaseIdentity=artisan-release:" + contractVersion + ":" + contractCommit
 	command := exec.Command(goCommand(t), "build", "-trimpath", "-buildvcs=false", "-ldflags="+ldflags, "-o", binaryPath, "./cmd/artisan")
 	command.Dir = root
@@ -620,14 +624,14 @@ func TestSnapshotBytesRemainBoundToInspectedArchivePayload(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte("changed binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "RELEASE_NOTES.md": {bytes: []byte("release notes"), digest: sha256.Sum256([]byte("release notes"))}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("skill"), digest: sha256.Sum256([]byte("skill"))}, "artisan": {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
+	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "RELEASE_NOTES.md": {bytes: []byte("release notes"), digest: sha256.Sum256([]byte("release notes"))}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("skill"), digest: sha256.Sum256([]byte("skill"))}, binary: {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
 	archivePath := filepath.Join(temporary, "snapshot.tar.gz")
 	top := "artisan-" + contractVersion + "-" + runtime.GOOS + "-" + runtime.GOARCH
-	if err := writeTarGzip(archivePath, top, "artisan", payloads); err != nil {
+	if err := writeTarGzip(archivePath, top, binary, payloads); err != nil {
 		t.Fatal(err)
 	}
 	expected := map[string][sha256.Size]byte{}
-	for _, entry := range archiveEntries(top, "artisan", payloads) {
+	for _, entry := range archiveEntries(top, binary, payloads) {
 		if !entry.directory {
 			expected[entry.name] = entry.payload.digest
 		}
@@ -643,7 +647,7 @@ func TestSnapshotBytesRemainBoundToInspectedArchivePayload(t *testing.T) {
 	if err := InspectArchivePayloads(archivePath, contractVersion, runtime.GOOS, runtime.GOARCH, wrongExpected); err == nil {
 		t.Fatal("archive inspector accepted changed expected payload digest")
 	}
-	gotSource, gotBinary := readTarPayloads(t, archivePath, top+"/LICENSE", top+"/artisan")
+	gotSource, gotBinary := readTarPayloads(t, archivePath, top+"/LICENSE", top+"/"+binary)
 	if !bytes.Equal(gotSource, sourceBytes) || !bytes.Equal(gotBinary, binaryBytes) {
 		t.Fatal("archive did not contain inspected immutable snapshots")
 	}
@@ -794,6 +798,13 @@ func copyBuildRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "darwin" {
+		canonical, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root = canonical
+	}
 	t.Cleanup(func() {
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
@@ -846,15 +857,18 @@ func copyBuildRoot(t *testing.T) string {
 
 func assertIsolatedBuildRoot(t *testing.T, source, root string) {
 	t.Helper()
-	relative, err := filepath.Rel(source, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
-		t.Fatalf("mutable build root %q is inside developer checkout %q", root, source)
+	sourceVolume, rootVolume := filepath.VolumeName(source), filepath.VolumeName(root)
+	if sourceVolume == "" || rootVolume == "" || strings.EqualFold(sourceVolume, rootVolume) {
+		relative, err := filepath.Rel(source, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+			t.Fatalf("mutable build root %q is inside developer checkout %q", root, source)
+		}
 	}
 	info, err := os.Lstat(filepath.Join(root, "dist"))
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o755 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
 		t.Fatalf("isolated build dist is not a canonical directory: %v %v", info, err)
 	}
 }

@@ -232,6 +232,29 @@ func TestManifestMultipartRejectsReplacedSymlinkBeforeReplay(t *testing.T) {
 	}
 }
 
+func TestMultipartSnapshotRejectsSymlinkRetarget(t *testing.T) {
+	dir := t.TempDir()
+	first := writeMultipartActiveSource(t, dir, "first.jpg", 1024)
+	second := writeMultipartActiveSource(t, dir, "second.jpg", 1024)
+	link := filepath.Join(dir, "link.jpg")
+	if err := os.Symlink(first, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	image, err := captureMultipartImage(link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, link); err != nil {
+		t.Fatal(err)
+	}
+	if image.pathMatches() {
+		t.Fatal("multipart snapshot accepted a retargeted symbolic link")
+	}
+}
+
 func TestManifestMultipartDetectsActiveStreamSourceMutation(t *testing.T) {
 	const imageSize = 1 << 20
 	for _, test := range []struct {
@@ -311,28 +334,6 @@ func TestManifestMultipartDetectsActiveStreamSourceMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "path replacement",
-			prepare: func(t *testing.T, dir string) (string, func()) {
-				path := writeMultipartActiveSource(t, dir, "replace.jpg", imageSize)
-				info, err := os.Stat(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return path, func() {
-					replacement := filepath.Join(dir, "replacement.jpg")
-					if err := os.WriteFile(replacement, bytes.Repeat([]byte("a"), imageSize), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Rename(replacement, path); err != nil {
-						t.Fatal(err)
-					}
-				}
-			},
-		},
-		{
 			name: "symlink retarget",
 			prepare: func(t *testing.T, dir string) (string, func()) {
 				first := writeMultipartActiveSource(t, dir, "first.jpg", imageSize)
@@ -398,6 +399,78 @@ func TestManifestMultipartDetectsActiveStreamSourceMutation(t *testing.T) {
 			assertNoOpenMultipartDescriptor(t, dir)
 		})
 	}
+}
+
+func TestManifestMultipartActiveStreamPathReplacementUsesNativeSemantics(t *testing.T) {
+	const imageSize = 1 << 20
+	dir := t.TempDir()
+	path := writeMultipartActiveSource(t, dir, "replace.jpg", imageSize)
+	factory, err := NewManifestMultipartBody([]byte(`{"images":[{"upload_index":0}]}`), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, contentType, err := factory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = body.Close() })
+	_, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := multipart.NewReader(body, parameters["boundary"])
+	manifest, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, manifest); err != nil {
+		t.Fatal(err)
+	}
+	image, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(image, make([]byte, imageSize/4)); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := filepath.Join(dir, "replacement.jpg")
+	if err := os.WriteFile(replacement, bytes.Repeat([]byte("z"), imageSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	renameErr := os.Rename(replacement, path)
+	remaining, readErr := io.ReadAll(image)
+	closeErr := body.Close()
+	if runtime.GOOS == "windows" {
+		if !errors.Is(renameErr, os.ErrPermission) {
+			t.Fatalf("Windows open-reader replacement error = %v, want permission/sharing denial", renameErr)
+		}
+		if readErr != nil || closeErr != nil || len(remaining) != 3*imageSize/4 || !bytes.Equal(remaining, bytes.Repeat([]byte("a"), len(remaining))) {
+			t.Fatalf("denied replacement changed original stream: bytes=%d read=%v close=%v", len(remaining), readErr, closeErr)
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatalf("replacement after close: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := bytes.Repeat([]byte("z"), imageSize)
+		if !bytes.Equal(got, want) {
+			t.Fatal("replacement target content differs from replacement source")
+		}
+		if _, err := os.Stat(replacement); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement source still exists after rename: %v", err)
+		}
+	} else {
+		if renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if !isChangedMultipartError(readErr) && !isChangedMultipartError(closeErr) {
+			t.Fatalf("read error = %v, close error = %v", readErr, closeErr)
+		}
+	}
+	assertNoOpenMultipartDescriptor(t, dir)
 }
 
 func writeMultipartActiveSource(t *testing.T, dir, name string, size int) string {
