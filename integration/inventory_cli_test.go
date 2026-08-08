@@ -564,6 +564,9 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := validateIntegrationWorkflow(contents); err != nil {
+		t.Fatal(err)
+	}
 	text := string(contents)
 	for _, required := range []string{
 		"permissions:\n  contents: read", pinnedServerRef, "repository: fr3akX/artisan-server",
@@ -610,6 +613,204 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 			t.Errorf("failure log step missing %q", required)
 		}
 	}
+}
+
+func TestIntegrationWorkflowContractRejectsMutations(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "integration.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutation := range map[string][2]string{
+		"extra event":                {"  pull_request:\n  push:", "  pull_request:\n  push:\n  workflow_dispatch:"},
+		"filtered event":             {"  pull_request:\n  push:", "  pull_request:\n  push:\n    branches: [main]"},
+		"alternate event form":       {"on:\n  pull_request:\n  push:", "on: [pull_request, push]"},
+		"global scope":               {"permissions:\n  contents: read", "permissions:\n  contents: read\n  actions: read"},
+		"job write-all":              {"live-integration:\n    runs-on:", "live-integration:\n    permissions: write-all\n    runs-on:"},
+		"disabled required step":     {"name: Run pinned live integration\n        shell:", "name: Run pinned live integration\n        if: false\n        shell:"},
+		"workspace canonicalization": {"workspace=\"$(realpath -e -- \"$workspace_input\")\"", "workspace=\"$workspace_input\""},
+		"script symlink guard":       {"[[ -f \"$script_input\" && ! -L \"$script_input\" ]]", "[[ -f \"$script_input\" ]]"},
+		"script containment":         {"[[ \"$script\" == \"$script_input\" && \"$script\" == \"$workspace/\"* ]]", "[[ \"$script\" == \"$script_input\" ]]"},
+		"canonical mount":            {`-v "$script:/tmp/provision_member.py:ro"`, `-v "$script_input:/tmp/provision_member.py:ro"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := bytes.Replace(contents, []byte(mutation[0]), []byte(mutation[1]), 1)
+			if bytes.Equal(changed, contents) {
+				t.Fatal("test mutation did not apply")
+			}
+			if err := validateIntegrationWorkflow(changed); err == nil {
+				t.Fatal("integration workflow contract bypass was accepted")
+			}
+		})
+	}
+}
+
+const provisionMemberRunContract = `set -euo pipefail
+workspace_input="$GITHUB_WORKSPACE"
+[[ -d "$workspace_input" && ! -L "$workspace_input" ]]
+workspace="$(realpath -e -- "$workspace_input")"
+[[ "$workspace" == "$workspace_input" ]]
+script_input="$workspace/integration/provision_member.py"
+[[ -f "$script_input" && ! -L "$script_input" ]]
+script="$(realpath -e -- "$script_input")"
+[[ "$script" == "$script_input" && "$script" == "$workspace/"* ]]
+issued_file="$(mktemp)"
+trap 'rm -f "$issued_file"' EXIT
+timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+  -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" \
+  run --rm \
+  -e "ARTISAN_E2E_MEMBER_EMAIL=$ARTISAN_INTEGRATION_MEMBER_EMAIL" \
+  -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
+  -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
+  -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+  -v "$script:/tmp/provision_member.py:ro" \
+  api python /tmp/provision_member.py > "$issued_file"
+IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
+[[ "$member_token" =~ ^[^[:space:]]+$ ]]
+[[ "$member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+echo "::add-mask::$member_token"
+{
+  echo "ARTISAN_INTEGRATION_MEMBER_TOKEN=$member_token"
+  echo "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID=$member_credential_id"
+} >> "$GITHUB_ENV"
+rm -f "$issued_file"
+trap - EXIT`
+
+func validateIntegrationWorkflow(contents []byte) error {
+	if err := validateWorkflowActionPins(string(contents), 3); err != nil {
+		return err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(contents))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return errors.New("integration workflow root must be one mapping")
+	}
+	root := document.Content[0]
+	events, err := integrationMappingLookup(root, "on")
+	if err != nil || !integrationMappingHasExactKeys(events, "pull_request", "push") {
+		return errors.New("integration events must be exactly pull_request and push mappings")
+	}
+	for _, event := range []string{"pull_request", "push"} {
+		configuration, _ := integrationMappingLookup(events, event)
+		if configuration.Kind != yaml.ScalarNode || configuration.Tag != "!!null" {
+			return fmt.Errorf("integration event %s must not be filtered", event)
+		}
+	}
+	permissions, err := integrationMappingLookup(root, "permissions")
+	if err != nil || !integrationMappingEquals(permissions, map[string]string{"contents": "read"}) {
+		return errors.New("integration top-level permissions must be exactly contents: read")
+	}
+	jobs, err := integrationMappingLookup(root, "jobs")
+	if err != nil {
+		return err
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		if _, err := integrationMappingLookup(jobs.Content[index+1], "permissions"); err == nil {
+			return errors.New("integration job-level permissions are forbidden")
+		}
+	}
+	job, err := integrationMappingLookup(jobs, "live-integration")
+	if err != nil {
+		return err
+	}
+	for _, forbidden := range []string{"if", "continue-on-error"} {
+		if _, err := integrationMappingLookup(job, forbidden); err == nil {
+			return fmt.Errorf("integration job %s is forbidden", forbidden)
+		}
+	}
+	steps, err := integrationMappingLookup(job, "steps")
+	if err != nil || steps.Kind != yaml.SequenceNode {
+		return errors.New("integration steps are missing")
+	}
+	requiredSteps := map[string]int{
+		"Check out Artisan CLI": 0, "Validate pinned server ref": 0, "Check out pinned Artisan Server": 0,
+		"Verify server checkout HEAD": 0, "Set up Go": 0, "Prepare disposable stack inputs": 0,
+		"Validate disposable Compose configuration": 0, "Start disposable Artisan Server": 0,
+		"Wait for bounded readiness": 0, "Bootstrap disposable administrator": 0, "Provision disposable member": 0,
+		"Build compiled CLI": 0, "Run pinned live integration": 0, "Print bounded server logs on failure": 0,
+		"Tear down disposable stack": 0,
+	}
+	foundProvision := false
+	for _, step := range steps.Content {
+		name, nameErr := integrationMappingLookup(step, "name")
+		if nameErr != nil {
+			return errors.New("integration steps must be named")
+		}
+		if _, required := requiredSteps[name.Value]; required {
+			requiredSteps[name.Value]++
+		}
+		if _, err := integrationMappingLookup(step, "continue-on-error"); err == nil {
+			return fmt.Errorf("step %q may not continue on error", name.Value)
+		}
+		condition, conditionErr := integrationMappingLookup(step, "if")
+		allowedCondition := map[string]string{"Print bounded server logs on failure": "failure()", "Tear down disposable stack": "always()"}
+		if want, allowed := allowedCondition[name.Value]; allowed {
+			if conditionErr != nil || condition.Kind != yaml.ScalarNode || condition.Value != want {
+				return fmt.Errorf("step %q condition drifted", name.Value)
+			}
+		} else if conditionErr == nil {
+			return fmt.Errorf("required step %q may not be conditional", name.Value)
+		}
+		if name.Value == "Provision disposable member" {
+			run, runErr := integrationMappingLookup(step, "run")
+			if runErr != nil || strings.TrimSpace(strings.ReplaceAll(run.Value, "\r\n", "\n")) != provisionMemberRunContract {
+				return errors.New("member provision canonical bind contract drifted")
+			}
+			foundProvision = true
+		}
+	}
+	if !foundProvision {
+		return errors.New("member provision step is missing")
+	}
+	for name, count := range requiredSteps {
+		if count != 1 {
+			return fmt.Errorf("required integration step %q appears %d times", name, count)
+		}
+	}
+	return nil
+}
+
+func integrationMappingLookup(node *yaml.Node, key string) (*yaml.Node, error) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, errors.New("mapping required")
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			return node.Content[index+1], nil
+		}
+	}
+	return nil, fmt.Errorf("mapping key %q missing", key)
+}
+
+func integrationMappingEquals(node *yaml.Node, want map[string]string) bool {
+	if node == nil || node.Kind != yaml.MappingNode || len(node.Content) != len(want)*2 {
+		return false
+	}
+	for key, value := range want {
+		child, err := integrationMappingLookup(node, key)
+		if err != nil || child.Kind != yaml.ScalarNode || child.Value != value {
+			return false
+		}
+	}
+	return true
+}
+
+func integrationMappingHasExactKeys(node *yaml.Node, keys ...string) bool {
+	if node == nil || node.Kind != yaml.MappingNode || len(node.Content) != len(keys)*2 {
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		seen[node.Content[index].Value] = true
+	}
+	if len(seen) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if !seen[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateWorkflowActionPins(workflow string, expectedCount int) error {

@@ -78,6 +78,14 @@ func acquirePrivateLock(ctx context.Context, dir, name string, maxWait time.Dura
 				file.Close()
 				return nil, err
 			}
+			if err := file.Truncate(0); err != nil {
+				closeErr := file.Close()
+				return nil, errors.Join(fmt.Errorf("empty private lock: %w", err), closeErr)
+			}
+			if err := file.Sync(); err != nil {
+				closeErr := file.Close()
+				return nil, errors.Join(fmt.Errorf("sync empty private lock: %w", err), closeErr)
+			}
 			return file.Close, nil
 		}
 		if !errors.Is(openErr, windows.STATUS_SHARING_VIOLATION) &&

@@ -43,9 +43,11 @@ Get-FileHash -Algorithm SHA256 .\artisan-VERSION-windows-amd64.zip
 
 Each archive has one top-level directory named
 `artisan-VERSION-OS-ARCH`. It contains only `artisan` (`artisan.exe` on
-Windows), `LICENSE`, `THIRD_PARTY_NOTICES.txt`, and
-`skills/artisan-inventory/SKILL.md`. Release automation also publishes GitHub
-build provenance for these assets.
+Windows), `LICENSE`, `RELEASE_NOTES.md`, `THIRD_PARTY_NOTICES.txt`, and
+`skills/artisan-inventory/SKILL.md`. The same reviewed `RELEASE_NOTES.md` is the
+GitHub release body. Release automation also publishes GitHub build provenance
+for the six archives and `checksums.txt`; the note is archive content, not an
+additional downloadable asset.
 
 The binaries are currently **unsigned** and macOS builds are **not notarized**.
 Checksums and GitHub provenance help establish artifact identity but do not

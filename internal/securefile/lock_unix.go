@@ -45,6 +45,16 @@ func acquirePrivateLock(ctx context.Context, dir, name string, maxWait time.Dura
 				_ = file.Close()
 				return nil, contextErr
 			}
+			if err := unix.Ftruncate(descriptor, 0); err != nil {
+				unlockErr := unix.Flock(descriptor, unix.LOCK_UN)
+				closeErr := file.Close()
+				return nil, errors.Join(fmt.Errorf("empty private lock: %w", err), unlockErr, closeErr)
+			}
+			if err := unix.Fsync(descriptor); err != nil {
+				unlockErr := unix.Flock(descriptor, unix.LOCK_UN)
+				closeErr := file.Close()
+				return nil, errors.Join(fmt.Errorf("sync empty private lock: %w", err), unlockErr, closeErr)
+			}
 			return func() error {
 				unlockErr := unix.Flock(descriptor, unix.LOCK_UN)
 				return errors.Join(unlockErr, file.Close())

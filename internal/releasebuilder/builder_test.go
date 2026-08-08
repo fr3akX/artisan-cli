@@ -94,6 +94,64 @@ func TestBuildRefusesPreexistingFinal(t *testing.T) {
 	assertFileContents(t, sentinel, "keep")
 }
 
+func TestBuildRejectsMissingSymlinkedAndOversizeReleaseNotes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "missing", mutate: func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "RELEASE_NOTES.md")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "oversize", mutate: func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "RELEASE_NOTES.md"), bytes.Repeat([]byte("x"), maximumSourceSize+1), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := fakeRoot(t)
+			test.mutate(t, root)
+			if err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t)}); err == nil {
+				t.Fatal("unsafe required release note accepted")
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		t.Run("symlink", func(t *testing.T) {
+			root := fakeRoot(t)
+			note := filepath.Join(root, "RELEASE_NOTES.md")
+			if err := os.Remove(note); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(root, "LICENSE"), note); err != nil {
+				t.Fatal(err)
+			}
+			if err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t)}); err == nil {
+				t.Fatal("symlinked required release note accepted")
+			}
+		})
+	}
+}
+
+func TestBuildRejectsReleaseNoteMutationAfterSnapshot(t *testing.T) {
+	root := fakeRoot(t)
+	final := filepath.Join(root, "dist", "release")
+	err := Build(Options{
+		Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t),
+		AfterSourceSnapshot: func() error {
+			return os.WriteFile(filepath.Join(root, "RELEASE_NOTES.md"), []byte("changed after snapshot"), 0o644)
+		},
+	})
+	if err == nil {
+		t.Fatal("release note mutation after snapshot was accepted")
+	}
+	if _, statErr := os.Lstat(final); !os.IsNotExist(statErr) {
+		t.Fatalf("release note mutation reached publication: %v", statErr)
+	}
+}
+
 func TestBuildLateFailureLeavesFinalAbsent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the release matrix")
@@ -180,6 +238,18 @@ func TestBuildRejectsPayloadFinalAndStageIdentitySwaps(t *testing.T) {
 		}
 		return matches[0]
 	}
+	t.Run("release note changed at publication boundary", func(t *testing.T) {
+		root := copyBuildRoot(t)
+		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), BeforePublish: func() error {
+			return os.WriteFile(filepath.Join(root, "RELEASE_NOTES.md"), []byte("changed before publication"), 0o644)
+		}})
+		if err == nil {
+			t.Fatal("release note mutation at publication boundary reported success")
+		}
+		if _, statErr := os.Lstat(filepath.Join(root, "dist", "release")); !os.IsNotExist(statErr) {
+			t.Fatalf("release note mutation reached publication: %v", statErr)
+		}
+	})
 	t.Run("payload immediately before native rename", func(t *testing.T) {
 		root := copyBuildRoot(t)
 		err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "release", Go: goCommand(t), BeforeNativeRename: func() error {
@@ -491,6 +561,10 @@ func TestBuildHooksCannotChangeSnapshottedSourcesOrBinaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	originalReleaseNotes, err := os.ReadFile(filepath.Join(root, "RELEASE_NOTES.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var inspectedBinary []byte
 	err = Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: "work", Go: goCommand(t), AfterSourceSnapshot: func() error {
 		return os.WriteFile(filepath.Join(root, "LICENSE"), []byte("changed after source snapshot"), 0o644)
@@ -510,7 +584,8 @@ func TestBuildHooksCannotChangeSnapshottedSourcesOrBinaries(t *testing.T) {
 	archivePath := filepath.Join(root, "dist", "work", "artisan-"+contractVersion+"-linux-amd64.tar.gz")
 	top := "artisan-" + contractVersion + "-linux-amd64"
 	gotLicense, gotBinary := readTarPayloads(t, archivePath, top+"/LICENSE", top+"/artisan")
-	if !bytes.Equal(gotLicense, originalLicense) || !bytes.Equal(gotBinary, inspectedBinary) {
+	gotReleaseNotes, _ := readTarPayloads(t, archivePath, top+"/RELEASE_NOTES.md", top+"/LICENSE")
+	if !bytes.Equal(gotLicense, originalLicense) || !bytes.Equal(gotReleaseNotes, originalReleaseNotes) || !bytes.Equal(gotBinary, inspectedBinary) {
 		t.Fatal("Build archive escaped immutable inspected snapshots")
 	}
 }
@@ -547,7 +622,7 @@ func TestSnapshotBytesRemainBoundToInspectedArchivePayload(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte("changed binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("skill"), digest: sha256.Sum256([]byte("skill"))}, "artisan": {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
+	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "RELEASE_NOTES.md": {bytes: []byte("release notes"), digest: sha256.Sum256([]byte("release notes"))}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("skill"), digest: sha256.Sum256([]byte("skill"))}, "artisan": {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
 	archivePath := filepath.Join(temporary, "snapshot.tar.gz")
 	top := "artisan-" + contractVersion + "-" + runtime.GOOS + "-" + runtime.GOARCH
 	if err := writeTarGzip(archivePath, top, "artisan", payloads); err != nil {
@@ -737,7 +812,7 @@ func copyBuildRoot(t *testing.T) string {
 			return nil
 		})
 	})
-	for _, relative := range []string{"cmd", "internal", "skills", "go.mod", "go.sum", "LICENSE", "THIRD_PARTY_NOTICES.txt"} {
+	for _, relative := range []string{"cmd", "internal", "skills", "go.mod", "go.sum", "LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt"} {
 		sourcePath := filepath.Join(source, relative)
 		err := filepath.WalkDir(sourcePath, func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -776,7 +851,7 @@ func fakeRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for path := range map[string]bool{"LICENSE": true, "THIRD_PARTY_NOTICES.txt": true, "skills/artisan-inventory/SKILL.md": true} {
+	for path := range map[string]bool{"LICENSE": true, "RELEASE_NOTES.md": true, "THIRD_PARTY_NOTICES.txt": true, "skills/artisan-inventory/SKILL.md": true} {
 		full := filepath.Join(root, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)

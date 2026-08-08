@@ -14,6 +14,12 @@ import (
 
 func TestPrivateLockHasProtectedWindowsACLAndRejectsReparsePoints(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artisan")
+	if err := securefile.EnsurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.AtomicWrite(dir, ".auth-state.lock", []byte("pre-populated")); err != nil {
+		t.Fatal(err)
+	}
 	release, err := securefile.AcquirePrivateLock(context.Background(), dir, ".auth-state.lock", time.Second)
 	if err != nil {
 		t.Fatalf("AcquirePrivateLock() error = %v", err)
@@ -25,7 +31,11 @@ func TestPrivateLockHasProtectedWindowsACLAndRejectsReparsePoints(t *testing.T) 
 	if err != nil {
 		t.Fatalf("OpenPrivate(lock) error = %v", err)
 	}
-	_ = file.Close()
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil || info.Size() != 0 {
+		t.Fatalf("empty durable lock info=%v stat=%v close=%v", info, statErr, closeErr)
+	}
 
 	target := filepath.Join(dir, "target")
 	if err := securefile.AtomicWrite(dir, "target", nil); err != nil {

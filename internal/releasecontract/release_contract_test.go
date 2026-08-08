@@ -74,17 +74,26 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutation := range map[string][2]string{
-		"native OS":             {"windows-2022", "windows-missing"},
-		"race flags":            {"run: go test ./... -race", "run: go test -race"},
-		"build command":         {"go build -trimpath", "echo no-build"},
-		"smoke command":         {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
-		"permissions":           {"contents: read", "contents: write"},
-		"generation drift":      {"git diff --exit-code", "git status --short"},
-		"command in comment":    {"run: go vet ./...", "run: echo vet-disabled\n      # go vet ./..."},
-		"wrong shell":           {"name: Check formatting\n        shell: bash", "name: Check formatting\n        shell: sh"},
-		"test if false":         {"name: Test\n        run:", "name: Test\n        if: false\n        run:"},
-		"race false expression": {"name: Race test\n        run:", "name: Race test\n        if: ${{ false }}\n        run:"},
-		"quality continue":      {"quality:\n    runs-on:", "quality:\n    continue-on-error: ${{ matrix.allowed }}\n    runs-on:"},
+		"native OS":                {"windows-2022", "windows-missing"},
+		"native timeout":           {"native-build-smoke:\n    timeout-minutes: 20", "native-build-smoke:\n    timeout-minutes: 0"},
+		"native tests":             {"name: Test on native platform\n        run: go test ./...", "name: Native tests disabled\n        run: echo disabled"},
+		"native tests conditional": {"name: Test on native platform\n        run:", "name: Test on native platform\n        if: runner.os == 'Linux'\n        run:"},
+		"matrix exclusion":         {"      matrix:\n        os:", "      matrix:\n        exclude:\n          - os: windows-2022\n        os:"},
+		"extra event":              {"  pull_request:\n  push:", "  pull_request:\n  push:\n  workflow_dispatch:"},
+		"filtered event":           {"  pull_request:\n  push:", "  pull_request:\n  push:\n    branches: [main]"},
+		"alternate event":          {"on:\n  pull_request:\n  push:", "on: [pull_request, push]"},
+		"job permissions":          {"quality:\n    runs-on:", "quality:\n    permissions: write-all\n    runs-on:"},
+		"extra permission scope":   {"permissions:\n  contents: read", "permissions:\n  contents: read\n  actions: read"},
+		"race flags":               {"run: go test ./... -race", "run: go test -race"},
+		"build command":            {"go build -trimpath", "echo no-build"},
+		"smoke command":            {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
+		"permissions":              {"contents: read", "contents: write"},
+		"generation drift":         {"git diff --exit-code", "git status --short"},
+		"command in comment":       {"run: go vet ./...", "run: echo vet-disabled\n      # go vet ./..."},
+		"wrong shell":              {"name: Check formatting\n        shell: bash", "name: Check formatting\n        shell: sh"},
+		"test if false":            {"name: Test\n        run:", "name: Test\n        if: false\n        run:"},
+		"race false expression":    {"name: Race test\n        run:", "name: Race test\n        if: ${{ false }}\n        run:"},
+		"quality continue":         {"quality:\n    runs-on:", "quality:\n    continue-on-error: ${{ matrix.allowed }}\n    runs-on:"},
 	} {
 		t.Run("CI missing "+name, func(t *testing.T) {
 			changed := bytes.Replace(ci, []byte(mutation[0]), []byte(mutation[1]), 1)
@@ -103,6 +112,14 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 	}
 	for name, mutation := range map[string][2]string{
 		"tag filter":           {"- 'v*'", "- '*'"},
+		"extra push filter":    {"    tags:\n      - 'v*'", "    tags:\n      - 'v*'\n    branches: [main]"},
+		"extra event":          {"on:\n  push:", "on:\n  workflow_dispatch:\n  push:"},
+		"alternate event":      {"on:\n  push:\n    tags:\n      - 'v*'", "on: push"},
+		"global write-all":     {"permissions:\n  contents: read", "permissions: write-all"},
+		"job write-all":        {"permissions:\n      contents: write", "permissions: write-all\n      # contents: write"},
+		"extra job scope":      {"      attestations: write", "      attestations: write\n      packages: write"},
+		"extra global scope":   {"permissions:\n  contents: read", "permissions:\n  contents: read\n  actions: read"},
+		"release body":         {"body_path: RELEASE_NOTES.md", "body: generated release"},
 		"builder":              {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, "run: echo no-builder"},
 		"builder in text":      {`run: scripts/build-release.sh "$VERSION" "$COMMIT" release`, `run: echo 'scripts/build-release.sh "$VERSION" "$COMMIT" release'`},
 		"wrong shell":          {"name: Build and verify static release archives\n        shell: bash", "name: Build and verify static release archives\n        shell: sh"},
@@ -197,6 +214,10 @@ func TestReleaseArchives(t *testing.T) {
 		}
 	}
 
+	wantReleaseNotes, err := os.ReadFile(filepath.Join(root, "RELEASE_NOTES.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantArchives := make([]string, 0, 6)
 	for _, target := range []struct{ goos, goarch, extension string }{
 		{"linux", "amd64", ".tar.gz"}, {"linux", "arm64", ".tar.gz"},
@@ -213,11 +234,14 @@ func TestReleaseArchives(t *testing.T) {
 			binary += ".exe"
 		}
 		wantEntries := []string{
-			top + "/", top + "/LICENSE", top + "/THIRD_PARTY_NOTICES.txt", top + "/" + binary,
+			top + "/", top + "/LICENSE", top + "/RELEASE_NOTES.md", top + "/THIRD_PARTY_NOTICES.txt", top + "/" + binary,
 			top + "/skills/", top + "/skills/artisan-inventory/", top + "/skills/artisan-inventory/SKILL.md",
 		}
 		if strings.Join(entries, "\n") != strings.Join(wantEntries, "\n") {
 			t.Errorf("archive order/content = %v, want %v", entries, wantEntries)
+		}
+		if got := archivePayload(t, archivePath, top+"/RELEASE_NOTES.md"); !bytes.Equal(got, wantReleaseNotes) {
+			t.Errorf("archive %s release note bytes differ from reviewed source", name)
 		}
 		if err := releasebuilder.InspectArchive(archivePath, testVersion, target.goos, target.goarch); err != nil {
 			t.Fatal(err)
@@ -269,7 +293,8 @@ func TestReleaseArchives(t *testing.T) {
 func TestDocumentationContract(t *testing.T) {
 	root := repositoryRoot(t)
 	required := map[string][]string{
-		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
+		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
+		"RELEASE_NOTES.md":            {"Minimum compatible Artisan Server commit", "4c0136fe98f6728f4bb94e416c5abe570e7f4831", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0"},
 		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres"},
 		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1"},
 		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox"},
@@ -378,12 +403,24 @@ func validateCIWorkflow(contents []byte) error {
 	}
 
 	events, err := mappingLookup(root, "on")
-	if err != nil || !hasMappingKeys(events, "pull_request", "push") {
-		return errors.New("CI must run for pull requests and pushes")
+	if err != nil || !mappingHasExactKeys(events, "pull_request", "push") {
+		return errors.New("CI events must be exactly pull_request and push mappings")
+	}
+	for _, event := range []string{"pull_request", "push"} {
+		configuration, _ := mappingLookup(events, event)
+		if configuration.Kind != yaml.ScalarNode || configuration.Tag != "!!null" {
+			return fmt.Errorf("CI event %s must not be filtered", event)
+		}
 	}
 	jobs, err := mappingLookup(root, "jobs")
 	if err != nil {
 		return err
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		job := jobs.Content[index+1]
+		if _, permissionErr := mappingLookup(job, "permissions"); permissionErr == nil {
+			return errors.New("CI job-level permissions are forbidden")
+		}
 	}
 	quality, err := mappingLookup(jobs, "quality")
 	if err != nil {
@@ -427,6 +464,9 @@ func validateCIWorkflow(contents []byte) error {
 			return err
 		}
 	}
+	if err := requireRunStep(native, "Test on native platform", "", "go test ./..."); err != nil {
+		return err
+	}
 	if err := requireRunStep(native, "Build and smoke native executable", "bash", `set -euo pipefail
 suffix=
 if [[ "${{ runner.os }}" == "Windows" ]]; then suffix=.exe; fi
@@ -443,20 +483,26 @@ go build -trimpath -o "artisan-ci${suffix}" ./cmd/artisan
 		return err
 	}
 	matrix, err := mappingLookup(strategy, "matrix")
-	if err != nil {
-		return err
+	if err != nil || !mappingHasExactKeys(matrix, "os") {
+		return errors.New("native matrix must contain only os")
 	}
 	oses, err := mappingLookup(matrix, "os")
 	if err != nil || oses.Kind != yaml.SequenceNode {
 		return errors.New("native OS matrix is missing")
 	}
-	seen := make(map[string]bool)
-	for _, node := range oses.Content {
-		seen[node.Value] = true
+	wantOS := []string{"ubuntu-24.04", "macos-14", "windows-2022"}
+	if len(oses.Content) != len(wantOS) {
+		return errors.New("native OS matrix must contain exactly the reviewed platforms")
 	}
-	for _, want := range []string{"ubuntu-24.04", "macos-14", "windows-2022"} {
-		if !seen[want] {
-			return fmt.Errorf("native OS matrix missing %s", want)
+	for index, want := range wantOS {
+		if oses.Content[index].Kind != yaml.ScalarNode || oses.Content[index].Value != want {
+			return fmt.Errorf("native OS matrix entry %d must be %s", index, want)
+		}
+	}
+	for _, job := range []*yaml.Node{quality, native} {
+		timeout, timeoutErr := mappingLookup(job, "timeout-minutes")
+		if timeoutErr != nil || timeout.Kind != yaml.ScalarNode || timeout.Value != "20" {
+			return errors.New("CI jobs must retain the reviewed 20-minute bound")
 		}
 	}
 	if !workflowHasGo123(document) {
@@ -472,15 +518,12 @@ func validateReleaseWorkflow(contents []byte) error {
 	}
 	root := document.Content[0]
 	events, err := mappingLookup(root, "on")
-	if err != nil {
-		return err
-	}
-	if _, err := mappingLookup(events, "pull_request"); err == nil {
-		return errors.New("release must not run for pull requests")
+	if err != nil || !mappingHasExactKeys(events, "push") {
+		return errors.New("release event must be exactly push")
 	}
 	push, err := mappingLookup(events, "push")
-	if err != nil {
-		return errors.New("release push trigger is missing")
+	if err != nil || !mappingHasExactKeys(push, "tags") {
+		return errors.New("release push trigger must contain only tags")
 	}
 	tags, err := mappingLookup(push, "tags")
 	if err != nil || tags.Kind != yaml.SequenceNode || len(tags.Content) != 1 || tags.Content[0].Value != "v*" {
@@ -497,6 +540,14 @@ func validateReleaseWorkflow(contents []byte) error {
 	release, err := mappingLookup(jobs, "release")
 	if err != nil {
 		return err
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		if jobs.Content[index].Value == "release" {
+			continue
+		}
+		if _, permissionErr := mappingLookup(jobs.Content[index+1], "permissions"); permissionErr == nil {
+			return errors.New("only the release job may override permissions")
+		}
 	}
 	if err := rejectDisableControls(release); err != nil {
 		return fmt.Errorf("release job: %w", err)
@@ -527,7 +578,7 @@ func validateReleaseWorkflow(contents []byte) error {
 	if err := requireUsesStep(release, "Attest archives and checksums", "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", map[string]string{"subject-path": "dist/release/*"}); err != nil {
 		return err
 	}
-	if err := requireUsesStep(release, "Publish GitHub release", "softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8", map[string]string{"fail_on_unmatched_files": "true", "files": "dist/release/*.tar.gz\ndist/release/*.zip\ndist/release/checksums.txt\n"}); err != nil {
+	if err := requireUsesStep(release, "Publish GitHub release", "softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8", map[string]string{"body_path": "RELEASE_NOTES.md", "fail_on_unmatched_files": "true", "files": "dist/release/*.tar.gz\ndist/release/*.zip\ndist/release/checksums.txt\n"}); err != nil {
 		return err
 	}
 	if !workflowHasGo123(document) {
@@ -575,9 +626,19 @@ func mappingEquals(node *yaml.Node, want map[string]string) bool {
 	return true
 }
 
-func hasMappingKeys(node *yaml.Node, keys ...string) bool {
+func mappingHasExactKeys(node *yaml.Node, keys ...string) bool {
+	if node == nil || node.Kind != yaml.MappingNode || len(node.Content) != len(keys)*2 {
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		seen[node.Content[index].Value] = true
+	}
+	if len(seen) != len(keys) {
+		return false
+	}
 	for _, key := range keys {
-		if _, err := mappingLookup(node, key); err != nil {
+		if !seen[key] {
 			return false
 		}
 	}
@@ -775,6 +836,62 @@ func archiveEntries(t *testing.T, path string) []string {
 		entries = append(entries, header.Name)
 	}
 	return entries
+}
+
+func archivePayload(t *testing.T, path, name string) []byte {
+	t.Helper()
+	if strings.HasSuffix(path, ".zip") {
+		reader, err := zip.OpenReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		for _, file := range reader.File {
+			if file.Name != name {
+				continue
+			}
+			source, err := file.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, readErr := io.ReadAll(source)
+			closeErr := source.Close()
+			if readErr != nil || closeErr != nil {
+				t.Fatalf("read ZIP payload: %v; close: %v", readErr, closeErr)
+			}
+			return contents
+		}
+		t.Fatalf("ZIP payload %q is missing", name)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	compressed, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Close()
+	reader := tar.NewReader(compressed)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name == name {
+			contents, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return contents
+		}
+	}
+	t.Fatalf("tar payload %q is missing", name)
+	return nil
 }
 
 func assertChecksums(t *testing.T, directory string, archives []string) {

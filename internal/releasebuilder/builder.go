@@ -109,8 +109,8 @@ func Build(options Options) (returnErr error) {
 		options.CommandTimeout = 10 * time.Second
 	}
 
-	sources := make(map[string]payloadSnapshot, 3)
-	for _, relative := range []string{"LICENSE", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"} {
+	sources := make(map[string]payloadSnapshot, 4)
+	for _, relative := range []string{"LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"} {
 		contents, err := readRegularSnapshot(filepath.Join(root, filepath.FromSlash(relative)), maximumSourceSize)
 		if err != nil {
 			return fmt.Errorf("snapshot required source %s: %w", relative, err)
@@ -121,6 +121,9 @@ func Build(options Options) (returnErr error) {
 		if err := options.AfterSourceSnapshot(); err != nil {
 			return fmt.Errorf("after source snapshot: %w", err)
 		}
+	}
+	if err := verifyRequiredSourceSnapshot(root, "RELEASE_NOTES.md", sources["RELEASE_NOTES.md"]); err != nil {
+		return err
 	}
 
 	distPath := filepath.Join(root, "dist")
@@ -218,6 +221,9 @@ func Build(options Options) (returnErr error) {
 			return fmt.Errorf("before publish: %w", err)
 		}
 	}
+	if err := verifyRequiredSourceSnapshot(root, "RELEASE_NOTES.md", sources["RELEASE_NOTES.md"]); err != nil {
+		return err
+	}
 	if !dist.pathMatches() {
 		return errors.New("requested dist identity changed before publish")
 	}
@@ -257,6 +263,17 @@ func Build(options Options) (returnErr error) {
 	if err := validatePublishedPayload(stage.payloadPath(), options.Version, archives, manifestSnapshot); err != nil {
 		stage.ambiguous = true
 		return fmt.Errorf("published-visible ambiguity: point-in-time held-payload validation failed: %w", err)
+	}
+	return nil
+}
+
+func verifyRequiredSourceSnapshot(root, relative string, expected payloadSnapshot) error {
+	contents, err := readRegularSnapshot(filepath.Join(root, filepath.FromSlash(relative)), maximumSourceSize)
+	if err != nil {
+		return fmt.Errorf("revalidate required source %s: %w", relative, err)
+	}
+	if sha256.Sum256(contents) != expected.digest || !bytes.Equal(contents, expected.bytes) {
+		return fmt.Errorf("required source %s changed after snapshot", relative)
 	}
 	return nil
 }

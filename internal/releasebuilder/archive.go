@@ -21,6 +21,7 @@ func archiveEntries(top, binary string, payloads map[string]payloadSnapshot) []a
 	entries := []archiveEntry{
 		{name: top + "/", mode: 0o755, directory: true},
 		{name: top + "/LICENSE", mode: 0o644, payload: payloads["LICENSE"]},
+		{name: top + "/RELEASE_NOTES.md", mode: 0o644, payload: payloads["RELEASE_NOTES.md"]},
 		{name: top + "/THIRD_PARTY_NOTICES.txt", mode: 0o644, payload: payloads["THIRD_PARTY_NOTICES.txt"]},
 		{name: top + "/" + binary, mode: 0o755, payload: payloads[binary]},
 		{name: top + "/skills/", mode: 0o755, directory: true},

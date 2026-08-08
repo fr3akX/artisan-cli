@@ -61,6 +61,31 @@ func TestPrivateLockSerializesAcquisitionAndHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestPrivateLockEmptiesPrePopulatedFileAfterExclusiveAcquisition(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artisan")
+	if err := securefile.EnsurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(dir, ".auth-state.lock")
+	if err := os.WriteFile(lockPath, []byte("credential material that must not survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := securefile.AcquirePrivateLock(context.Background(), dir, filepath.Base(lockPath), time.Second)
+	if err != nil {
+		t.Fatalf("AcquirePrivateLock() error = %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release() error = %v", err)
+	}
+	contents, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 0 {
+		t.Fatalf("pre-populated lock retains %d bytes", len(contents))
+	}
+}
+
 func TestPrivateLockRejectsUnsafeParameters(t *testing.T) {
 	for _, test := range []struct {
 		name    string

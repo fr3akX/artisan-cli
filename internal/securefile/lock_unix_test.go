@@ -14,6 +14,12 @@ import (
 
 func TestPrivateLockIsPrivateAndRejectsUnixSymlinks(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artisan")
+	if err := securefile.EnsurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".auth-state.lock"), []byte("pre-populated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	release, err := securefile.AcquirePrivateLock(context.Background(), dir, ".auth-state.lock", time.Second)
 	if err != nil {
 		t.Fatalf("AcquirePrivateLock() error = %v", err)
@@ -22,8 +28,8 @@ func TestPrivateLockIsPrivateAndRejectsUnixSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(lock) error = %v", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		t.Fatalf("lock mode = %v, want private regular 0600", info.Mode())
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 {
+		t.Fatalf("lock info = mode %v size %d, want private regular 0600 and empty", info.Mode(), info.Size())
 	}
 	if err := release(); err != nil {
 		t.Fatalf("release() error = %v", err)

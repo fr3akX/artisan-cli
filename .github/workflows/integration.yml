@@ -143,6 +143,14 @@ jobs:
         working-directory: artisan-server
         run: |
           set -euo pipefail
+          workspace_input="$GITHUB_WORKSPACE"
+          [[ -d "$workspace_input" && ! -L "$workspace_input" ]]
+          workspace="$(realpath -e -- "$workspace_input")"
+          [[ "$workspace" == "$workspace_input" ]]
+          script_input="$workspace/integration/provision_member.py"
+          [[ -f "$script_input" && ! -L "$script_input" ]]
+          script="$(realpath -e -- "$script_input")"
+          [[ "$script" == "$script_input" && "$script" == "$workspace/"* ]]
           issued_file="$(mktemp)"
           trap 'rm -f "$issued_file"' EXIT
           timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
@@ -152,7 +160,7 @@ jobs:
             -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
             -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
             -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
-            -v "$GITHUB_WORKSPACE/integration/provision_member.py:/tmp/provision_member.py:ro" \
+            -v "$script:/tmp/provision_member.py:ro" \
             api python /tmp/provision_member.py > "$issued_file"
           IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
           [[ "$member_token" =~ ^[^[:space:]]+$ ]]
