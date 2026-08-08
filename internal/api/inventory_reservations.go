@@ -92,7 +92,7 @@ func (value ReservationMutationResponse) validate() error {
 		}
 		return nil
 	}
-	if value.Conflict.State != "open" || value.Reservation.OpenConflictID == nil || *value.Reservation.OpenConflictID != value.Conflict.ConflictID || value.Conflict.LotID != value.Reservation.LotID || value.Conflict.ReservationID == nil || *value.Conflict.ReservationID != value.Reservation.ReservationID {
+	if value.Conflict.State != "open" || value.Reservation.OpenConflictID == nil || *value.Reservation.OpenConflictID != value.Conflict.ConflictID || value.Conflict.LotID != value.Reservation.LotID || value.Conflict.RoastUUID == nil || *value.Conflict.RoastUUID != value.Reservation.RoastUUID || value.Conflict.ReservationID == nil || *value.Conflict.ReservationID != value.Reservation.ReservationID {
 		return errors.New("inconsistent reservation conflict")
 	}
 	return nil
@@ -245,7 +245,7 @@ func (c *Client) ResolveInventoryConflict(ctx context.Context, rawConflictID str
 		return InventoryConflict{}, mutationUsage("invalid_resolution", "Unable to encode inventory conflict resolution")
 	}
 	var conflict InventoryConflict
-	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/conflicts/" + conflictID + "/resolve", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &conflict)
+	failure = c.doInventoryAdminJSON(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/conflicts/" + conflictID + "/resolve", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &conflict, true)
 	if failure != nil {
 		return InventoryConflict{}, failure
 	}

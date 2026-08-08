@@ -195,7 +195,7 @@ func TestInventoryModelsRejectNullForEveryRequiredNonNullField(t *testing.T) {
 	}{
 		{name: "summary nullable explicit null", payload: mutateInventoryJSONString(t, validSummaryJSON(), "origin", nil, false), target: &BeanLotSummary{}},
 		{name: "detail nullable explicit null", payload: mutateInventoryJSONString(t, validDetailJSON(), "producer", nil, false), target: &BeanLotDetail{}},
-		{name: "ledger nullable explicit null", payload: mutateInventoryJSONString(t, validLedgerJSON(), "reason", nil, false), target: &InventoryLedgerEntry{}},
+		{name: "ledger nullable explicit null", payload: mutateInventoryJSONString(t, validLedgerJSON(), "reference", nil, false), target: &InventoryLedgerEntry{}},
 		{name: "reservation nullable explicit null", payload: mutateInventoryJSONString(t, validReservationJSON(), "actual_grams", nil, false), target: &InventoryReservation{}},
 		{name: "conflict nullable explicit null", payload: mutateInventoryJSONString(t, validConflictJSON(), "resolved_at", nil, false), target: &InventoryConflict{}},
 	} {

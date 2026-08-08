@@ -82,6 +82,9 @@ func (c *Client) BeanLot(ctx context.Context, rawLotID string) (BeanLotDetail, *
 	}
 	var lot BeanLotDetail
 	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID, nil, true, &lot)
+	if failure == nil && lot.LotID != lotID {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 
@@ -96,6 +99,9 @@ func (c *Client) BeanLotLedger(ctx context.Context, rawLotID string, options Pag
 	}
 	var page InventoryLedgerEntryPage
 	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/ledger", query, true, &page)
+	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryLedgerEntry) string { return item.LotID }) {
+		return InventoryLedgerEntryPage{}, invalidServerResponse(http.StatusOK)
+	}
 	return page, failure
 }
 
@@ -120,6 +126,9 @@ func (c *Client) BeanLotReservations(ctx context.Context, rawLotID string, optio
 	}
 	var page InventoryReservationPage
 	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/reservations", query, true, &page)
+	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryReservation) string { return item.LotID }) {
+		return InventoryReservationPage{}, invalidServerResponse(http.StatusOK)
+	}
 	return page, failure
 }
 
@@ -144,6 +153,9 @@ func (c *Client) BeanLotConflicts(ctx context.Context, rawLotID string, options 
 	}
 	var page InventoryConflictPage
 	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/conflicts", query, true, &page)
+	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryConflict) string { return item.LotID }) {
+		return InventoryConflictPage{}, invalidServerResponse(http.StatusOK)
+	}
 	return page, failure
 }
 
@@ -164,15 +176,31 @@ func (c *Client) InventoryConflict(ctx context.Context, rawConflictID string) (I
 	}
 	var conflict InventoryConflict
 	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/conflicts/"+conflictID, nil, true, &conflict)
+	if failure == nil && conflict.ConflictID != conflictID {
+		return InventoryConflict{}, invalidServerResponse(http.StatusOK)
+	}
 	return conflict, failure
 }
 
-func (c *Client) doInventoryRead(ctx context.Context, path string, query url.Values, entityRoute bool, destination any) *output.Error {
-	failure := c.Do(ctx, Request{Method: http.MethodGet, Path: path, Query: query, ExpectedStatus: http.StatusOK}, destination)
+func (c *Client) doInventoryRead(ctx context.Context, path string, query url.Values, preserveEntityNotFound bool, destination any) *output.Error {
+	request := Request{Method: http.MethodGet, Path: path, Query: query, ExpectedStatus: http.StatusOK}
+	if strings.HasPrefix(path, inventoryAdminRoot) {
+		return c.doInventoryAdminJSON(ctx, request, destination, preserveEntityNotFound)
+	}
+	return c.Do(ctx, request, destination)
+}
+
+func (c *Client) doInventoryAdminJSON(ctx context.Context, request Request, destination any, preserveEntityNotFound bool) *output.Error {
+	return classifyInventoryAdminFailure(c.Do(ctx, request, destination), preserveEntityNotFound)
+}
+
+func classifyInventoryAdminFailure(failure *output.Error, preserveEntityNotFound bool) *output.Error {
 	if failure == nil || failure.HTTPStatus == nil || *failure.HTTPStatus != http.StatusNotFound {
 		return failure
 	}
-	if entityRoute && (failure.Code == "bean_lot_not_found" || failure.Code == "inventory_conflict_not_found") {
+	// The pinned server intentionally uses bean_lot_not_found for every
+	// tenant-scoped admin entity lookup, including conflicts and images.
+	if preserveEntityNotFound && failure.Code == "bean_lot_not_found" {
 		return failure
 	}
 	return &output.Error{
@@ -181,6 +209,15 @@ func (c *Client) doInventoryRead(ctx context.Context, path string, query url.Val
 		Message:    "The server does not provide the inventory administration API; upgrade Artisan Server",
 		HTTPStatus: statusPointer(http.StatusNotFound),
 	}
+}
+
+func allInventoryItemsMatchLot[T any](items []T, lotID string, itemLotID func(T) string) bool {
+	for _, item := range items {
+		if itemLotID(item) != lotID {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateLotListOptions validates local flags without making a request.

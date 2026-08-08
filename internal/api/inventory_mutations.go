@@ -323,7 +323,7 @@ func (c *Client) CreateBeanLotWithImages(ctx context.Context, manifest BeanLotCr
 		return BeanLotDetail{}, multipartPreparationFailure(err)
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated}, &lot)
+	failure = c.doInventoryAdminJSON(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated}, &lot, false)
 	return lot, failure
 }
 
@@ -340,7 +340,10 @@ func (c *Client) PatchBeanLot(ctx context.Context, rawLotID string, patch BeanLo
 		return BeanLotDetail{}, mutationUsage("invalid_patch", "Unable to encode bean lot update")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{Method: http.MethodPatch, Path: inventoryAdminRoot + "/bean-lots/" + lotID, Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot)
+	failure = c.doInventoryAdminJSON(ctx, Request{Method: http.MethodPatch, Path: inventoryAdminRoot + "/bean-lots/" + lotID, Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot, true)
+	if failure == nil && lot.LotID != lotID {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 
@@ -358,7 +361,10 @@ func (c *Client) AdjustBeanLot(ctx context.Context, rawLotID string, adjustment 
 		return BeanLotDetail{}, mutationUsage("invalid_adjustment", "Unable to encode inventory adjustment")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/adjustments", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot)
+	failure = c.doInventoryAdminJSON(ctx, Request{Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/adjustments", Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK}, &lot, true)
+	if failure == nil && lot.LotID != lotID {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 

@@ -189,10 +189,13 @@ func (c *Client) AddInventoryImages(ctx context.Context, rawLotID string, metada
 		return BeanLotDetail{}, multipartPreparationFailure(err)
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{
+	failure = c.doInventoryAdminJSON(ctx, Request{
 		Method: http.MethodPost, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/images",
 		Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK,
-	}, &lot)
+	}, &lot, true)
+	if failure == nil && lot.LotID != lotID {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 
@@ -214,10 +217,13 @@ func (c *Client) PatchInventoryImage(ctx context.Context, rawLotID, rawImageID s
 		return BeanLotDetail{}, mutationUsage("invalid_image_patch", "Unable to encode image metadata")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{
+	failure = c.doInventoryAdminJSON(ctx, Request{
 		Method: http.MethodPatch, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/images/" + imageID,
 		Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK,
-	}, &lot)
+	}, &lot, true)
+	if failure == nil && (lot.LotID != lotID || !patchedImageMatches(lot.Images, imageID, patch)) {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 
@@ -248,10 +254,13 @@ func (c *Client) ReorderInventoryImages(ctx context.Context, rawLotID string, ra
 		return BeanLotDetail{}, mutationUsage("invalid_image_order", "Unable to encode image order")
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{
+	failure = c.doInventoryAdminJSON(ctx, Request{
 		Method: http.MethodPut, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/images/order",
 		Body: body, IdempotencyKey: key, ExpectedStatus: http.StatusOK,
-	}, &lot)
+	}, &lot, true)
+	if failure == nil && (lot.LotID != lotID || !imageOrderMatches(lot.Images, order.ImageIDs)) {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
 }
 
@@ -267,11 +276,70 @@ func (c *Client) DeleteInventoryImage(ctx context.Context, rawLotID, rawImageID,
 		return BeanLotDetail{}, failure
 	}
 	var lot BeanLotDetail
-	failure = c.Do(ctx, Request{
+	failure = c.doInventoryAdminJSON(ctx, Request{
 		Method: http.MethodDelete, Path: inventoryAdminRoot + "/bean-lots/" + lotID + "/images/" + imageID,
 		Body: emptyRequestBody, IdempotencyKey: key, ExpectedStatus: http.StatusOK,
-	}, &lot)
+	}, &lot, true)
+	if failure == nil && (lot.LotID != lotID || inventoryImagePresent(lot.Images, imageID)) {
+		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
+	}
 	return lot, failure
+}
+
+func patchedImageMatches(images []InventoryImage, imageID string, patch InventoryImagePatch) bool {
+	for _, image := range images {
+		if image.ImageID != imageID {
+			continue
+		}
+		for name, expected := range patch.fields {
+			switch name {
+			case "caption":
+				if !optionalStringMatchesValue(image.Caption, expected) {
+					return false
+				}
+			case "alt_text":
+				if !optionalStringMatchesValue(image.AltText, expected) {
+					return false
+				}
+			case "is_cover":
+				cover, ok := expected.(bool)
+				if !ok || image.IsCover != cover {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func optionalStringMatchesValue(actual *string, expected any) bool {
+	if expected == nil {
+		return actual == nil
+	}
+	text, ok := expected.(string)
+	return ok && actual != nil && *actual == text
+}
+
+func imageOrderMatches(images []InventoryImage, imageIDs []string) bool {
+	if len(images) != len(imageIDs) {
+		return false
+	}
+	for index := range images {
+		if images[index].ImageID != imageIDs[index] || images[index].Position != int64(index) {
+			return false
+		}
+	}
+	return true
+}
+
+func inventoryImagePresent(images []InventoryImage, imageID string) bool {
+	for _, image := range images {
+		if image.ImageID == imageID {
+			return true
+		}
+	}
+	return false
 }
 
 func emptyRequestBody() (io.ReadCloser, string, error) {
@@ -392,7 +460,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 			if readErr != nil || oversized || status < 400 || status >= 600 {
 				return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
-			return result, decodeAPIError(status, body, c.token, c.serverURL.String())
+			return result, classifyInventoryAdminFailure(decodeAPIError(status, body, c.token, c.serverURL.String()), true)
 		}
 		if response.Header.Get("Content-Type") != "image/webp" || response.ContentLength > maxImageDownloadBytes {
 			_ = response.Body.Close()

@@ -74,7 +74,17 @@ func TestInventoryImageMutationsUseExactAdminContracts(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		requests = append(requests, recorded{method: r.Method, path: r.URL.Path, key: r.Header.Get("Idempotency-Key"), contentType: r.Header.Get("Content-Type"), body: body})
-		_, _ = io.WriteString(w, mutationLotJSON(0))
+		switch r.Method {
+		case http.MethodPatch:
+			image := imageJSONFor(mutationLotID, commandAPIImageID, 0, false, `null`, `"Updated alt"`)
+			_, _ = io.WriteString(w, detailWithImages(image))
+		case http.MethodPut:
+			firstImage := imageJSONFor(mutationLotID, commandAPIImageID, 0, false, `null`, `null`)
+			secondImage := imageJSONFor(mutationLotID, inventoryEntryID, 1, false, `null`, `null`)
+			_, _ = io.WriteString(w, detailWithImages(firstImage, secondImage))
+		default:
+			_, _ = io.WriteString(w, mutationLotJSON(0))
+		}
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "secret", time.Second)

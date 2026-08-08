@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 const maxInventoryGrams int64 = 2_147_483_647
@@ -347,6 +348,9 @@ func (value *InventoryConflictPage) UnmarshalJSON(data []byte) error {
 }
 
 func decodeRequiredObject(data []byte, destination any, nullable []string, required ...string) error {
+	if !utf8.Valid(data) {
+		return errors.New("invalid UTF-8 in inventory object")
+	}
 	var fields map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&fields); err != nil || fields == nil {
@@ -390,7 +394,7 @@ func rejectNullArrayElements(data []byte, names ...string) error {
 }
 
 func (value InventoryImage) validate(expectedLot string) error {
-	if !validUUID(value.ImageID) || value.Position < 0 || value.Position >= 8 || !between(value.DisplayWidth, 1, 12000) || !between(value.DisplayHeight, 1, 12000) || !between(value.ThumbnailWidth, 1, 12000) || !between(value.ThumbnailHeight, 1, 12000) {
+	if !validUUID(value.ImageID) || value.Position < 0 || value.Position >= MaxInventoryImages || !between(value.DisplayWidth, 1, 12000) || !between(value.DisplayHeight, 1, 12000) || !between(value.ThumbnailWidth, 1, 12000) || !between(value.ThumbnailHeight, 1, 12000) || !validResponseOptionalText(value.Caption, 500, 2000, false) || !validResponseOptionalText(value.AltText, 300, 1200, false) {
 		return errors.New("invalid inventory image")
 	}
 	basePattern := regexp.MustCompile(`^/api/v1/inventory/admin/bean-lots/([0-9a-f]{32})/images/([0-9a-f]{32})/(display|thumbnail)$`)
@@ -431,7 +435,8 @@ func (value DesktopBeanLotView) validate() error {
 }
 
 func (value BeanLotSummary) validate() error {
-	if !validUUID(value.LotID) || !oneOf(value.State, "active", "archived") || !validOptionalEnum(value.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") || !validGrams(value.OnHandGrams) || !between(value.ReservedGrams, 0, maxInventoryGrams) || !validGrams(value.AvailableGrams) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams || !between(value.UnresolvedConflictCount, 0, maxInventoryGrams) || !validTimestamp(value.UpdatedAt) {
+	name, nameOK := normalizeRequestText(value.Name, 200, 800, true, false)
+	if !nameOK || name != value.Name || !validResponseOptionalText(value.Origin, 100, 400, false) || !validUUID(value.LotID) || !oneOf(value.State, "active", "archived") || !validOptionalEnum(value.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") || !validGrams(value.OnHandGrams) || !between(value.ReservedGrams, 0, maxInventoryGrams) || !validGrams(value.AvailableGrams) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams || !between(value.UnresolvedConflictCount, 0, maxInventoryGrams) || !validTimestamp(value.UpdatedAt) {
 		return errors.New("invalid bean lot summary")
 	}
 	if value.CropYear != nil && !between(*value.CropYear, 1000, 9999) {
@@ -448,6 +453,9 @@ func (value BeanLotSummary) validate() error {
 func (value BeanLotDetail) validate() error {
 	if err := value.BeanLotSummary.validate(); err != nil {
 		return err
+	}
+	if !validResponseOptionalText(value.Producer, 200, 800, false) || !validResponseOptionalText(value.Supplier, 200, 800, false) || !validResponseOptionalText(value.ExternalReference, 200, 800, false) || !validResponseOptionalText(value.ProcessingDetail, 200, 800, false) || !validResponseOptionalText(value.Notes, 10000, 40000, true) {
+		return errors.New("invalid bean lot text")
 	}
 	if value.ReceivedDate != nil && !validDate(*value.ReceivedDate) {
 		return errors.New("invalid received date")
@@ -467,20 +475,32 @@ func (value BeanLotDetail) validate() error {
 	if value.AltitudeMaxMetres != nil && !between(*value.AltitudeMaxMetres, 0, 9000) {
 		return errors.New("invalid altitude")
 	}
-	if value.Varietals == nil || value.Images == nil || !validTimestamp(value.CreatedAt) || (value.ArchivedAt != nil && !validTimestamp(*value.ArchivedAt)) {
+	if value.AltitudeMinMetres != nil && value.AltitudeMaxMetres != nil && *value.AltitudeMinMetres > *value.AltitudeMaxMetres {
+		return errors.New("invalid altitude range")
+	}
+	if value.ProcessingMethod != nil && *value.ProcessingMethod == "other" && value.ProcessingDetail == nil {
+		return errors.New("missing processing detail")
+	}
+	if value.Varietals == nil || len(value.Varietals) > 16 || value.Images == nil || len(value.Images) > MaxInventoryImages || !validTimestamp(value.CreatedAt) || !timestampNotBefore(value.UpdatedAt, value.CreatedAt) || (value.ArchivedAt != nil && (!validTimestamp(*value.ArchivedAt) || !timestampNotBefore(*value.ArchivedAt, value.CreatedAt) || !timestampNotBefore(value.UpdatedAt, *value.ArchivedAt))) {
 		return errors.New("invalid bean lot detail")
 	}
-	positions := make(map[int64]struct{}, len(value.Images))
+	if (value.State == "active") != (value.ArchivedAt == nil) {
+		return errors.New("incoherent bean lot archive state")
+	}
+	if err := validateResponseVarietals(value.Varietals); err != nil {
+		return err
+	}
+	imageIDs := make(map[string]struct{}, len(value.Images))
 	var detailCover *InventoryImage
 	for index := range value.Images {
 		image := &value.Images[index]
-		if err := image.validate(value.LotID); err != nil {
-			return err
+		if err := image.validate(value.LotID); err != nil || image.Position != int64(index) {
+			return errors.New("invalid ordered inventory image")
 		}
-		if _, exists := positions[image.Position]; exists {
-			return errors.New("duplicate image position")
+		if _, exists := imageIDs[image.ImageID]; exists {
+			return errors.New("duplicate image identifier")
 		}
-		positions[image.Position] = struct{}{}
+		imageIDs[image.ImageID] = struct{}{}
 		if image.IsCover {
 			if detailCover != nil {
 				return errors.New("multiple cover images")
@@ -499,8 +519,31 @@ func (value BeanLotDetail) validate() error {
 }
 
 func (value InventoryLedgerEntry) validate() error {
-	if !validUUID(value.EntryID) || !validUUID(value.LotID) || !validOptionalUUID(value.RoastUUID) || !validOptionalUUID(value.ReservationID) || !oneOf(value.Operation, "opening_balance", "manual_adjustment", "reservation", "reservation_release", "consumption") || !oneOf(value.ActorKind, "browser", "desktop") || !validGrams(value.OnHandDelta) || !validGrams(value.ReservedDelta) || !validGrams(value.ResultingOnHandGrams) || !between(value.ResultingReservedGrams, 0, maxInventoryGrams) || !validGrams(value.ResultingAvailableGrams) || value.ResultingAvailableGrams != value.ResultingOnHandGrams-value.ResultingReservedGrams || !validTimestamp(value.OccurredAt) || !validTimestamp(value.CreatedAt) {
+	if !validUUID(value.EntryID) || !validUUID(value.LotID) || !validOptionalUUID(value.RoastUUID) || !validOptionalUUID(value.ReservationID) || !oneOf(value.Operation, "opening_balance", "manual_adjustment", "reservation", "reservation_release", "consumption") || !oneOf(value.ActorKind, "browser", "desktop") || !validGrams(value.OnHandDelta) || !validGrams(value.ReservedDelta) || !validGrams(value.ResultingOnHandGrams) || !between(value.ResultingReservedGrams, 0, maxInventoryGrams) || !validGrams(value.ResultingAvailableGrams) || value.ResultingAvailableGrams != value.ResultingOnHandGrams-value.ResultingReservedGrams || !validTimestamp(value.OccurredAt) || !validTimestamp(value.CreatedAt) || !validResponseOptionalText(value.Reason, 2000, 8000, true) || !validResponseOptionalText(value.Reference, 200, 800, false) {
 		return errors.New("invalid inventory ledger entry")
+	}
+	hasTargets := value.RoastUUID != nil && value.ReservationID != nil
+	switch value.Operation {
+	case "opening_balance":
+		if value.OnHandDelta <= 0 || value.ReservedDelta != 0 || value.Reason == nil {
+			return errors.New("invalid opening balance entry")
+		}
+	case "manual_adjustment":
+		if value.OnHandDelta == 0 || value.ReservedDelta != 0 || value.Reason == nil {
+			return errors.New("invalid manual adjustment entry")
+		}
+	case "reservation":
+		if value.OnHandDelta != 0 || value.ReservedDelta <= 0 || !hasTargets {
+			return errors.New("invalid reservation entry")
+		}
+	case "reservation_release":
+		if value.OnHandDelta != 0 || value.ReservedDelta >= 0 || !hasTargets {
+			return errors.New("invalid reservation release entry")
+		}
+	case "consumption":
+		if value.OnHandDelta >= 0 || value.ReservedDelta >= 0 || !hasTargets {
+			return errors.New("invalid consumption entry")
+		}
 	}
 	return nil
 }
@@ -522,6 +565,9 @@ func (value InventoryReservation) validate() error {
 		if value.ActualGrams != nil || value.CompletedAt == nil {
 			return errors.New("invalid released reservation")
 		}
+	}
+	if !timestampNotBefore(value.UpdatedAt, value.CreatedAt) {
+		return errors.New("reservation updated before creation")
 	}
 	if value.CompletedAt != nil && !timestampNotBefore(*value.CompletedAt, value.ReservedAt) {
 		return errors.New("reservation completed before it was reserved")
@@ -552,6 +598,29 @@ func (value InventoryConflict) validate() error {
 func validatePage[T any](items []T, next *string) error {
 	if items == nil || (next != nil && (*next == "" || len(*next) > 4096)) {
 		return errors.New("invalid inventory page")
+	}
+	return nil
+}
+
+func validResponseOptionalText(value *string, codePoints, bytesLimit int, multiline bool) bool {
+	if value == nil {
+		return true
+	}
+	normalized, valid := normalizeRequestText(*value, codePoints, bytesLimit, false, multiline)
+	return valid && normalized != "" && normalized == *value
+}
+
+func validateResponseVarietals(values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized, valid := normalizeRequestText(value, 100, 400, true, false)
+		if !valid || normalized != value {
+			return errors.New("invalid bean lot varietal")
+		}
+		if _, exists := seen[value]; exists {
+			return errors.New("duplicate bean lot varietal")
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }

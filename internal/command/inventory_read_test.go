@@ -45,7 +45,7 @@ func commandInventorySummaryFull() string {
 }
 
 func commandLedgerJSON() string {
-	return `{"entry_id":"` + commandEntryID + `","operation":"reservation","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","reservation_id":"` + commandReservationID + `","on_hand_delta":-250,"reserved_delta":1250,"resulting_on_hand_grams":5000,"resulting_reserved_grams":1250,"resulting_available_grams":3750,"reason":"planned","reference":null,"actor_kind":"desktop","occurred_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `"}`
+	return `{"entry_id":"` + commandEntryID + `","operation":"reservation","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","reservation_id":"` + commandReservationID + `","on_hand_delta":0,"reserved_delta":1250,"resulting_on_hand_grams":5000,"resulting_reserved_grams":1250,"resulting_available_grams":3750,"reason":"planned","reference":null,"actor_kind":"desktop","occurred_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `"}`
 }
 
 func commandReservationJSON() string {
@@ -503,7 +503,7 @@ func inventoryExpectedLedger() map[string]any {
 	return map[string]any{
 		"entry_id": commandEntryID, "operation": "reservation", "lot_id": commandLotID,
 		"roast_uuid": commandRoastID, "reservation_id": commandReservationID,
-		"on_hand_delta": json.Number("-250"), "reserved_delta": json.Number("1250"),
+		"on_hand_delta": json.Number("0"), "reserved_delta": json.Number("1250"),
 		"resulting_on_hand_grams": json.Number("5000"), "resulting_reserved_grams": json.Number("1250"),
 		"resulting_available_grams": json.Number("3750"), "reason": "planned", "reference": nil,
 		"actor_kind": "desktop", "occurred_at": commandTimestamp, "created_at": commandTimestamp,
@@ -627,4 +627,36 @@ func commandLotDetailFullJSON() string {
 
 func commandLotDetailJSON() string {
 	return strings.TrimSuffix(commandInventorySummary(commandLotID, "Lot", 5000), "}") + `,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/reservations"}}`
+}
+func TestRouteScopedHostileProjectionIsNeverPrinted(t *testing.T) {
+	const hostileName = "hostile-valid-projection"
+	const hostileLotID = "99999999999949998999999999999999"
+	response := strings.ReplaceAll(commandLotDetailFullJSON(), commandLotID, hostileLotID)
+	response = strings.Replace(response, `"name":"Lot"`, `"name":"`+hostileName+`"`, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	for _, machine := range []bool{false, true} {
+		name := "human"
+		args := []string{"inventory", "lot", "show", commandLotID}
+		if machine {
+			name = "json"
+			args = append([]string{"--json"}, args...)
+		}
+		t.Run(name, func(t *testing.T) {
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+			if result.code != 9 || strings.Contains(result.stdout+result.stderr, hostileName) || strings.Contains(result.stdout+result.stderr, hostileLotID) {
+				t.Fatalf("result = %#v", result)
+			}
+			if machine {
+				if result.stderr != "" || !strings.Contains(result.stdout, `"code":"invalid_server_response"`) {
+					t.Fatalf("JSON result = %#v", result)
+				}
+			} else if result.stdout != "" || result.stderr != "The server returned an invalid response\n" {
+				t.Fatalf("human result = %#v", result)
+			}
+		})
+	}
 }

@@ -170,7 +170,23 @@ func TestInventoryImageUpdateReorderAndDeleteContracts(t *testing.T) {
 		paths = append(paths, r.URL.Path)
 		bodies = append(bodies, string(body))
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
-		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+		response := commandLotDetailFullJSON()
+		switch r.Method {
+		case http.MethodPatch:
+			updated := strings.Replace(commandInventoryImageJSON(), `"caption":"front","alt_text":null`, `"caption":null,"alt_text":"New alt"`, 1)
+			updated = strings.Replace(updated, `"is_cover":true`, `"is_cover":false`, 1)
+			response = strings.Replace(response, `"cover_image":`+commandInventoryImageJSON(), `"cover_image":null`, 1)
+			response = strings.Replace(response, commandInventoryImageJSON(), updated, 1)
+		case http.MethodPut:
+			second := strings.ReplaceAll(commandInventoryImageJSON(), commandImageID, commandEntryID)
+			second = strings.Replace(second, `"position":0`, `"position":1`, 1)
+			second = strings.Replace(second, `"is_cover":true`, `"is_cover":false`, 1)
+			response = strings.Replace(response, `"images":[`+commandInventoryImageJSON()+`]`, `"images":[`+commandInventoryImageJSON()+`,`+second+`]`, 1)
+		case http.MethodDelete:
+			response = strings.Replace(response, `"cover_image":`+commandInventoryImageJSON(), `"cover_image":null`, 1)
+			response = strings.Replace(response, `"images":[`+commandInventoryImageJSON()+`]`, `"images":[]`, 1)
+		}
+		_, _ = fmt.Fprint(w, response)
 	}))
 	defer server.Close()
 	runtime := inventoryRuntime(t, server.URL)
