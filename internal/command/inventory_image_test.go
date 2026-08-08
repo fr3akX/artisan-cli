@@ -344,6 +344,67 @@ func TestCobraImageDownloadAcceptsDashPrefixedDestinationBeforeLaterFlags(t *tes
 	}
 }
 
+func TestCobraImageDownloadHelpAfterIDsDoesNotExecute(t *testing.T) {
+	dir := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = io.WriteString(w, "must-not-download")
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "image", "download", commandLotID, commandImageID, "--help")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(result.stdout, "Download an inventory lot image") || !strings.Contains(result.stdout, "LOT_ID IMAGE_ID DESTINATION") {
+		t.Fatalf("stdout = %q", result.stdout)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+	if _, err := os.Stat("--help"); !os.IsNotExist(err) {
+		t.Fatalf("literal help destination exists or stat failed: %v", err)
+	}
+}
+
+func TestCobraImageDownloadForceWithoutDestinationDoesNotExecute(t *testing.T) {
+	dir := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = io.WriteString(w, "must-not-download")
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "image", "download", commandLotID, commandImageID, "--force")
+	if result.code != usageExitCode || result.stdout != "" || result.stderr != "inventory image download requires LOT_ID IMAGE_ID DESTINATION\n" {
+		t.Fatalf("result = %#v", result)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+	if _, err := os.Stat("--force"); !os.IsNotExist(err) {
+		t.Fatalf("literal force destination exists or stat failed: %v", err)
+	}
+}
+
 func TestCobraImageHelpDocumentsEveryLeaf(t *testing.T) {
 	tests := []struct {
 		name string
