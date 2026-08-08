@@ -139,7 +139,7 @@ func TestCobraInventoryLegacySingleDashFlagsAreNormalized(t *testing.T) {
 	}
 }
 
-func TestCobraInventoryRawPassthroughArgumentsAreNotNormalized(t *testing.T) {
+func TestCobraInventoryWriteNormalizationPreservesDashPrefixedValuesAndFiles(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -147,13 +147,18 @@ func TestCobraInventoryRawPassthroughArgumentsAreNotNormalized(t *testing.T) {
 	}{
 		{
 			name: "lot create dash-prefixed scalar",
-			args: []string{"-json", "inventory", "lot", "create", "--name", "-state"},
-			want: []string{"--json", "inventory", "lot", "create", "--name", "-state"},
+			args: []string{"-json", "inventory", "lot", "create", "-name", "-state", "-varietal", "SL28"},
+			want: []string{"--json", "inventory", "lot", "create", "--name", "-state", "--varietal", "SL28"},
 		},
 		{
-			name: "image dash-prefixed path",
-			args: []string{"-server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state"},
-			want: []string{"--server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state"},
+			name: "image dash-prefixed path and later legacy flag",
+			args: []string{"-server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state", "-caption", "0=Front"},
+			want: []string{"--server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state", "--caption", "0=Front"},
+		},
+		{
+			name: "explicit false boolean",
+			args: []string{"inventory", "image", "update", commandLotID, commandImageID, "-cover=false"},
+			want: []string{"inventory", "image", "update", commandLotID, commandImageID, "--cover=false"},
 		},
 	}
 	for _, test := range tests {

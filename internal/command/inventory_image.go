@@ -14,48 +14,6 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
-const imageAddUsage = `Usage: artisan inventory image add [OPTIONS] LOT_ID FILE...
-
-Per-image metadata uses an explicit zero-based file INDEX:
-  --caption INDEX=TEXT    caption for one file (repeatable)
-  --alt-text INDEX=TEXT   alt text for one file (repeatable)
-  --cover INDEX           mark one file as the cover
-`
-
-const lotCreateImageUsage = `Usage: artisan inventory lot create [OPTIONS]
-
-Lot fields:
-  --name TEXT                         lot name (required unless --from-json)
-  --origin TEXT                       origin
-  --producer TEXT                     producer
-  --supplier TEXT                     supplier
-  --external-reference TEXT           external reference
-  --received-date YYYY-MM-DD           received date
-  --crop-year YEAR                    crop year
-  --varietal TEXT                     varietal (repeatable)
-  --sca-score SCORE                   SCA score
-  --processing-method TEXT            processing method
-  --processing-detail TEXT            processing detail
-  --altitude-min-metres METRES        minimum altitude
-  --altitude-max-metres METRES        maximum altitude
-  --notes TEXT                        notes
-
-Opening inventory:
-  --opening-grams GRAMS               opening grams
-  --opening-reason TEXT               opening reason
-  --opening-reference TEXT            opening reference
-
-Input and replay:
-  --from-json FILE|-                  strict request JSON (lot fields and image metadata)
-  --idempotency-key KEY               advanced idempotency key
-
-Images are declared in order with repeatable flags. Metadata uses an explicit zero-based declaration INDEX:
-  --image FILE                        JPEG/PNG image file (repeatable, maximum eight)
-  --image-caption INDEX=TEXT          caption for one image (repeatable)
-  --image-alt-text INDEX=TEXT         alt text for one image (repeatable)
-  --image-cover INDEX                 mark one image as the cover
-`
-
 type indexedImageText struct {
 	index int
 	text  string
@@ -151,23 +109,6 @@ func imageManifestFromFlags(count int, metadata imageMetadataFlags) ([]api.Image
 func runInventoryImage(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
 	if len(args) == 0 {
 		return inventoryUsageFailure(runtime, jsonMode, "An inventory image command is required")
-	}
-	if (args[0] == "--help" || args[0] == "-h") && len(args) == 1 {
-		return writeCommandHelp(runtime, jsonMode, "Usage: artisan inventory image add|update|reorder|delete|download\n")
-	}
-	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
-		switch args[0] {
-		case "add":
-			return writeCommandHelp(runtime, jsonMode, imageAddUsage)
-		case "update":
-			return writeCommandHelp(runtime, jsonMode, "Usage: artisan inventory image update [OPTIONS] LOT_ID IMAGE_ID\n")
-		case "reorder":
-			return writeCommandHelp(runtime, jsonMode, "Usage: artisan inventory image reorder [OPTIONS] LOT_ID IMAGE_ID...\n")
-		case "delete":
-			return writeCommandHelp(runtime, jsonMode, "Usage: artisan inventory image delete [OPTIONS] LOT_ID IMAGE_ID\n")
-		case "download":
-			return writeCommandHelp(runtime, jsonMode, "Usage: artisan inventory image download [--variant display|thumbnail] [--force] LOT_ID IMAGE_ID DESTINATION\n")
-		}
 	}
 	switch args[0] {
 	case "add":

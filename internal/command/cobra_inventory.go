@@ -29,10 +29,10 @@ func newInventoryCommand(ctx context.Context, state *cobraState) *cobra.Command 
 		newInventoryLotHistoryCommand(ctx, state, "ledger"),
 		newInventoryLotHistoryCommand(ctx, state, "reservations"),
 		newInventoryLotHistoryCommand(ctx, state, "conflicts"),
-		newInventoryLotPassthroughCommand(ctx, state, "create"),
-		newInventoryLotPassthroughCommand(ctx, state, "update"),
-		newInventoryLotPassthroughCommand(ctx, state, "archive"),
-		newInventoryLotPassthroughCommand(ctx, state, "restore"),
+		newInventoryLotCreateCommand(ctx, state),
+		newInventoryLotUpdateCommand(ctx, state),
+		newInventoryLotStateCommand(ctx, state, "archive"),
+		newInventoryLotStateCommand(ctx, state, "restore"),
 	)
 	reservation.AddCommand(
 		newInventoryReservationCreateCommand(ctx, state),
@@ -44,7 +44,7 @@ func newInventoryCommand(ctx context.Context, state *cobraState) *cobra.Command 
 		newInventoryConflictShowCommand(ctx, state),
 		newInventoryConflictResolveCommand(ctx, state),
 	)
-	inventory.AddCommand(lot, newInventoryAdjustCommand(ctx, state), reservation, conflict, newInventoryImagePassthroughCommand(ctx, state))
+	inventory.AddCommand(lot, newInventoryAdjustCommand(ctx, state), reservation, conflict, newInventoryImageCommand(ctx, state))
 	return inventory
 }
 
@@ -223,28 +223,6 @@ func newInventoryConflictResolveCommand(ctx context.Context, state *cobraState) 
 	return cmd
 }
 
-func newInventoryLotPassthroughCommand(ctx context.Context, state *cobraState, operation string) *cobra.Command {
-	return &cobra.Command{
-		Use:                operation,
-		Short:              "Manage an inventory lot",
-		DisableFlagParsing: true,
-		Run: func(_ *cobra.Command, args []string) {
-			setCommandExit(state, runInventoryLot(ctx, append([]string{operation}, args...), state.runtime, state.jsonMode, state.serverOverride, state.timeout))
-		},
-	}
-}
-
-func newInventoryImagePassthroughCommand(ctx context.Context, state *cobraState) *cobra.Command {
-	return &cobra.Command{
-		Use:                "image",
-		Short:              "Manage inventory lot images",
-		DisableFlagParsing: true,
-		Run: func(_ *cobra.Command, args []string) {
-			setCommandExit(state, runInventoryImage(ctx, args, state.runtime, state.jsonMode, state.serverOverride, state.timeout))
-		},
-	}
-}
-
 func inventoryExactArgs(count int, missing, extra string) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
 		if len(args) == count {
@@ -280,9 +258,9 @@ func knownInventoryCommandPath(args []string) string {
 		return "inventory"
 	}
 	switch group {
-	case "adjust", "image":
+	case "adjust":
 		return "inventory " + group
-	case "lot", "reservation", "conflict":
+	case "lot", "reservation", "conflict", "image":
 		leaf, _, ok := nextCommandToken(args, groupIndex+1)
 		if ok && inventoryGroupHasLeaf(group, leaf) {
 			return "inventory " + group + " " + leaf
@@ -310,6 +288,11 @@ func inventoryGroupHasLeaf(group, leaf string) bool {
 		case "list", "show", "resolve":
 			return true
 		}
+	case "image":
+		switch leaf {
+		case "add", "update", "reorder", "delete", "download":
+			return true
+		}
 	}
 	return false
 }
@@ -326,6 +309,8 @@ func inventoryCobraParseFailureMessage(path string) string {
 		return "inventory lot show requires one LOT_ID"
 	case "inventory lot ledger", "inventory lot reservations", "inventory lot conflicts":
 		return "Invalid " + path + " option"
+	case "inventory lot create", "inventory lot update", "inventory lot archive", "inventory lot restore":
+		return "Invalid " + path + " option"
 	case "inventory adjust":
 		return "Invalid inventory adjust option"
 	case "inventory reservation":
@@ -338,6 +323,18 @@ func inventoryCobraParseFailureMessage(path string) string {
 		return "Invalid " + path + " option"
 	case "inventory conflict show":
 		return "inventory conflict show requires one CONFLICT_ID"
+	case "inventory image":
+		return "Unknown inventory image command"
+	case "inventory image add":
+		return "Invalid inventory image add option; use image add [OPTIONS] LOT_ID FILE..."
+	case "inventory image update":
+		return "Invalid inventory image update option"
+	case "inventory image reorder":
+		return "inventory image reorder requires LOT_ID and the complete IMAGE_ID list"
+	case "inventory image delete":
+		return "inventory image delete requires LOT_ID and IMAGE_ID"
+	case "inventory image download":
+		return "inventory image download requires LOT_ID IMAGE_ID DESTINATION"
 	}
 	return ""
 }

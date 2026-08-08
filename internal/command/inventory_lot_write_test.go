@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-func TestInventoryLotCreateSendsManifestWithEveryFlagAndNoPrompt(t *testing.T) {
+func TestCobraLotCreateRepeatedVarietalsPreserveOrder(t *testing.T) {
 	var manifest map[string]any
 	var key string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +62,7 @@ func TestInventoryLotCreateSendsManifestWithEveryFlagAndNoPrompt(t *testing.T) {
 	}
 }
 
-func TestInventoryLotUpdateSupportsNullableClearsAndStateCommandsAreExact(t *testing.T) {
+func TestCobraLotUpdateRepeatedClearsAfterPositionalAndStateCommandsAreExact(t *testing.T) {
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

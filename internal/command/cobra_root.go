@@ -39,11 +39,8 @@ func setCommandExit(state *cobraState, code int) {
 
 func normalizeLegacySingleDashArgs(args []string) []string {
 	result := append([]string(nil), args...)
-	rawPassthrough := inventoryRawPassthroughIndex(result)
+	path := knownCommandPath(result)
 	for i := 0; i < len(result); i++ {
-		if rawPassthrough >= 0 && i >= rawPassthrough {
-			break
-		}
 		arg := result[i]
 		if arg == "--" {
 			break
@@ -53,41 +50,14 @@ func normalizeLegacySingleDashArgs(args []string) []string {
 		}
 		nameValue := strings.TrimLeft(arg, "-")
 		name, _, hasValue := strings.Cut(nameValue, "=")
-		if !strings.HasPrefix(arg, "--") && isKnownLegacySingleDashFlag(name) {
+		if !strings.HasPrefix(arg, "--") && isKnownLegacySingleDashFlagForPath(name, path) {
 			result[i] = "-" + arg
 		}
-		if cobraFlagConsumesValue(name) && !hasValue && i+1 < len(result) {
+		if cobraFlagConsumesValueForPath(name, path) && !hasValue && i+1 < len(result) {
 			i++
 		}
 	}
 	return result
-}
-
-func inventoryRawPassthroughIndex(args []string) int {
-	command, commandIndex, ok := nextCommandToken(args, 0)
-	if !ok || command != "inventory" {
-		return -1
-	}
-	group, groupIndex, ok := nextCommandToken(args, commandIndex+1)
-	if !ok {
-		return -1
-	}
-	if group == "image" {
-		return groupIndex
-	}
-	if group != "lot" {
-		return -1
-	}
-	operation, operationIndex, ok := nextCommandToken(args, groupIndex+1)
-	if !ok {
-		return -1
-	}
-	switch operation {
-	case "create", "update", "archive", "restore":
-		return operationIndex
-	default:
-		return -1
-	}
 }
 
 func nextCommandToken(args []string, start int) (string, int, bool) {
@@ -122,17 +92,73 @@ func isCobraGlobalFlag(name string) bool {
 	}
 }
 
+func isKnownLegacySingleDashFlagForPath(name, path string) bool {
+	if isCobraGlobalFlag(name) {
+		return true
+	}
+	if strings.HasPrefix(path, "inventory lot create") {
+		return cobraLotFieldFlag(name) || stringIn(name, "opening-grams", "opening-reason", "opening-reference", "from-json", "idempotency-key", "image", "image-caption", "image-alt-text", "image-cover")
+	}
+	if strings.HasPrefix(path, "inventory lot update") {
+		return cobraLotFieldFlag(name) || stringIn(name, "clear", "from-json", "idempotency-key")
+	}
+	if path == "inventory lot archive" {
+		return stringIn(name, "yes", "idempotency-key")
+	}
+	if path == "inventory lot restore" || path == "inventory image reorder" {
+		return name == "idempotency-key"
+	}
+	switch path {
+	case "inventory image add":
+		return stringIn(name, "caption", "alt-text", "cover", "idempotency-key")
+	case "inventory image update":
+		return stringIn(name, "caption", "alt-text", "clear-caption", "clear-alt-text", "cover", "idempotency-key")
+	case "inventory image delete":
+		return stringIn(name, "yes", "idempotency-key")
+	case "inventory image download":
+		return stringIn(name, "variant", "force")
+	}
+	return isKnownLegacySingleDashFlag(name)
+}
+
 func isKnownLegacySingleDashFlag(name string) bool {
-	switch name {
-	case "json", "server", "timeout", "directory", "force", "token-stdin",
+	return stringIn(name,
+		"json", "server", "timeout", "directory", "force", "token-stdin",
 		"limit", "cursor", "all", "q", "state", "availability", "conflict", "roast-uuid",
 		"grams", "reason", "reference", "occurred-at", "yes", "idempotency-key",
 		"client-reservation-uuid", "client-instance-uuid", "lot-id", "planned-grams",
-		"actual-grams", "lot", "note":
-		return true
-	default:
+		"actual-grams", "lot", "note",
+	)
+}
+
+func cobraLotFieldFlag(name string) bool {
+	return stringIn(name,
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
+	)
+}
+
+func stringIn(value string, values ...string) bool {
+	for _, candidate := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func cobraFlagConsumesValueForPath(name, path string) bool {
+	if name == "cover" && path == "inventory image update" {
 		return false
 	}
+	if isKnownLegacySingleDashFlagForPath(name, path) {
+		switch name {
+		case "json", "force", "token-stdin", "all", "yes", "clear-caption", "clear-alt-text":
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func canonicalLegacyArgs(cmd *cobra.Command, positionals []string) []string {
@@ -410,7 +436,11 @@ func cobraFlagConsumesValue(name string) bool {
 	switch name {
 	case "server", "timeout", "directory", "limit", "cursor", "q", "state", "availability", "conflict", "roast-uuid",
 		"grams", "reason", "reference", "occurred-at", "idempotency-key", "client-reservation-uuid",
-		"client-instance-uuid", "lot-id", "planned-grams", "actual-grams", "lot", "note":
+		"client-instance-uuid", "lot-id", "planned-grams", "actual-grams", "lot", "note",
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
+		"opening-grams", "opening-reason", "opening-reference", "from-json", "image", "image-caption", "image-alt-text",
+		"image-cover", "clear", "caption", "alt-text", "variant":
 		return true
 	default:
 		return false

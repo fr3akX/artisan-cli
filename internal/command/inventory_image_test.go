@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-func TestInventoryImageAddUsesIndexedMetadataAndOrderedPositionalFiles(t *testing.T) {
+func TestCobraImageAddRepeatedMetadataAfterPositionalsPreservesAssociations(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "front.jpg")
 	second := filepath.Join(dir, "side.png")
@@ -64,9 +64,9 @@ func TestInventoryImageAddUsesIndexedMetadataAndOrderedPositionalFiles(t *testin
 
 	runtime := inventoryRuntime(t, server.URL)
 	runtime.IsTerminal = func(int) bool { t.Fatal("image add prompted"); return false }
-	result := runAuthCommand(t, runtime, "inventory", "image", "add",
-		"--caption", "0= Front ", "--alt-text", "0= Front of bag ", "--cover", "0",
-		"--caption", "1=Side=angle", "--idempotency-key", "image-add-key", commandLotID, first, second)
+	result := runAuthCommand(t, runtime, "inventory", "image", "add", commandLotID, first, second,
+		"--caption", "0= Front ", "--caption", "1=Side=angle",
+		"--alt-text", "0= Front of bag ", "--cover", "1", "--idempotency-key", "image-add-key")
 	if result.code != 0 || result.stderr != "" {
 		t.Fatalf("result = %#v", result)
 	}
@@ -79,7 +79,7 @@ func TestInventoryImageAddUsesIndexedMetadataAndOrderedPositionalFiles(t *testin
 	images := gotManifest["images"].([]any)
 	firstMetadata := images[0].(map[string]any)
 	secondMetadata := images[1].(map[string]any)
-	if firstMetadata["upload_index"] != float64(0) || firstMetadata["caption"] != "Front" || firstMetadata["alt_text"] != "Front of bag" || firstMetadata["is_cover"] != true || secondMetadata["caption"] != "Side=angle" || secondMetadata["alt_text"] != nil {
+	if firstMetadata["upload_index"] != float64(0) || firstMetadata["caption"] != "Front" || firstMetadata["alt_text"] != "Front of bag" || firstMetadata["is_cover"] != false || secondMetadata["caption"] != "Side=angle" || secondMetadata["alt_text"] != nil || secondMetadata["is_cover"] != true {
 		t.Fatalf("manifest = %#v", gotManifest)
 	}
 }
@@ -261,25 +261,34 @@ func TestInventoryImageDownloadSelectsVariantAndWritesOnlyFile(t *testing.T) {
 	}
 }
 
-func TestInventoryImageUsageDocumentsUnambiguousIndexedMetadataSyntax(t *testing.T) {
-	for _, test := range []struct {
-		args []string
+func TestCobraImageHelpDocumentsEveryLeaf(t *testing.T) {
+	tests := []struct {
+		name string
+		leaf string
 		want []string
 	}{
-		{args: []string{"inventory", "image", "add", "--help"}, want: []string{"image add [OPTIONS] LOT_ID FILE...", "--caption INDEX=TEXT", "--alt-text INDEX=TEXT", "--cover INDEX", "zero-based"}},
-		{args: []string{"inventory", "lot", "create", "--help"}, want: []string{"--image FILE", "--image-caption INDEX=TEXT", "--image-alt-text INDEX=TEXT", "--image-cover INDEX", "zero-based"}},
-	} {
-		result := runAuthCommand(t, Runtime{}, test.args...)
-		if result.code != 0 || result.stderr != "" {
-			t.Fatalf("args=%v result=%#v", test.args, result)
-		}
-		for _, want := range test.want {
-			if !strings.Contains(result.stdout, want) {
-				t.Errorf("help %q missing %q", result.stdout, want)
-			}
-		}
+		{name: "add", leaf: "add", want: []string{"Add images to an inventory lot", "LOT_ID FILE...", "--caption", "--alt-text", "--cover", "--idempotency-key", "zero-based INDEX=TEXT"}},
+		{name: "update", leaf: "update", want: []string{"Update inventory image metadata", "LOT_ID IMAGE_ID", "--caption", "--alt-text", "--clear-caption", "--clear-alt-text", "--cover", "--idempotency-key"}},
+		{name: "reorder", leaf: "reorder", want: []string{"Reorder inventory lot images", "LOT_ID IMAGE_ID...", "--idempotency-key"}},
+		{name: "delete", leaf: "delete", want: []string{"Delete an inventory lot image", "LOT_ID IMAGE_ID", "--yes", "--idempotency-key"}},
+		{name: "download", leaf: "download", want: []string{"Download an inventory lot image", "LOT_ID IMAGE_ID DESTINATION", "--variant", "display or thumbnail", "default \"display\"", "--force"}},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "image", test.leaf, "--help")
+			if result.code != 0 || result.stderr != "" {
+				t.Fatalf("help result = %#v", result)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(result.stdout, want) {
+					t.Errorf("%s help missing %q:\n%s", test.leaf, want, result.stdout)
+				}
+			}
+		})
+	}
+}
 
+func TestInventoryImageRejectsInvalidIndexedMetadataAndPositionals(t *testing.T) {
 	invalid := [][]string{
 		{"inventory", "image", "add", commandLotID},
 		{"inventory", "image", "add", "--caption", "front", commandLotID, "image.jpg"},
@@ -297,43 +306,20 @@ func TestInventoryImageUsageDocumentsUnambiguousIndexedMetadataSyntax(t *testing
 	}
 }
 
-func TestInventoryLotCreateHelpIsCompleteAndExact(t *testing.T) {
-	const want = `Usage: artisan inventory lot create [OPTIONS]
-
-Lot fields:
-  --name TEXT                         lot name (required unless --from-json)
-  --origin TEXT                       origin
-  --producer TEXT                     producer
-  --supplier TEXT                     supplier
-  --external-reference TEXT           external reference
-  --received-date YYYY-MM-DD           received date
-  --crop-year YEAR                    crop year
-  --varietal TEXT                     varietal (repeatable)
-  --sca-score SCORE                   SCA score
-  --processing-method TEXT            processing method
-  --processing-detail TEXT            processing detail
-  --altitude-min-metres METRES        minimum altitude
-  --altitude-max-metres METRES        maximum altitude
-  --notes TEXT                        notes
-
-Opening inventory:
-  --opening-grams GRAMS               opening grams
-  --opening-reason TEXT               opening reason
-  --opening-reference TEXT            opening reference
-
-Input and replay:
-  --from-json FILE|-                  strict request JSON (lot fields and image metadata)
-  --idempotency-key KEY               advanced idempotency key
-
-Images are declared in order with repeatable flags. Metadata uses an explicit zero-based declaration INDEX:
-  --image FILE                        JPEG/PNG image file (repeatable, maximum eight)
-  --image-caption INDEX=TEXT          caption for one image (repeatable)
-  --image-alt-text INDEX=TEXT         alt text for one image (repeatable)
-  --image-cover INDEX                 mark one image as the cover
-`
-	result := runAuthCommand(t, Runtime{}, "inventory", "lot", "create", "--help")
-	if result.code != 0 || result.stderr != "" || result.stdout != want {
-		t.Fatalf("result = %#v\nwant help:\n%s", result, want)
+func TestCobraLotCreateHelpDocumentsEveryInputFamily(t *testing.T) {
+	result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "lot", "create", "--help")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("help result = %#v", result)
+	}
+	for _, want := range []string{
+		"Create an inventory lot",
+		"--name", "--varietal", "--opening-grams", "--from-json",
+		"--image", "--image-caption", "--image-alt-text", "--image-cover",
+		"zero-based INDEX=TEXT",
+	} {
+		if !strings.Contains(result.stdout, want) {
+			t.Errorf("create help missing %q:\n%s", want, result.stdout)
+		}
 	}
 }
 

@@ -48,9 +48,6 @@ func addLotFieldFlags(flags *flag.FlagSet, values *lotFieldFlags) {
 }
 
 func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		return writeCommandHelp(runtime, jsonMode, lotCreateImageUsage)
-	}
 	flags := flag.NewFlagSet("artisan inventory lot create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var values lotFieldFlags
