@@ -80,6 +80,46 @@ Confirm the selected build:
 artisan --json version
 ```
 
+## Shell completion
+
+Create the target directory before generating a completion file. For Bash and
+Fish:
+
+```sh
+mkdir -p "$HOME/.local/share/bash-completion/completions"
+artisan completion bash > "$HOME/.local/share/bash-completion/completions/artisan"
+
+mkdir -p "$HOME/.config/fish/completions"
+artisan completion fish > "$HOME/.config/fish/completions/artisan.fish"
+```
+
+For Zsh, use a user-owned directory on `fpath`:
+
+```zsh
+mkdir -p "$HOME/.zfunc"
+artisan completion zsh > "$HOME/.zfunc/_artisan"
+```
+
+Add `fpath=("$HOME/.zfunc" $fpath)` before `autoload -Uz compinit && compinit`
+in `.zshrc`. Restart the shell, or source its configuration after installation.
+Bash and Fish likewise discover their standard completion directories in a new
+shell; source the generated Bash file directly if you need it immediately.
+
+For PowerShell, create the profile directory and write a script that can be
+dot-sourced without evaluating generated text from a pipeline:
+
+```powershell
+$ProfileDir = Split-Path -Parent $PROFILE
+New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+$CompletionPath = Join-Path $ProfileDir 'artisan-completion.ps1'
+artisan completion powershell | Set-Content -Encoding utf8 -Path $CompletionPath
+. $CompletionPath
+```
+
+Add the corresponding `. <path-to-artisan-completion.ps1>` line to the
+PowerShell profile to load it in future sessions. Completion output is a raw
+shell program even when the global `--json` flag is present.
+
 ## Build from source
 
 Go 1.23.x is required. Build only from a trusted, quiescent source checkout;

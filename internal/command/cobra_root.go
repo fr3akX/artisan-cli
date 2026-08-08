@@ -379,6 +379,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	}
 	root.SetOut(runtime.Out)
 	root.SetErr(runtime.Err)
+	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().BoolVar(&state.jsonMode, "json", false, "emit a JSON envelope")
 	root.PersistentFlags().StringVar(&state.serverOverride, "server", "", "override the Artisan Server URL")
 	root.PersistentFlags().DurationVar(&state.timeout, "timeout", 30*time.Second, "request timeout")
@@ -387,8 +388,15 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 		newAuthCommand(ctx, state),
 		newInventoryCommand(ctx, state),
 		newSkillCommand(ctx, state),
+		newCompletionCommand(root, state),
 		newVersionCommand(state),
 	)
+	root.InitDefaultHelpCmd()
+	for _, child := range root.Commands() {
+		if child.Name() == "help" {
+			child.Hidden = true
+		}
+	}
 
 	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
@@ -421,6 +429,52 @@ func newLegacyGroupCommand(
 	}
 }
 
+func newCompletionCommand(root *cobra.Command, state *cobraState) *cobra.Command {
+	completion := &cobra.Command{
+		Use:   "completion",
+		Short: "Generate a shell completion program",
+		Run: func(_ *cobra.Command, args []string) {
+			message := "A completion command is required"
+			if len(args) != 0 {
+				message = "Unknown completion command"
+			}
+			setCommandExit(state, writeFailure(state.runtime, state.jsonMode, output.Error{
+				ExitCode: usageExitCode,
+				Code:     "usage",
+				Message:  message,
+			}))
+		},
+	}
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		shell := shell
+		leaf := &cobra.Command{
+			Use:   shell,
+			Short: "Generate " + shell + " completion",
+			Args:  cobra.NoArgs,
+			Run: func(_ *cobra.Command, _ []string) {
+				var err error
+				switch shell {
+				case "bash":
+					err = root.GenBashCompletionV2(state.runtime.Out, true)
+				case "zsh":
+					err = root.GenZshCompletion(state.runtime.Out)
+				case "fish":
+					err = root.GenFishCompletion(state.runtime.Out, true)
+				case "powershell":
+					err = root.GenPowerShellCompletionWithDesc(state.runtime.Out)
+				}
+				if err != nil {
+					setCommandExit(state, reportWriteError(state.runtime.Err, err))
+					return
+				}
+				setCommandExit(state, 0)
+			},
+		}
+		completion.AddCommand(leaf)
+	}
+	return completion
+}
+
 func newVersionCommand(state *cobraState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -450,8 +504,12 @@ func newSkillCommand(ctx context.Context, state *cobraState) *cobra.Command {
 	skill := &cobra.Command{
 		Use:   "skill",
 		Short: "Install or inspect the embedded agent skill",
-		Run: func(_ *cobra.Command, _ []string) {
-			setCommandExit(state, skillUsageFailure(state.runtime, state.jsonMode, "A skill command is required"))
+		Run: func(_ *cobra.Command, args []string) {
+			message := "A skill command is required"
+			if len(args) != 0 {
+				message = "Unknown skill command"
+			}
+			setCommandExit(state, skillUsageFailure(state.runtime, state.jsonMode, message))
 		},
 	}
 	show := &cobra.Command{
@@ -498,6 +556,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			message = "Unknown auth command"
 		case "skill":
 			message = "Unknown skill command"
+		case "completion":
+			message = "Unknown completion command"
 		case "inventory":
 			message = "Unknown inventory command"
 		case "inventory lot":
@@ -527,6 +587,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 				message = "skill install requires --directory ROOT"
 			case "skill show":
 				message = "skill show does not accept arguments"
+			case "completion bash", "completion zsh", "completion fish", "completion powershell":
+				message = path + " does not accept arguments"
 			default:
 				if inventoryMessage := inventoryCobraParseFailureMessage(path); inventoryMessage != "" {
 					message = inventoryMessage
@@ -612,6 +674,14 @@ func knownCommandPath(args []string) string {
 		return "auth"
 	case "version":
 		return "version"
+	case "completion":
+		for _, arg := range args {
+			switch arg {
+			case "bash", "zsh", "fish", "powershell":
+				return "completion " + arg
+			}
+		}
+		return "completion"
 	case "skill":
 		for _, arg := range args {
 			switch arg {

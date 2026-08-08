@@ -11,9 +11,10 @@ artisan [--json] [--server URL] [--timeout DURATION] COMMAND ...
 ```
 
 In examples, the complete global option group is `--json --server URL --timeout DURATION`.
-Global flags must precede `auth`, `inventory`, `skill`, or `version`; command
-flags must appear in the positions shown below. `--timeout` uses a Go duration
-such as `30s` or `2m`, must be positive, and cannot exceed `5m`. Its default is
+Persistent global flags can appear before or after subcommands and can be mixed
+with local command flags. The examples use one consistent placement for
+readability, not as a parsing restriction. `--timeout` uses a Go duration such
+as `30s` or `2m`, must be positive, and cannot exceed `5m`. Its default is
 `30s`; the exact `5m` boundary is accepted.
 
 `--server` overrides the effective server for that invocation. Otherwise
@@ -41,17 +42,23 @@ artisan [GLOBAL FLAGS] auth logout
 ```
 
 Select a server with a prior stored value, `ARTISAN_SERVER_URL`, or global
-`--server URL`. For scripts, keep the bearer token out of argv:
+`--server URL`. For human setup, keep the bearer token out of argv and select
+the server explicitly:
 
 ```sh
-printf '%s\n' "$TOKEN" | artisan --server https://inventory.example auth login --token-stdin
+printf '%s\n' "$TOKEN" | artisan auth login \
+  --server https://inventory.example \
+  --token-stdin
+artisan --json inventory lot list --limit 100
 ```
 
 Without `--token-stdin`, login prompts only on a terminal with hidden input.
-Login validates the token by reading the authenticated identity before storing
-it. An explicit `--server` is stored with the token. `auth status` reads the
-live identity. `auth logout` removes the stored token but retains the stored
-server. Environment overrides remain outside these operations. Authentication
+The `auth login --token-stdin` form reads the token from standard input. Login
+validates the token by reading the authenticated identity before storing
+it. An explicit `--server` is stored with the token, so later human commands
+can omit `--server`. `auth status` reads the live identity. `auth logout`
+removes the stored token but retains the stored server. Environment overrides
+remain outside these operations. Authentication
 recovery, login publication, logout, and stored server/token snapshots are serialized
 across CLI processes; a command uses one consistent origin/credential snapshot.
 
@@ -151,7 +158,7 @@ approval, or `--yes` for an already approved noninteractive operation.
 
 ## Images
 
-Flags must precede positional IDs/files for image commands:
+Image flags can appear before or after positional IDs and files:
 
 ```text
 artisan [GLOBAL FLAGS] inventory image add [--caption INDEX=TEXT]
@@ -204,18 +211,26 @@ artisan [GLOBAL FLAGS] inventory conflict resolve CONFLICT_ID --note TEXT
 Conflict resolution records a note; it does **not** adjust stock. Resolution
 requires terminal approval or `--yes` after explicit approval.
 
-## Skill, version, and help
+## Skill, version, help, and completion
 
 ```text
 artisan [--json] skill show
 artisan [--json] skill install --directory ROOT [--force]
 artisan [--json] version
+artisan completion bash|zsh|fish|powershell
 ```
 
-`skill --help`, `skill show --help`, `skill install --help`, image help, and lot
-create help are implemented and return success. Other `--help` placements are
-not implemented by this release and return a usage error rather than a command
-catalog. See [agent skill installation](agent-skill.md).
+Generated text help is available at the root and every parent and leaf command;
+append `--help` at the level you want to inspect. With `--json`, help is one
+success envelope whose `data.usage` field contains the generated usage text.
+See [agent skill installation](agent-skill.md).
+
+Each completion leaf writes a raw shell program to stdout. Completion is always
+raw, including when `--json` is also supplied, because a JSON envelope would
+make the shell program unusable. Generation and completion are static and
+local: they do not load environment or stored configuration, inspect a
+terminal, read credentials, enumerate server-backed IDs, or contact Artisan
+Server. See [installation](installation.md#shell-completion) for setup examples.
 
 SIGINT, and SIGTERM on platforms that support it, cancel active work and run
 normal cleanup before the process exits with status 130. See [JSON, pagination,

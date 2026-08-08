@@ -85,6 +85,34 @@ func TestUnknownCommandJSONIsOneStdoutEnvelope(t *testing.T) {
 	}
 }
 
+func TestExhaustiveRepresentativeUsageFailuresAreStableAndRedacted(t *testing.T) {
+	const secret = "usage-secret-value"
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing child", args: []string{"inventory"}, want: "An inventory command is required\n"},
+		{name: "unknown child", args: []string{"skill", "unknown"}, want: "Unknown skill command\n"},
+		{name: "too few positionals", args: []string{"inventory", "lot", "show"}, want: "inventory lot show requires one LOT_ID\n"},
+		{name: "too many positionals", args: []string{"auth", "status", secret}, want: "auth status does not accept arguments\n"},
+		{name: "malformed integer", args: []string{"inventory", "lot", "list", "--limit=" + secret}, want: "Invalid inventory lot list option\n"},
+		{name: "malformed duration", args: []string{"version", "--timeout=" + secret}, want: "Invalid global option\n"},
+		{name: "invalid URL", args: []string{"version", "--server=" + secret}, want: "Server URL is invalid\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, test.args...)
+			if code != usageExitCode || stdout != "" || stderr != test.want {
+				t.Fatalf("Run(%q) = (%d, %q, %q), want (%d, empty, %q)", test.args, code, stdout, stderr, usageExitCode, test.want)
+			}
+			if strings.Contains(stdout+stderr, secret) {
+				t.Fatalf("Run(%q) exposed supplied value", test.args)
+			}
+		})
+	}
+}
+
 func TestParseFailureUsesJSONIntentAcrossGlobalPrefix(t *testing.T) {
 	code, stdout, stderr := runCommand(t, "--timeout", "nope", "--json", "version")
 	if code != 2 {

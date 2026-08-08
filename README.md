@@ -20,15 +20,18 @@ After installation, select a server and provide the token on stdin rather than
 argv:
 
 ```sh
-printf '%s\n' "$TOKEN" | artisan --server https://inventory.example auth login --token-stdin
-artisan --json auth status
+printf '%s\n' "$TOKEN" | artisan auth login \
+  --server https://inventory.example \
+  --token-stdin
 artisan --json inventory lot list --limit 100
 ```
 
-Global flags such as `--json`, `--server`, and `--timeout` must precede the
-command. Release binaries are currently unsigned and macOS binaries are not
-notarized; verify checksums and GitHub build provenance, while recognizing that
-neither substitutes for OS code signing.
+The successful login stores the selected server and token, so later human
+commands can omit `--server`. Global flags such as `--json`, `--server`, and
+`--timeout` can appear before or after subcommands. Release binaries are
+currently unsigned and macOS binaries are not notarized; verify checksums and
+GitHub build provenance, while recognizing that neither substitutes for OS code
+signing.
 
 ## Agent skill
 

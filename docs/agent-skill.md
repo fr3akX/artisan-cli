@@ -52,9 +52,15 @@ The skill instructs an agent to use global `--json` and an exact human-supplied
 pagination, use integer grams, preserve one idempotency key, and obtain fresh
 explicit human approval immediately before mutation.
 
+A human login with explicit `--server` stores that server as the default for
+later human commands. Agents deliberately do **not** rely on that default: every
+automated status, read, and mutation command still binds
+`--server "$TRUSTED_SERVER"` to prevent confused-server operation.
+
 Critically, an agent **must not handle tokens**: it must never request, read,
 print, persist, or pass one. An agent **must not log in** and must never run
-`artisan auth login`. A human authenticates outside the agent session. The agent begins, in order, with `artisan version` and then
+`artisan auth login`. A human authenticates outside the agent session. The
+agent begins, in order, with `artisan version` and then
 `artisan --json --server "$TRUSTED_SERVER" auth status`; it stops on mismatch,
 incomplete JSON, ambiguity, bounds, permissions, timeout, or an upgrade
 requirement.
