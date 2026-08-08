@@ -113,6 +113,68 @@ func TestAuthLoginFromStdinVerifiesThenPersistsNormalizedServerAndToken(t *testi
 	assertTokenRedacted(t, result)
 }
 
+func TestCobraLoginAcceptsLegacySingleDashTokenStdin(t *testing.T) {
+	server := identityServer(t, nil)
+	defer server.Close()
+	result := runAuthCommand(t, Runtime{
+		In: strings.NewReader(commandTestToken + "\n"), ConfigDir: t.TempDir(),
+	}, "--server", server.URL, "auth", "login", "-token-stdin")
+	if result.code != 0 {
+		t.Fatalf("login = %#v", result)
+	}
+}
+
+func TestCobraLoginPersistsPostSubcommandServerForLaterCommands(t *testing.T) {
+	dir := t.TempDir()
+	server := identityServer(t, nil)
+	defer server.Close()
+
+	login := runAuthCommand(t, Runtime{
+		In: strings.NewReader(commandTestToken + "\n"), ConfigDir: dir,
+	}, "auth", "login", "--server", server.URL, "--timeout", "2s", "--token-stdin")
+	if login.code != 0 {
+		t.Fatalf("login = %#v", login)
+	}
+	if got, err := config.LoadStoredServer(dir); err != nil || got != server.URL {
+		t.Fatalf("stored server = %q, %v", got, err)
+	}
+	status := runAuthCommand(t, Runtime{ConfigDir: dir}, "auth", "status")
+	if status.code != 0 {
+		t.Fatalf("status without --server = %#v", status)
+	}
+}
+
+func TestCobraAuthHelpIsGenerated(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+		json bool
+	}{
+		{name: "auth", args: []string{"auth", "--help"}, want: []string{"Usage:", "artisan auth", "login", "status", "logout"}},
+		{name: "login", args: []string{"auth", "login", "--help"}, want: []string{"Usage:", "artisan auth login", "--server", "--token-stdin"}},
+		{name: "status", args: []string{"auth", "status", "--help"}, want: []string{"Usage:", "artisan auth status", "--server", "--timeout"}},
+		{name: "logout", args: []string{"auth", "logout", "--help"}, want: []string{"Usage:", "artisan auth logout", "--server", "--timeout"}},
+		{name: "login JSON", args: []string{"--json", "auth", "login", "--help"}, want: []string{"artisan auth login", "--server", "--token-stdin"}, json: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, tt.args...)
+			if result.code != 0 || result.stderr != "" {
+				t.Fatalf("help result = %#v", result)
+			}
+			if tt.json && (!strings.HasPrefix(result.stdout, `{"ok":true,"data":{"usage":`) || strings.Count(result.stdout, "\n") != 1) {
+				t.Fatalf("JSON help = %q, want one success envelope with data.usage", result.stdout)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(result.stdout, want) {
+					t.Fatalf("help = %q, want substring %q", result.stdout, want)
+				}
+			}
+		})
+	}
+}
+
 func TestAuthLoginJSONNeverIncludesToken(t *testing.T) {
 	server := identityServer(t, nil)
 	defer server.Close()

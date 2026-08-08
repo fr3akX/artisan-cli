@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func normalizeLegacySingleDashArgs(args []string) []string {
 			name = before
 		}
 		switch name {
-		case "json", "server", "timeout", "directory", "force":
+		case "json", "server", "timeout", "directory", "force", "token-stdin":
 			result[i] = "-" + arg
 		}
 	}
@@ -137,7 +138,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	root.PersistentFlags().DurationVar(&state.timeout, "timeout", 30*time.Second, "request timeout")
 
 	root.AddCommand(
-		newLegacyGroupCommand(ctx, state, "auth", "Authentication and saved credentials", runAuth),
+		newAuthCommand(ctx, state),
 		newLegacyGroupCommand(ctx, state, "inventory", "Manage green-coffee inventory", runInventory),
 		newSkillCommand(ctx, state),
 		newVersionCommand(state),
@@ -245,8 +246,10 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 	message := "Invalid global option"
 	path := knownCommandPath(args)
 	if strings.HasPrefix(err.Error(), "unknown command") {
-		jsonMode = jsonModeForParseFailure(args)
+		jsonMode = cobraJSONModeForParseFailure(args)
 		switch path {
+		case "auth":
+			message = "Unknown auth command"
 		case "skill":
 			message = "Unknown skill command"
 		case "":
@@ -255,9 +258,15 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			}
 		}
 	} else {
-		jsonMode = jsonModeForParseFailure(args)
+		jsonMode = cobraJSONModeForParseFailure(args)
 		if !isGlobalFlagParseError(err) {
 			switch path {
+			case "auth login":
+				message = "Invalid auth login option"
+			case "auth status":
+				message = "auth status does not accept arguments"
+			case "auth logout":
+				message = "auth logout does not accept arguments"
 			case "version":
 				message = "version does not accept arguments"
 			case "skill", "skill install":
@@ -274,6 +283,39 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 	})
 }
 
+func cobraJSONModeForParseFailure(args []string) bool {
+	if firstCommandArg(args) != "auth" {
+		return jsonModeForParseFailure(args)
+	}
+
+	jsonMode := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		name, value, hasValue, isFlag := splitGlobalFlag(arg)
+		if !isFlag {
+			continue
+		}
+		switch name {
+		case "json":
+			if !hasValue {
+				jsonMode = true
+				continue
+			}
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				jsonMode = parsed
+			}
+		case "server", "timeout":
+			if !hasValue && i+1 < len(args) {
+				i++
+			}
+		}
+	}
+	return jsonMode
+}
+
 func isGlobalFlagParseError(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "--json") || strings.Contains(text, "--server") || strings.Contains(text, "--timeout")
@@ -282,6 +324,18 @@ func isGlobalFlagParseError(err error) bool {
 func knownCommandPath(args []string) string {
 	command := firstCommandArg(args)
 	switch command {
+	case "auth":
+		for _, arg := range args {
+			switch arg {
+			case "login":
+				return "auth login"
+			case "status":
+				return "auth status"
+			case "logout":
+				return "auth logout"
+			}
+		}
+		return "auth"
 	case "version":
 		return "version"
 	case "skill":

@@ -5,6 +5,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/fr3akX/artisan-cli/internal/auth"
+	"github.com/fr3akX/artisan-cli/internal/config"
 )
 
 func runCommand(t *testing.T, args ...string) (int, string, string) {
@@ -318,15 +321,62 @@ func TestZeroRuntimeDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagsAfterAuthCommandAreNotTreatedAsGlobal(t *testing.T) {
-	code, stdout, stderr := runCommand(t, "auth", "status", "--json")
-	if code != 2 {
-		t.Fatalf("Run() code = %d, want 2", code)
+func TestGlobalFlagsAfterAuthCommandAreAccepted(t *testing.T) {
+	server := identityServer(t, nil)
+	defer server.Close()
+	dir := t.TempDir()
+	if err := config.SaveServer(dir, server.URL); err != nil {
+		t.Fatalf("SaveServer() error = %v", err)
 	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty", stdout)
+	if err := auth.NewFileStore(dir).Save(commandTestToken); err != nil {
+		t.Fatalf("Save() error = %v", err)
 	}
-	if want := "auth status does not accept arguments\n"; stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
+
+	result := runAuthCommand(t, Runtime{ConfigDir: dir}, "auth", "status", "--json", "--timeout", "2s")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("result = %#v, want JSON success", result)
+	}
+	if !strings.HasPrefix(result.stdout, `{"ok":true,"data":`) {
+		t.Fatalf("stdout = %q, want JSON success envelope", result.stdout)
+	}
+}
+
+func TestAuthPostSubcommandGlobalFailuresAreRedactedAndUseSelectedStream(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		secret     string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "malformed timeout human",
+			args:       []string{"auth", "status", "--timeout=secret-looking-value"},
+			secret:     "secret-looking-value",
+			wantStderr: "Invalid global option\n",
+		},
+		{
+			name:       "invalid server JSON",
+			args:       []string{"auth", "status", "--json", "--server=test-secret-token"},
+			secret:     "test-secret-token",
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"invalid_server_url\",\"message\":\"Server URL is invalid\"}}\n",
+		},
+		{
+			name:       "invalid login option with post-subcommand JSON",
+			args:       []string{"auth", "login", "--json", "--token=test-secret-token"},
+			secret:     "test-secret-token",
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid auth login option\"}}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, tt.args...)
+			if code != usageExitCode || stdout != tt.wantStdout || stderr != tt.wantStderr {
+				t.Fatalf("result = (%d, %q, %q), want (%d, %q, %q)", code, stdout, stderr, usageExitCode, tt.wantStdout, tt.wantStderr)
+			}
+			if strings.Contains(stdout, tt.secret) || strings.Contains(stderr, tt.secret) {
+				t.Fatal("auth global flag failure exposed supplied value")
+			}
+		})
 	}
 }
