@@ -26,6 +26,7 @@ A successful login continues to validate the identity and atomically persist the
 - No dynamic, network-backed completion of lot, image, reservation, or conflict IDs.
 - No interactive login redesign or browser-based authentication.
 - No removal of currently supported command spellings or global flag positions.
+- No weakening of the embedded agent skill's explicit trusted-server binding on every automated command.
 - No changes to release archive contents beyond the updated executable and documentation.
 
 ## Architecture
@@ -242,7 +243,8 @@ Update:
 - `README.md` quick-start login syntax;
 - `docs/commands.md` generated hierarchy, flexible flag placement, and complete help behavior;
 - `docs/installation.md` shell completion setup;
-- `docs/agent-skill.md` recommended stored-server workflow;
-- embedded skill source and generated skill content if its command guidance changes.
+- `docs/agent-skill.md` to distinguish the human stored-login workflow from the agent's stricter explicit trusted-server binding.
+
+The embedded agent skill continues to pass `--server <EXPECTED_SERVER_URL>` on every automated status, read, and mutation command. Its source and generated content change only if needed to describe flexible flag placement; the trusted-server safety gate must remain intact.
 
 After merge and green native CI, publish a patch release after `v0.1.0` so downloadable binaries expose the new interface. The exact patch version is selected at release time according to the repository's tag history.
