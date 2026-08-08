@@ -959,6 +959,34 @@ func assertStoredAuthState(t *testing.T, dir, wantServer, wantToken string) {
 	}
 }
 
+func TestAuthUnknownChildPreservesTextAndJSONContract(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "text",
+			args:       []string{"auth", "bogus"},
+			wantStderr: "Unknown auth command\n",
+		},
+		{
+			name:       "JSON",
+			args:       []string{"--json", "auth", "bogus"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Unknown auth command\"}}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, tt.args...)
+			if result.code != usageExitCode || result.stdout != tt.wantStdout || result.stderr != tt.wantStderr {
+				t.Fatalf("result = %#v, want code %d, stdout %q, stderr %q", result, usageExitCode, tt.wantStdout, tt.wantStderr)
+			}
+		})
+	}
+}
+
 func TestAuthRejectsUnknownSubcommandsAndArguments(t *testing.T) {
 	tests := [][]string{
 		{"auth"},

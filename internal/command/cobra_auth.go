@@ -15,8 +15,12 @@ func newAuthCommand(ctx context.Context, state *cobraState) *cobra.Command {
   printf '%s\n' "$ARTISAN_TOKEN" | artisan auth login --server https://artisan.example --token-stdin
   artisan auth status
   artisan auth logout`,
-		Run: func(_ *cobra.Command, _ []string) {
-			setCommandExit(state, authUsageFailure(state.runtime, state.jsonMode, "An auth command is required"))
+		Run: func(_ *cobra.Command, args []string) {
+			message := "An auth command is required"
+			if len(args) != 0 {
+				message = "Unknown auth command"
+			}
+			setCommandExit(state, authUsageFailure(state.runtime, state.jsonMode, message))
 		},
 	}
 
