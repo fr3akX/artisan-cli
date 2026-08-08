@@ -67,6 +67,34 @@ func TestCobraInventoryParentsPreserveMissingAndUnknownErrors(t *testing.T) {
 	}
 }
 
+func TestCobraInventoryUnknownChildIgnoresTrailingRecognizedLeaf(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "text",
+			args:       []string{"inventory", "lot", "bogus", "--bad", "show"},
+			wantStderr: "Unknown inventory lot command\n",
+		},
+		{
+			name:       "JSON",
+			args:       []string{"--json", "inventory", "lot", "bogus", "--bad", "show"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Unknown inventory lot command\"}}\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, test.args...)
+			if result.code != usageExitCode || result.stdout != test.wantStdout || result.stderr != test.wantStderr {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestCobraInventoryParseErrorsAreRedactedAndHonorLaterJSON(t *testing.T) {
 	const secret = "supplied-secret-value"
 	result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "adjust", commandLotID, "--grams", secret, "--json")
@@ -108,6 +136,33 @@ func TestCobraInventoryLegacySingleDashFlagsAreNormalized(t *testing.T) {
 	want := []string{"inventory", "lot", "list", "--limit=100", "--state", "active", "--all", "--q", "-state"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized args = %q, want %q", got, want)
+	}
+}
+
+func TestCobraInventoryRawPassthroughArgumentsAreNotNormalized(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "lot create dash-prefixed scalar",
+			args: []string{"-json", "inventory", "lot", "create", "--name", "-state"},
+			want: []string{"--json", "inventory", "lot", "create", "--name", "-state"},
+		},
+		{
+			name: "image dash-prefixed path",
+			args: []string{"-server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state"},
+			want: []string{"--server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizeLegacySingleDashArgs(test.args)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("normalized args = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

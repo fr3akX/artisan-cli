@@ -39,7 +39,11 @@ func setCommandExit(state *cobraState, code int) {
 
 func normalizeLegacySingleDashArgs(args []string) []string {
 	result := append([]string(nil), args...)
+	rawPassthrough := inventoryRawPassthroughIndex(result)
 	for i := 0; i < len(result); i++ {
+		if rawPassthrough >= 0 && i >= rawPassthrough {
+			break
+		}
 		arg := result[i]
 		if arg == "--" {
 			break
@@ -57,6 +61,65 @@ func normalizeLegacySingleDashArgs(args []string) []string {
 		}
 	}
 	return result
+}
+
+func inventoryRawPassthroughIndex(args []string) int {
+	command, commandIndex, ok := nextCommandToken(args, 0)
+	if !ok || command != "inventory" {
+		return -1
+	}
+	group, groupIndex, ok := nextCommandToken(args, commandIndex+1)
+	if !ok {
+		return -1
+	}
+	if group == "image" {
+		return groupIndex
+	}
+	if group != "lot" {
+		return -1
+	}
+	operation, operationIndex, ok := nextCommandToken(args, groupIndex+1)
+	if !ok {
+		return -1
+	}
+	switch operation {
+	case "create", "update", "archive", "restore":
+		return operationIndex
+	default:
+		return -1
+	}
+}
+
+func nextCommandToken(args []string, start int) (string, int, bool) {
+	for index := start; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			if index+1 < len(args) {
+				return args[index+1], index + 1, true
+			}
+			return "", 0, false
+		}
+		name, _, hasValue, isFlag := splitGlobalFlag(arg)
+		if !isFlag {
+			return arg, index, true
+		}
+		if !isCobraGlobalFlag(name) {
+			return arg, index, true
+		}
+		if (name == "server" || name == "timeout") && !hasValue && index+1 < len(args) {
+			index++
+		}
+	}
+	return "", 0, false
+}
+
+func isCobraGlobalFlag(name string) bool {
+	switch name {
+	case "json", "server", "timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 func isKnownLegacySingleDashFlag(name string) bool {

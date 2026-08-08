@@ -271,31 +271,26 @@ func disableFlagFileCompletion(cmd *cobra.Command, names ...string) {
 }
 
 func knownInventoryCommandPath(args []string) string {
-	start := -1
-	for index, arg := range args {
-		if arg == "inventory" {
-			start = index + 1
-			break
-		}
-	}
-	if start < 0 {
+	command, commandIndex, ok := nextCommandToken(args, 0)
+	if !ok || command != "inventory" {
 		return "inventory"
 	}
-	for index := start; index < len(args); index++ {
-		switch args[index] {
-		case "adjust", "image":
-			return "inventory " + args[index]
-		case "lot", "reservation", "conflict":
-			group := args[index]
-			for _, leaf := range args[index+1:] {
-				if inventoryGroupHasLeaf(group, leaf) {
-					return "inventory " + group + " " + leaf
-				}
-			}
-			return "inventory " + group
-		}
+	group, groupIndex, ok := nextCommandToken(args, commandIndex+1)
+	if !ok {
+		return "inventory"
 	}
-	return "inventory"
+	switch group {
+	case "adjust", "image":
+		return "inventory " + group
+	case "lot", "reservation", "conflict":
+		leaf, _, ok := nextCommandToken(args, groupIndex+1)
+		if ok && inventoryGroupHasLeaf(group, leaf) {
+			return "inventory " + group + " " + leaf
+		}
+		return "inventory " + group
+	default:
+		return "inventory"
+	}
 }
 
 func inventoryGroupHasLeaf(group, leaf string) bool {
