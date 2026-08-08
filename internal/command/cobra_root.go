@@ -40,6 +40,7 @@ func setCommandExit(state *cobraState, code int) {
 func normalizeLegacySingleDashArgs(args []string) []string {
 	result := append([]string(nil), args...)
 	path := knownCommandPath(result)
+	result = shieldInventoryImageDashPositionals(result, path)
 	for i := 0; i < len(result); i++ {
 		arg := result[i]
 		if arg == "--" {
@@ -58,6 +59,146 @@ func normalizeLegacySingleDashArgs(args []string) []string {
 		}
 	}
 	return result
+}
+
+type inventoryImageArgPartition struct {
+	options     []string
+	positionals []string
+	optionCount int
+	ok          bool
+}
+
+func shieldInventoryImageDashPositionals(args []string, path string) []string {
+	if path != "inventory image add" && path != "inventory image download" {
+		return args
+	}
+	_, commandIndex, ok := nextCommandToken(args, 0)
+	if !ok {
+		return args
+	}
+	_, groupIndex, ok := nextCommandToken(args, commandIndex+1)
+	if !ok {
+		return args
+	}
+	_, leafIndex, ok := nextCommandToken(args, groupIndex+1)
+	if !ok {
+		return args
+	}
+	partition := partitionInventoryImageArgs(args[leafIndex+1:], path, 0, 0)
+	if !partition.ok {
+		return args
+	}
+	hasDashPositional := false
+	for _, positional := range partition.positionals {
+		if strings.HasPrefix(positional, "-") {
+			hasDashPositional = true
+			break
+		}
+	}
+	if !hasDashPositional {
+		return args
+	}
+	result := append([]string(nil), args[:leafIndex+1]...)
+	result = append(result, partition.options...)
+	result = append(result, "--")
+	return append(result, partition.positionals...)
+}
+
+func partitionInventoryImageArgs(args []string, path string, index, positionalCount int) inventoryImageArgPartition {
+	if path == "inventory image download" && positionalCount > 3 {
+		return inventoryImageArgPartition{}
+	}
+	if index == len(args) {
+		valid := positionalCount >= 2
+		if path == "inventory image download" {
+			valid = positionalCount == 3
+		}
+		return inventoryImageArgPartition{ok: valid}
+	}
+	if args[index] == "--" {
+		count := positionalCount + len(args) - index - 1
+		valid := count >= 2
+		if path == "inventory image download" {
+			valid = count == 3
+		}
+		if !valid {
+			return inventoryImageArgPartition{}
+		}
+		return inventoryImageArgPartition{positionals: append([]string(nil), args[index+1:]...), ok: true}
+	}
+
+	raw := args[index]
+	name, _, hasValue, isFlag := splitGlobalFlag(raw)
+	known, consumesValue := inventoryImageRouteFlag(path, name)
+	if !isFlag {
+		return prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
+	}
+	shieldAfter := 1
+	if path == "inventory image download" {
+		shieldAfter = 2
+	}
+	if !known {
+		if positionalCount >= shieldAfter {
+			return prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
+		}
+		return prependInventoryImageOption([]string{raw}, partitionInventoryImageArgs(args, path, index+1, positionalCount))
+	}
+
+	next := index + 1
+	optionTokens := []string{raw}
+	if consumesValue && !hasValue && next < len(args) {
+		optionTokens = append(optionTokens, args[next])
+		next++
+	}
+	best := prependInventoryImageOption(optionTokens, partitionInventoryImageArgs(args, path, next, positionalCount))
+	if path == "inventory image download" && positionalCount >= shieldAfter {
+		asPositional := prependInventoryImagePositional(raw, partitionInventoryImageArgs(args, path, index+1, positionalCount+1))
+		if asPositional.ok && (!best.ok || asPositional.optionCount >= best.optionCount) {
+			best = asPositional
+		}
+	}
+	return best
+}
+
+func inventoryImageRouteFlag(path, name string) (known, consumesValue bool) {
+	switch name {
+	case "json", "help", "h":
+		return true, false
+	case "server", "timeout":
+		return true, true
+	}
+	if path == "inventory image add" {
+		switch name {
+		case "caption", "alt-text", "cover", "idempotency-key":
+			return true, true
+		}
+	}
+	if path == "inventory image download" {
+		switch name {
+		case "variant":
+			return true, true
+		case "force":
+			return true, false
+		}
+	}
+	return false, false
+}
+
+func prependInventoryImageOption(tokens []string, partition inventoryImageArgPartition) inventoryImageArgPartition {
+	if !partition.ok {
+		return partition
+	}
+	partition.options = append(append([]string(nil), tokens...), partition.options...)
+	partition.optionCount++
+	return partition
+}
+
+func prependInventoryImagePositional(value string, partition inventoryImageArgPartition) inventoryImageArgPartition {
+	if !partition.ok {
+		return partition
+	}
+	partition.positionals = append([]string{value}, partition.positionals...)
+	return partition
 }
 
 func nextCommandToken(args []string, start int) (string, int, bool) {

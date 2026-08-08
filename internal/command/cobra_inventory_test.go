@@ -153,12 +153,22 @@ func TestCobraInventoryWriteNormalizationPreservesDashPrefixedValuesAndFiles(t *
 		{
 			name: "image dash-prefixed path and later legacy flag",
 			args: []string{"-server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state", "-caption", "0=Front"},
-			want: []string{"--server=https://inventory.example", "inventory", "image", "add", commandLotID, "-state", "--caption", "0=Front"},
+			want: []string{"--server=https://inventory.example", "inventory", "image", "add", "--caption", "0=Front", "--", commandLotID, "-state"},
 		},
 		{
 			name: "explicit false boolean",
 			args: []string{"inventory", "image", "update", commandLotID, commandImageID, "-cover=false"},
 			want: []string{"inventory", "image", "update", commandLotID, commandImageID, "--cover=false"},
+		},
+		{
+			name: "dash upload before metadata",
+			args: []string{"inventory", "image", "add", commandLotID, "-state.jpg", "--caption", "0=Front"},
+			want: []string{"inventory", "image", "add", "--caption", "0=Front", "--", commandLotID, "-state.jpg"},
+		},
+		{
+			name: "recognized dash destination before later option",
+			args: []string{"inventory", "image", "download", commandLotID, commandImageID, "-force", "--variant", "thumbnail"},
+			want: []string{"inventory", "image", "download", "--variant", "thumbnail", "--", commandLotID, commandImageID, "-force"},
 		},
 	}
 	for _, test := range tests {

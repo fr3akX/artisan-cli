@@ -84,6 +84,57 @@ func TestCobraImageAddRepeatedMetadataAfterPositionalsPreservesAssociations(t *t
 	}
 }
 
+func TestCobraImageAddAcceptsDashPrefixedFilenameBeforeMetadataFlags(t *testing.T) {
+	dir := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	const filename = "-state.jpg"
+	if err := os.WriteFile(filename, []byte("dash-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	var uploadedFilename, uploadedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := multipart.NewReader(r.Body, parameters["boundary"])
+		part, err := reader.NextPart()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(part).Decode(&manifest); err != nil {
+			t.Fatal(err)
+		}
+		part, err = reader.NextPart()
+		if err != nil {
+			t.Fatal(err)
+		}
+		uploadedFilename = part.FileName()
+		body, _ := io.ReadAll(part)
+		uploadedBody = string(body)
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "image", "add", commandLotID, filename, "--caption", "0=Dash file")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	images := manifest["images"].([]any)
+	if uploadedFilename != filename || uploadedBody != "dash-image" || images[0].(map[string]any)["caption"] != "Dash file" {
+		t.Fatalf("filename=%q body=%q manifest=%#v", uploadedFilename, uploadedBody, manifest)
+	}
+}
+
 func TestInventoryLotCreateSupportsRepeatedImageDeclarations(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "front.jpeg")
@@ -258,6 +309,38 @@ func TestInventoryImageDownloadSelectsVariantAndWritesOnlyFile(t *testing.T) {
 	data := envelope["data"].(map[string]any)
 	if data["path"] != destination || data["variant"] != "thumbnail" || data["bytes"] != float64(len(body)) {
 		t.Fatalf("envelope = %#v", envelope)
+	}
+}
+
+func TestCobraImageDownloadAcceptsDashPrefixedDestinationBeforeLaterFlags(t *testing.T) {
+	dir := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	const destination = "-force"
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = io.WriteString(w, "dash-destination")
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "image", "download", commandLotID, commandImageID, destination, "--variant", "thumbnail")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	body, err := os.ReadFile(destination)
+	if err != nil || string(body) != "dash-destination" {
+		t.Fatalf("destination body = %q, %v", body, err)
+	}
+	if path != "/api/v1/inventory/admin/bean-lots/"+commandLotID+"/images/"+commandImageID+"/thumbnail" {
+		t.Fatalf("path = %q", path)
 	}
 }
 
