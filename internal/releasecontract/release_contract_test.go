@@ -164,11 +164,8 @@ func TestPowerShellWrapperWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Skip("pwsh is unavailable")
 	}
-	root := repositoryRoot(t)
+	root := copyReleaseRoot(t)
 	leaf := "contract-powershell"
-	output := filepath.Join(root, "dist", leaf)
-	_ = os.RemoveAll(output)
-	t.Cleanup(func() { _ = os.RemoveAll(output) })
 	command := exec.Command(powerShell, "-NoProfile", "-File", "scripts/build-release.ps1", "-Version", testVersion, "-Commit", testCommit, "-Destination", leaf)
 	command.Dir = root
 	command.Env = append(os.Environ(), "GO="+goCommand(t))
@@ -186,15 +183,11 @@ func TestReleaseArchives(t *testing.T) {
 			t.Skipf("%s is unavailable: %v", tool, err)
 		}
 	}
-	root := repositoryRoot(t)
+	root := copyReleaseRoot(t)
 	leafA := "work"
 	leafB := "contract-test-b"
 	output := filepath.Join(root, "dist", leafA)
 	outputB := filepath.Join(root, "dist", leafB)
-	for _, path := range []string{output, outputB} {
-		removeReleaseTree(path)
-	}
-	t.Cleanup(func() { removeReleaseTree(output); removeReleaseTree(outputB) })
 	runReleaseBuilder(t, root, leafA, "077")
 	runReleaseBuilder(t, root, leafB, "022")
 	for _, directory := range []string{output, outputB} {
@@ -328,24 +321,6 @@ func runReleaseBuilder(t *testing.T, root, leaf, umask string) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("release builder (%s) failed: %v\n%s", umask, err, output)
 	}
-}
-
-func removeReleaseTree(path string) {
-	_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if entry.IsDir() {
-			_ = os.Chmod(current, 0o755)
-		} else {
-			_ = os.Chmod(current, 0o644)
-		}
-		return nil
-	})
-	_ = os.RemoveAll(path)
 }
 
 func repositoryRoot(t *testing.T) string {
@@ -925,6 +900,101 @@ func assertChecksums(t *testing.T, directory string, archives []string) {
 		if got[archive] != hex.EncodeToString(digest[:]) {
 			t.Errorf("checksum mismatch for %s", archive)
 		}
+	}
+}
+
+func copyReleaseRoot(t *testing.T) string {
+	t.Helper()
+	source := repositoryRoot(t)
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if entry.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			} else {
+				_ = os.Chmod(path, 0o644)
+			}
+			return nil
+		})
+	})
+	for _, relative := range []string{"cmd", "internal", "skills", "scripts", "go.mod", "go.sum", "LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt"} {
+		sourcePath := filepath.Join(source, relative)
+		err := filepath.WalkDir(sourcePath, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			suffix, err := filepath.Rel(source, path)
+			if err != nil {
+				return err
+			}
+			destination := filepath.Join(root, suffix)
+			if entry.IsDir() {
+				return os.MkdirAll(destination, 0o755)
+			}
+			if !entry.Type().IsRegular() {
+				return nil
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destination, contents, 0o644)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	assertIsolatedReleaseRoot(t, source, root)
+	return root
+}
+
+func assertIsolatedReleaseRoot(t *testing.T, source, root string) {
+	t.Helper()
+	relative, err := filepath.Rel(source, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		t.Fatalf("mutable release root %q is inside developer checkout %q", root, source)
+	}
+	wantTopLevel := []string{"LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt", "cmd", "dist", "go.mod", "go.sum", "internal", "scripts", "skills"}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTopLevel := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		gotTopLevel = append(gotTopLevel, entry.Name())
+	}
+	if strings.Join(gotTopLevel, "\n") != strings.Join(wantTopLevel, "\n") {
+		t.Fatalf("isolated release root entries = %v, want exactly %v", gotTopLevel, wantTopLevel)
+	}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("isolated release root contains symlink %q", path)
+		}
+		if !entry.IsDir() && !entry.Type().IsRegular() {
+			return fmt.Errorf("isolated release root contains non-regular file %q", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dist, err := os.Lstat(filepath.Join(root, "dist"))
+	if err != nil || !dist.IsDir() || dist.Mode()&os.ModeSymlink != 0 || dist.Mode().Perm() != 0o755 {
+		t.Fatalf("isolated release dist is not a canonical directory: %v %v", dist, err)
 	}
 }
 

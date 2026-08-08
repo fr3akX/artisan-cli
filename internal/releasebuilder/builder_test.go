@@ -156,15 +156,13 @@ func TestBuildLateFailureLeavesFinalAbsent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the release matrix")
 	}
-	root := repositoryRoot(t)
+	root := copyBuildRoot(t)
 	leaf := "builder-late-failure-test"
 	final := filepath.Join(root, "dist", leaf)
-	_ = os.RemoveAll(final)
 	sentinel := filepath.Join(root, "late-failure-sentinel")
 	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(final); _ = os.Remove(sentinel) })
 	injected := errors.New("injected late failure")
 	err := Build(Options{Root: root, Version: contractVersion, Commit: contractCommit, Destination: leaf, Go: goCommand(t), BeforePublish: func() error { return injected }})
 	if !errors.Is(err, injected) {
@@ -842,7 +840,23 @@ func copyBuildRoot(t *testing.T) string {
 	if err := os.Mkdir(filepath.Join(root, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	assertIsolatedBuildRoot(t, source, root)
 	return root
+}
+
+func assertIsolatedBuildRoot(t *testing.T, source, root string) {
+	t.Helper()
+	relative, err := filepath.Rel(source, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		t.Fatalf("mutable build root %q is inside developer checkout %q", root, source)
+	}
+	info, err := os.Lstat(filepath.Join(root, "dist"))
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o755 {
+		t.Fatalf("isolated build dist is not a canonical directory: %v %v", info, err)
+	}
 }
 
 func fakeRoot(t *testing.T) string {
