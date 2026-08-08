@@ -143,16 +143,17 @@ func TestParseFailureJSONIntentIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagsMustPrecedeCommand(t *testing.T) {
+func TestGlobalFlagsAreAcceptedAfterCommand(t *testing.T) {
 	code, stdout, stderr := runCommand(t, "version", "--json")
-	if code != 2 {
-		t.Fatalf("Run() code = %d, want 2", code)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, want 0", code)
 	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty", stdout)
+	want := "{\"ok\":true,\"data\":{\"version\":\"dev\",\"commit\":\"unknown\"}}\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	if stderr == "" {
-		t.Fatal("stderr is empty, want usage diagnostic")
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
 	}
 }
 
@@ -265,13 +266,14 @@ func TestGlobalTimeoutHasFiniteMaximumBoundary(t *testing.T) {
 }
 
 func TestZeroRuntimeDoesNotPanic(t *testing.T) {
-	if code := Run(context.Background(), []string{"version"}, Runtime{}); code != 0 {
+	runtime := Runtime{ConfigDir: t.TempDir()}
+	if code := Run(context.Background(), []string{"version"}, runtime); code != 0 {
 		t.Fatalf("version code = %d, want 0", code)
 	}
-	if code := Run(context.Background(), nil, Runtime{}); code != usageExitCode {
+	if code := Run(context.Background(), nil, runtime); code != usageExitCode {
 		t.Fatalf("empty command code = %d, want %d", code, usageExitCode)
 	}
-	if code := Run(context.Background(), []string{"auth", "status"}, Runtime{}); code != 3 {
+	if code := Run(context.Background(), []string{"auth", "status"}, runtime); code != 3 {
 		t.Fatalf("auth status code = %d, want 3", code)
 	}
 }

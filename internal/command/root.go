@@ -3,16 +3,13 @@ package command
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/fr3akX/artisan-cli/internal/config"
 	"github.com/fr3akX/artisan-cli/internal/output"
-	"github.com/fr3akX/artisan-cli/internal/release"
 )
 
 const (
@@ -24,86 +21,12 @@ const (
 // Run parses args, executes a command, and returns the process exit code.
 func Run(ctx context.Context, args []string, runtime Runtime) int {
 	runtime = normalizeRuntime(runtime)
-	flags := flag.NewFlagSet("artisan", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	jsonMode := flags.Bool("json", false, "emit a JSON envelope")
-	server := flags.String("server", "", "override the Artisan Server URL")
-	timeout := flags.Duration("timeout", 30*time.Second, "request timeout")
-	if err := flags.Parse(args); err != nil {
-		return writeFailure(runtime, jsonModeForParseFailure(args), output.Error{
-			ExitCode: usageExitCode,
-			Code:     "usage",
-			Message:  "Invalid global option",
-		})
+	root, state := newRootCommand(ctx, runtime, args)
+	root.SetArgs(args)
+	if err := root.ExecuteContext(ctx); err != nil {
+		return writeCobraFailure(runtime, state, args, err)
 	}
-	serverProvided := false
-	flags.Visit(func(parsed *flag.Flag) {
-		if parsed.Name == "server" {
-			serverProvided = true
-		}
-	})
-	if serverProvided {
-		normalized, err := config.NormalizeServerURL(*server)
-		if err != nil {
-			return writeFailure(runtime, *jsonMode, output.Error{
-				ExitCode: usageExitCode,
-				Code:     "invalid_server_url",
-				Message:  "Server URL is invalid",
-			})
-		}
-		*server = normalized
-	}
-	if *timeout <= 0 || *timeout > MaxGlobalTimeout {
-		message := "Timeout must be greater than zero"
-		if *timeout > MaxGlobalTimeout {
-			message = "Timeout must not exceed " + MaxGlobalTimeout.String()
-		}
-		return writeFailure(runtime, *jsonMode, output.Error{
-			ExitCode: usageExitCode,
-			Code:     "invalid_timeout",
-			Message:  message,
-		})
-	}
-	remaining := flags.Args()
-	if len(remaining) == 0 {
-		return writeFailure(runtime, *jsonMode, output.Error{
-			ExitCode: usageExitCode,
-			Code:     "usage",
-			Message:  "A command is required",
-		})
-	}
-
-	switch remaining[0] {
-	case "auth":
-		return runAuth(ctx, remaining[1:], runtime, *jsonMode, *server, *timeout)
-	case "inventory":
-		return runInventory(ctx, remaining[1:], runtime, *jsonMode, *server, *timeout)
-	case "skill":
-		return runSkill(ctx, remaining[1:], runtime, *jsonMode)
-	case "version":
-		if len(remaining) != 1 {
-			return writeFailure(runtime, *jsonMode, output.Error{
-				ExitCode: usageExitCode,
-				Code:     "usage",
-				Message:  "version does not accept arguments",
-			})
-		}
-		info := release.Info()
-		err := output.WriteSuccess(runtime.Out, *jsonMode, info, func(w io.Writer) error {
-			_, err := fmt.Fprintf(w, "artisan %s (%s)\n", info.Version, info.Commit)
-			return err
-		})
-		if err != nil {
-			return reportWriteError(runtime.Err, err)
-		}
-		return 0
-	default:
-		return writeFailure(runtime, *jsonMode, output.Error{
-			ExitCode: usageExitCode,
-			Code:     "usage",
-			Message:  "Unknown command: " + remaining[0],
-		})
-	}
+	return state.exitCode
 }
 
 // jsonModeForParseFailure determines the final valid --json setting in the

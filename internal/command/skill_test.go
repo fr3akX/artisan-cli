@@ -44,7 +44,7 @@ func TestSkillHelpAndUsage(t *testing.T) {
 		args []string
 		want string
 	}{
-		{args: []string{"skill", "--help"}, want: "artisan skill show|install"},
+		{args: []string{"skill", "--help"}, want: "Available Commands:"},
 		{args: []string{"skill", "show", "--help"}, want: "artisan skill show"},
 		{args: []string{"skill", "install", "--help"}, want: "--directory ROOT"},
 	} {
