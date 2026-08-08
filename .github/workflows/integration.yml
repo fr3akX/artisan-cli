@@ -15,6 +15,8 @@ jobs:
       ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080
       ARTISAN_INTEGRATION_ADMIN_EMAIL: owner@example.com
       ARTISAN_INTEGRATION_ADMIN_NICKNAME: Owner
+      ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com
+      ARTISAN_INTEGRATION_MEMBER_NICKNAME: Member
       ARTISAN_INTEGRATION_ADMIN_ORGANIZATION: My Roastery
       ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG: my-roastery
       ARTISAN_SERVER_HTTP_PORT: "18080"
@@ -57,10 +59,13 @@ jobs:
           set -euo pipefail
           project="artisan-server-e2e-$(openssl rand -hex 6)"
           admin_password="$(openssl rand -base64 36 | tr -d '\n')"
+          member_password="$(openssl rand -base64 36 | tr -d '\n')"
           echo "::add-mask::$admin_password"
+          echo "::add-mask::$member_password"
           {
             echo "ARTISAN_SERVER_E2E_PROJECT_NAME=$project"
             echo "ARTISAN_INTEGRATION_ADMIN_PASSWORD=$admin_password"
+            echo "ARTISAN_INTEGRATION_MEMBER_PASSWORD=$member_password"
           } >> "$GITHUB_ENV"
           mkdir -p artisan-server/secrets
           chmod 0700 artisan-server/secrets
@@ -132,6 +137,33 @@ jobs:
             --organization "$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION" \
             --slug "$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
             --password-file /run/secrets/admin_password
+
+      - name: Provision disposable member
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          issued_file="$(mktemp)"
+          trap 'rm -f "$issued_file"' EXIT
+          timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" \
+            run --rm \
+            -e "ARTISAN_E2E_MEMBER_EMAIL=$ARTISAN_INTEGRATION_MEMBER_EMAIL" \
+            -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
+            -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
+            -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+            -v "$GITHUB_WORKSPACE/integration/provision_member.py:/tmp/provision_member.py:ro" \
+            api python /tmp/provision_member.py > "$issued_file"
+          IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
+          [[ "$member_token" =~ ^[^[:space:]]+$ ]]
+          [[ "$member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+          echo "::add-mask::$member_token"
+          {
+            echo "ARTISAN_INTEGRATION_MEMBER_TOKEN=$member_token"
+            echo "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID=$member_credential_id"
+          } >> "$GITHUB_ENV"
+          rm -f "$issued_file"
+          trap - EXIT
 
       - name: Build compiled CLI
         shell: bash

@@ -7,17 +7,19 @@ description: Use when an agent is asked to inspect or change bean lots, inventor
 
 ## Safety Gate
 
-1. Start every run:
+1. Start every run by checking the installed CLI version:
 
 ```sh
-artisan --json auth status
+artisan version
 ```
 
-2. Require the exact expected user, organization, and role plus the exact expected server URL from the human before mutation. Match only user, organization, and role from the auth-status JSON; it has no server field. Establish server assurance by invoking this check and every later command with the supplied global `--server` value:
+2. Obtain the exact trusted server URL from the human, bind it in `TRUSTED_SERVER`, and then verify the server-bound credential:
 
 ```sh
-artisan --json --server <EXPECTED_SERVER_URL> auth status
+artisan --json --server "$TRUSTED_SERVER" auth status
 ```
+
+Require the exact expected user, organization, and role plus that exact server URL before mutation. Match user, organization, and role from the auth-status JSON; server assurance comes from the explicit global `--server` binding on this check and every later command.
 
 3. Organization assurance comes from the bound auth identity plus server-side tenant scoping, not inventory response fields. Stop on identity/organization/server/role mismatch, nonzero exit, `ok:false`, malformed or incomplete JSON, timeout or ambiguous result, missing/repeated cursor, pagination limit, permission failure, or server upgrade requirement.
 4. Use JSON for automation; validate fields, IDs, states, and integer values. Never parse human tables.
@@ -59,7 +61,7 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --limit 100
 ```
 
-Before adjustment, show current `on_hand_grams`, `reserved_grams`, `available_grams`, signed delta, reason, and expected post-adjustment gram fields; then apply the Mutation Gate.
+Before adjustment, show current `on_hand_grams`, `reserved_grams`, `available_grams`, signed delta (never target stock), reason, and expected post-adjustment gram fields; then apply the Mutation Gate.
 
 ## Images: Resolve, Mutate, Re-read
 

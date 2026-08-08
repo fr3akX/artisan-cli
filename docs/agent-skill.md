@@ -54,10 +54,10 @@ explicit human approval immediately before mutation.
 
 Critically, an agent **must not handle tokens**: it must never request, read,
 print, persist, or pass one. An agent **must not log in** and must never run
-`artisan auth login`. A human authenticates outside the agent session. The
-agent begins with `artisan --json --server EXPECTED_URL auth status` and stops
-on mismatch, incomplete JSON, ambiguity, bounds, permissions, timeout, or an
-upgrade requirement.
+`artisan auth login`. A human authenticates outside the agent session. The agent begins, in order, with `artisan version` and then
+`artisan --json --server "$TRUSTED_SERVER" auth status`; it stops on mismatch,
+incomplete JSON, ambiguity, bounds, permissions, timeout, or an upgrade
+requirement.
 
 Installing a skill is not a sandbox or authorization grant. The host agent,
 its tool permissions, the selected server, local account, and human approval

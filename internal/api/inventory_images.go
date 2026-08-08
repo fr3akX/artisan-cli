@@ -281,7 +281,7 @@ func emptyRequestBody() (io.ReadCloser, string, error) {
 func multipartPreparationFailure(err error) *output.Error {
 	var imageFailure *multipartFileError
 	if errors.As(err, &imageFailure) {
-		return mutationUsage("invalid_image_file", "Image files must be readable regular JPEG or PNG files")
+		return mutationUsage("invalid_image_file", "Image files must be readable nonempty regular JPEG or PNG files no larger than 10 MiB each")
 	}
 	return &output.Error{ExitCode: 1, Code: "request_body_error", Message: "Unable to prepare the request body"}
 }

@@ -111,6 +111,28 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	if client == nil {
 		return code
 	}
+	identity, identityFailure := client.Identity(ctx)
+	if identityFailure != nil {
+		return writeFailure(runtime, jsonMode, *identityFailure)
+	}
+	if identity.Role == "member" {
+		if options.Query != "" || options.State != "" || options.Availability != "" || options.Conflict != "" || options.RoastUUID != "" {
+			return writeFailure(runtime, jsonMode, output.Error{ExitCode: 2, Code: "member_list_filters_unsupported", Message: "Member lot lists support only --limit, --cursor, and --all"})
+		}
+		pageOptions := api.PageOptions{Limit: options.Limit, Cursor: options.Cursor}
+		var page api.DesktopBeanLotPage
+		var failure *output.Error
+		if *all {
+			page, failure = client.ListAllDesktopBeanLots(ctx, pageOptions)
+		} else {
+			page, failure = client.ListDesktopBeanLots(ctx, pageOptions)
+		}
+		if failure != nil {
+			return writeFailure(runtime, jsonMode, *failure)
+		}
+		return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeDesktopLotTable(w, page) })
+	}
+
 	var page api.BeanLotPage
 	var failure *output.Error
 	if *all {
@@ -245,6 +267,17 @@ func writeInventorySuccess(runtime Runtime, jsonMode bool, data any, human func(
 		return reportWriteError(runtime.Err, err)
 	}
 	return 0
+}
+
+func writeDesktopLotTable(w io.Writer, page api.DesktopBeanLotPage) error {
+	rows := make([][]string, 0, len(page.Items))
+	for _, lot := range page.Items {
+		rows = append(rows, []string{lot.LotID, lot.Name, optionalString(lot.Origin), strings.Join(lot.Varietals, ", "), optionalString(lot.ProcessingMethod), optionalInt(lot.CropYear), strconv.FormatInt(lot.OnHandGrams, 10), strconv.FormatInt(lot.ReservedGrams, 10), strconv.FormatInt(lot.AvailableGrams, 10), strconv.FormatInt(lot.UnresolvedConflictCount, 10)})
+	}
+	if err := output.WriteTable(w, []string{"LOT ID", "NAME", "ORIGIN", "VARIETALS", "PROCESSING METHOD", "CROP YEAR", "ON HAND GRAMS", "RESERVED GRAMS", "AVAILABLE GRAMS", "CONFLICTS"}, rows); err != nil {
+		return err
+	}
+	return writeNextCursor(w, page.NextCursor)
 }
 
 func writeLotTable(w io.Writer, page api.BeanLotPage) error {

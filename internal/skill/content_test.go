@@ -38,8 +38,8 @@ func TestSkillContentContract(t *testing.T) {
 	}
 
 	required := []string{
-		"artisan --json auth status",
-		"artisan --json --server <EXPECTED_SERVER_URL> auth status",
+		"artisan version",
+		"artisan --json --server \"$TRUSTED_SERVER\" auth status",
 		"never request, read, print, persist, or pass a token",
 		"never run `artisan auth login`",
 		"exact expected user, organization, and role",
@@ -93,8 +93,14 @@ func TestSkillContentContract(t *testing.T) {
 		}
 	}
 
-	if count := strings.Count(text, "artisan --json auth status"); count != 1 {
-		t.Errorf("unbound initial auth status count = %d, want exactly 1", count)
+	version := strings.Index(text, "artisan version")
+	boundStatus := strings.Index(text, `artisan --json --server "$TRUSTED_SERVER" auth status`)
+	if version < 0 || boundStatus < 0 || version >= boundStatus {
+		t.Fatalf("startup sequence is not version then server-bound auth status: version=%d auth=%d", version, boundStatus)
+	}
+	startup := text[strings.Index(text, "## Safety Gate"):strings.Index(text, "## Mutation Gate")]
+	if strings.Count(startup, "auth status") != 1 || strings.Contains(startup, "artisan --json auth status") {
+		t.Fatalf("startup contains unbound-first or repeated auth status: %q", startup)
 	}
 	if strings.Contains(text, "artisan --json inventory ") {
 		t.Error("skill contains an inventory command not bound to the expected server")

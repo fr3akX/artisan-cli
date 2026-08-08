@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,61 @@ func TestListBeanLotsSendsExactFiltersAndEscapesValues(t *testing.T) {
 	}
 	if page.NextCursor == nil || *page.NextCursor != "next +/= cursor" {
 		t.Fatalf("next cursor = %#v", page.NextCursor)
+	}
+}
+
+func TestListDesktopBeanLotsUsesExactReducedRouteAndPaginationQuery(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	client := inventoryAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.Query()
+		writeInventoryJSON(w, `{"items":[{"lot_id":"11111111111141118111111111111111","name":"Member lot","origin":"Ethiopia","varietals":["Heirloom"],"processing_method":"washed","crop_year":2026,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2,"future_field":true}],"next_cursor":"opaque +/="}`)
+	})
+	page, failure := client.ListDesktopBeanLots(context.Background(), PageOptions{Limit: 17, Cursor: "bound +/="})
+	if failure != nil {
+		t.Fatalf("ListDesktopBeanLots() failure = %#v", failure)
+	}
+	if gotPath != "/api/v1/inventory/bean-lots" || !reflect.DeepEqual(gotQuery, url.Values{"limit": {"17"}, "cursor": {"bound +/="}}) {
+		t.Fatalf("path=%q query=%#v", gotPath, gotQuery)
+	}
+	if len(page.Items) != 1 || page.Items[0].Name != "Member lot" || page.Items[0].AvailableGrams != 3750 || page.NextCursor == nil || *page.NextCursor != "opaque +/=" {
+		t.Fatalf("page = %#v", page)
+	}
+}
+
+func TestListAllDesktopBeanLotsFollowsOpaqueCursorsAndBoundsTraversal(t *testing.T) {
+	var cursors []string
+	client := inventoryAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		cursors = append(cursors, r.URL.Query().Get("cursor"))
+		if len(cursors) == 1 {
+			writeInventoryJSON(w, `{"items":[],"next_cursor":"opaque cursor"}`)
+			return
+		}
+		writeInventoryJSON(w, `{"items":[],"next_cursor":null}`)
+	})
+	page, failure := client.ListAllDesktopBeanLots(context.Background(), PageOptions{Limit: 1})
+	if failure != nil || page.NextCursor != nil || !reflect.DeepEqual(cursors, []string{"", "opaque cursor"}) {
+		t.Fatalf("page=%#v failure=%#v cursors=%#v", page, failure, cursors)
+	}
+}
+
+func TestDesktopBeanLotPageRejectsMissingInvalidAndPrivateFullProjectionFields(t *testing.T) {
+	valid := `{"items":[{"lot_id":"11111111111141118111111111111111","name":"Member lot","origin":null,"varietals":[],"processing_method":null,"crop_year":null,"on_hand_grams":5,"reserved_grams":2,"available_grams":3,"unresolved_conflict_count":0}],"next_cursor":null}`
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing varietals", body: strings.Replace(valid, `,"varietals":[]`, "", 1)},
+		{name: "null varietals", body: strings.Replace(valid, `"varietals":[]`, `"varietals":null`, 1)},
+		{name: "inconsistent balance", body: strings.Replace(valid, `"available_grams":3`, `"available_grams":4`, 1)},
+		{name: "invalid processing", body: strings.Replace(valid, `"processing_method":null`, `"processing_method":"magic"`, 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := inventoryAPIClient(t, func(w http.ResponseWriter, _ *http.Request) { writeInventoryJSON(w, test.body) })
+			if _, failure := client.ListDesktopBeanLots(context.Background(), PageOptions{}); failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %#v", failure)
+			}
+		})
 	}
 }
 

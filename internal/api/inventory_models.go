@@ -33,7 +33,21 @@ type InventoryImage struct {
 	ThumbnailURL    string  `json:"thumbnail_url"`
 }
 
-// BeanLotSummary is the projection returned by lot lists.
+// DesktopBeanLotView is the reduced active-lot projection available to member credentials.
+type DesktopBeanLotView struct {
+	LotID                   string   `json:"lot_id"`
+	Name                    string   `json:"name"`
+	Origin                  *string  `json:"origin"`
+	Varietals               []string `json:"varietals"`
+	ProcessingMethod        *string  `json:"processing_method"`
+	CropYear                *int64   `json:"crop_year"`
+	OnHandGrams             int64    `json:"on_hand_grams"`
+	ReservedGrams           int64    `json:"reserved_grams"`
+	AvailableGrams          int64    `json:"available_grams"`
+	UnresolvedConflictCount int64    `json:"unresolved_conflict_count"`
+}
+
+// BeanLotSummary is the projection returned by admin lot lists.
 type BeanLotSummary struct {
 	LotID                   string          `json:"lot_id"`
 	Name                    string          `json:"name"`
@@ -133,6 +147,11 @@ type BeanLotPage struct {
 	NextCursor *string          `json:"next_cursor"`
 }
 
+type DesktopBeanLotPage struct {
+	Items      []DesktopBeanLotView `json:"items"`
+	NextCursor *string              `json:"next_cursor"`
+}
+
 type InventoryLedgerEntryPage struct {
 	Items      []InventoryLedgerEntry `json:"items"`
 	NextCursor *string                `json:"next_cursor"`
@@ -156,6 +175,19 @@ func (value *InventoryImage) UnmarshalJSON(data []byte) error {
 	}
 	*value = InventoryImage(decoded)
 	return value.validate("")
+}
+
+func (value *DesktopBeanLotView) UnmarshalJSON(data []byte) error {
+	type wire DesktopBeanLotView
+	var decoded wire
+	if err := decodeRequiredObject(data, &decoded, []string{"origin", "processing_method", "crop_year"}, "lot_id", "name", "origin", "varietals", "processing_method", "crop_year", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "varietals"); err != nil {
+		return err
+	}
+	*value = DesktopBeanLotView(decoded)
+	return value.validate()
 }
 
 func (value *BeanLotSummary) UnmarshalJSON(data []byte) error {
@@ -247,6 +279,19 @@ func (value *InventoryConflict) UnmarshalJSON(data []byte) error {
 	}
 	*value = InventoryConflict(decoded)
 	return value.validate()
+}
+
+func (value *DesktopBeanLotPage) UnmarshalJSON(data []byte) error {
+	type wire DesktopBeanLotPage
+	var decoded wire
+	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+		return err
+	}
+	if err := rejectNullArrayElements(data, "items"); err != nil {
+		return err
+	}
+	*value = DesktopBeanLotPage(decoded)
+	return validatePage(value.Items, value.NextCursor)
 }
 
 func (value *BeanLotPage) UnmarshalJSON(data []byte) error {
@@ -353,6 +398,34 @@ func (value InventoryImage) validate(expectedLot string) error {
 	thumbnail := basePattern.FindStringSubmatch(value.ThumbnailURL)
 	if len(display) != 4 || len(thumbnail) != 4 || display[3] != "display" || thumbnail[3] != "thumbnail" || display[1] != thumbnail[1] || display[2] != value.ImageID || thumbnail[2] != value.ImageID || !validUUID(display[1]) || (expectedLot != "" && display[1] != expectedLot) {
 		return errors.New("invalid inventory image link")
+	}
+	return nil
+}
+
+func (value DesktopBeanLotView) validate() error {
+	name, valid := normalizeRequestText(value.Name, 200, 800, true, false)
+	if !valid || name != value.Name || !validUUID(value.LotID) || !validOptionalEnum(value.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") || !validGrams(value.OnHandGrams) || !between(value.ReservedGrams, 0, maxInventoryGrams) || !validGrams(value.AvailableGrams) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams || !between(value.UnresolvedConflictCount, 0, maxInventoryGrams) || value.Varietals == nil || len(value.Varietals) > 16 {
+		return errors.New("invalid desktop bean lot")
+	}
+	if value.Origin != nil {
+		origin, ok := normalizeRequestText(*value.Origin, 100, 400, false, false)
+		if !ok || origin != *value.Origin {
+			return errors.New("invalid desktop bean lot origin")
+		}
+	}
+	if value.CropYear != nil && !between(*value.CropYear, 1000, 9999) {
+		return errors.New("invalid desktop bean lot crop year")
+	}
+	seen := make(map[string]struct{}, len(value.Varietals))
+	for _, varietal := range value.Varietals {
+		normalized, ok := normalizeRequestText(varietal, 100, 400, true, false)
+		if !ok || normalized != varietal {
+			return errors.New("invalid desktop bean lot varietals")
+		}
+		if _, exists := seen[varietal]; exists {
+			return errors.New("duplicate desktop bean lot varietal")
+		}
+		seen[varietal] = struct{}{}
 	}
 	return nil
 }

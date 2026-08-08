@@ -273,6 +273,11 @@ func ValidateInventoryAdjustment(adjustment InventoryAdjustmentWrite) *output.Er
 	return failure
 }
 
+// NormalizeInventoryAdjustment returns the exact canonical adjustment sent on the wire.
+func NormalizeInventoryAdjustment(adjustment InventoryAdjustmentWrite) (InventoryAdjustmentWrite, *output.Error) {
+	return normalizeInventoryAdjustment(adjustment)
+}
+
 func normalizeInventoryAdjustment(adjustment InventoryAdjustmentWrite) (InventoryAdjustmentWrite, *output.Error) {
 	if adjustment.QuantityGrams == 0 || !validGrams(adjustment.QuantityGrams) {
 		return adjustment, mutationUsage("invalid_grams", "Adjustment grams must be a nonzero integer within the supported range")

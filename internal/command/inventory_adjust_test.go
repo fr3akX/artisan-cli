@@ -27,8 +27,9 @@ func TestInventoryAdjustConfirmationIncludesExactChangeAndSendsCanonicalBody(t *
 	if result.code != 0 {
 		t.Fatalf("result = %#v", result)
 	}
-	if !strings.Contains(result.stderr, commandLotID) || !strings.Contains(result.stderr, "-125 grams") {
-		t.Fatalf("confirmation = %q", result.stderr)
+	wantPrompt := `Adjust lot ` + commandLotID + ` by -125 grams; reason: physical\ncount; reference: <omitted>; occurred at: 2026-08-07T12:34:56.000000Z? Type yes to continue: `
+	if result.stderr != wantPrompt {
+		t.Fatalf("confirmation = %q, want %q", result.stderr, wantPrompt)
 	}
 	if body != `{"quantity_grams":-125,"reason":"physical\ncount","reference":null,"occurred_at":"2026-08-07T12:34:56.000000Z"}` || key != "advanced-key" {
 		t.Fatalf("body=%q key=%q", body, key)
@@ -37,6 +38,40 @@ func TestInventoryAdjustConfirmationIncludesExactChangeAndSendsCanonicalBody(t *
 		if !strings.Contains(result.stdout, balance) {
 			t.Fatalf("output %q missing %q", result.stdout, balance)
 		}
+	}
+}
+
+func TestInventoryAdjustJSONYesSkipsPromptAndSendsNormalizedAdjustment(t *testing.T) {
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		body = string(contents)
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+	runtime := inventoryRuntime(t, server.URL)
+	runtime.IsTerminal = func(int) bool { return true }
+	result := runAuthCommand(t, runtime, "--json", "inventory", "adjust", "11111111-1111-4111-8111-111111111111", "--grams", "25", "--reason", " count\tline ", "--reference", " sheet-1 ", "--occurred-at", commandTimestamp, "--yes")
+	if result.code != 0 || result.stderr != "" || body != `{"quantity_grams":25,"reason":"count\tline","reference":"sheet-1","occurred_at":"`+commandTimestamp+`"}` {
+		t.Fatalf("result=%#v body=%q", result, body)
+	}
+}
+
+func TestInventoryAdjustDeclineDoesNotLoadConfigurationOrConstructClient(t *testing.T) {
+	var getenvCalls atomic.Int64
+	runtime := Runtime{
+		ConfigDir:  t.TempDir(),
+		In:         strings.NewReader("no\n"),
+		IsTerminal: func(int) bool { return true },
+		Getenv: func(string) string {
+			getenvCalls.Add(1)
+			return ""
+		},
+	}
+	result := runAuthCommand(t, runtime, "--json", "inventory", "adjust", "11111111-1111-4111-8111-111111111111", "--grams", "1", "--reason", " count\tline ", "--occurred-at", commandTimestamp)
+	if result.code != 10 || getenvCalls.Load() != 0 {
+		t.Fatalf("result=%#v getenvCalls=%d", result, getenvCalls.Load())
 	}
 }
 

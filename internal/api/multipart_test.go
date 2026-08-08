@@ -540,56 +540,58 @@ func TestManifestMultipartValidatesCountNamesAndRegularFilesBeforeOpeningBody(t 
 	}
 }
 
-func TestManifestMultipartLargeSparseFileDoesNotBufferWholeImage(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "large.png")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const sparseSize = int64(128 << 20)
-	if err := file.Truncate(sparseSize); err != nil {
-		file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
+func TestManifestMultipartEnforcesPerImageSizeBeforeHashing(t *testing.T) {
+	original := fingerprintMultipartFileHook
+	defer func() { fingerprintMultipartFileHook = original }()
+	var hashes int
+	fingerprintMultipartFileHook = func(file *os.File, size int64, cancel <-chan struct{}) ([32]byte, error) {
+		hashes++
+		return fingerprintMultipartFileCancelable(file, size, cancel)
 	}
 
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	factory, err := NewManifestMultipartBody([]byte(`{"images":[{"upload_index":0}]}`), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, contentType, err := factory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, parameters, _ := mime.ParseMediaType(contentType)
-	reader := multipart.NewReader(body, parameters["boundary"])
-	manifest, err := reader.NextPart()
-	if err != nil {
-		body.Close()
-		t.Fatal(err)
-	}
-	if _, err := io.Copy(io.Discard, manifest); err != nil {
-		body.Close()
-		t.Fatal(err)
-	}
-	if _, err := reader.NextPart(); err != nil {
-		body.Close()
-		t.Fatal(err)
-	}
-	started := time.Now()
-	if err := body.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(started) > 2*time.Second {
-		t.Fatal("closing a partially consumed streaming body blocked")
-	}
-	runtime.ReadMemStats(&after)
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8<<20 {
-		t.Fatalf("opening 128 MiB sparse upload allocated %d bytes; body appears buffered", allocated)
+	for _, test := range []struct {
+		name       string
+		size       int64
+		wantError  bool
+		wantHashes int
+	}{
+		{name: "empty", size: 0, wantError: true, wantHashes: 0},
+		{name: "exact limit", size: 10 * 1024 * 1024, wantHashes: 1},
+		{name: "over limit", size: 10*1024*1024 + 1, wantError: true, wantHashes: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hashes = 0
+			path := filepath.Join(t.TempDir(), "image.png")
+			file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(test.size); err != nil {
+				_ = file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			factory, err := NewManifestMultipartBody([]byte(`{"images":[{"upload_index":0}]}`), path)
+			if (err != nil) != test.wantError || hashes != test.wantHashes {
+				t.Fatalf("factory=%v err=%v hashes=%d", factory != nil, err, hashes)
+			}
+			if err == nil {
+				for attempt := 0; attempt < 2; attempt++ {
+					body, _, openErr := factory()
+					if openErr != nil {
+						t.Fatal(openErr)
+					}
+					if _, copyErr := io.Copy(io.Discard, body); copyErr != nil {
+						_ = body.Close()
+						t.Fatal(copyErr)
+					}
+					if closeErr := body.Close(); closeErr != nil {
+						t.Fatal(closeErr)
+					}
+				}
+			}
+		})
 	}
 }

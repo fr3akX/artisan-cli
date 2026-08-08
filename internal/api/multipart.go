@@ -17,7 +17,13 @@ import (
 	"unicode/utf8"
 )
 
-const maxMultipartImages = MaxInventoryImages
+const (
+	maxMultipartImages = MaxInventoryImages
+	// MaxInventoryImageBytes is the server-enforced per-upload image limit.
+	MaxInventoryImageBytes int64 = 10 * 1024 * 1024
+)
+
+var fingerprintMultipartFileHook = fingerprintMultipartFileCancelable
 
 type multipartFileError struct {
 	changed bool
@@ -116,11 +122,11 @@ func captureMultipartImage(path string, cancel <-chan struct{}) (multipartImage,
 		return multipartImage{}, &multipartFileError{}
 	}
 	fileInfo, statErr := file.Stat()
-	if statErr != nil || !fileInfo.Mode().IsRegular() {
+	if statErr != nil || !fileInfo.Mode().IsRegular() || fileInfo.Size() < 1 || fileInfo.Size() > MaxInventoryImageBytes {
 		_ = file.Close()
 		return multipartImage{}, &multipartFileError{}
 	}
-	fingerprint, fingerprintErr := fingerprintMultipartFileCancelable(file, fileInfo.Size(), cancel)
+	fingerprint, fingerprintErr := fingerprintMultipartFileHook(file, fileInfo.Size(), cancel)
 	postFileInfo, postStatErr := file.Stat()
 	postLinkInfo, postLinkErr := os.Lstat(path)
 	closeErr := file.Close()

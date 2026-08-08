@@ -21,6 +21,39 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
+func TestOversizedImageIsRejectedBeforeLotCreateOrImageAddNetwork(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.png")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(10*1024*1024 + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := []ImageUploadManifest{{UploadIndex: 0}}
+	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Varietals: []string{}}, Images: metadata}
+	if _, failure := client.CreateBeanLotWithImages(context.Background(), manifest, []string{path}, "create-key"); failure == nil || failure.Code != "invalid_image_file" {
+		t.Fatalf("create failure = %#v", failure)
+	}
+	if _, failure := client.AddInventoryImages(context.Background(), mutationLotID, metadata, []string{path}, "add-key"); failure == nil || failure.Code != "invalid_image_file" {
+		t.Fatalf("add failure = %#v", failure)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+}
+
 func TestInventoryImageMutationsUseExactAdminContracts(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "front.jpg")

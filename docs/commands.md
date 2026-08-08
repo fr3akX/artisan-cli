@@ -67,9 +67,12 @@ artisan [GLOBAL FLAGS] inventory lot reservations LOT_ID [--limit N] [--cursor C
 artisan [GLOBAL FLAGS] inventory lot conflicts LOT_ID [--limit N] [--cursor CURSOR] [--all]
 ```
 
-List filters accepted by the client are `state=active|archived`,
-`availability=positive|zero|negative`, and `conflict=open|none`. IDs accept
-compact or dashed UUID syntax and are normalized by the client.
+With an administrator credential, list filters are `state=active|archived`,
+`availability=positive|zero|negative`, and `conflict=open|none`, and the full
+admin projection is returned. With a member credential, lot list uses the
+active-only desktop projection and accepts only `--limit`, `--cursor`, and
+`--all`; admin-only filters fail locally after the live identity check. IDs
+accept compact or dashed UUID syntax and are normalized by the client.
 
 ```text
 artisan [GLOBAL FLAGS] inventory lot create LOT-FLAGS
@@ -141,8 +144,9 @@ artisan [GLOBAL FLAGS] inventory adjust LOT_ID --grams SIGNED_INTEGER
     [--idempotency-key KEY] [--yes]
 ```
 
-The CLI supplies the current UTC time when `--occurred-at` is omitted. An
-adjustment changes integer grams only; zero is rejected. It requires terminal
+The CLI supplies the current UTC time when `--occurred-at` is omitted.
+`--grams` is a signed delta applied to stock, not a target stock value; zero is
+rejected. It requires terminal
 approval, or `--yes` for an already approved noninteractive operation.
 
 ## Images

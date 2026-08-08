@@ -23,6 +23,14 @@ const commandClientID = "77777777777747778777777777777777"
 const commandUserID = "88888888888848888888888888888888"
 const commandTimestamp = "2026-08-04T12:00:00.000000Z"
 
+func commandIdentityForRoleJSON(role string) string {
+	return `{"user":{"id":"11111111-1111-4111-8111-111111111111","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"Roastery","slug":"roastery"},"role":"` + role + `"}`
+}
+
+func commandDesktopLotJSON() string {
+	return `{"lot_id":"` + commandLotID + `","name":"Member lot","origin":"Ethiopia","varietals":["Heirloom"],"processing_method":"washed","crop_year":2026,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2}`
+}
+
 func commandInventorySummary(id, name string, available int) string {
 	return fmt.Sprintf(`{"lot_id":%q,"name":%q,"origin":null,"processing_method":null,"crop_year":null,"state":"active","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":%q}`,
 		id, name, available, available, commandTimestamp)
@@ -65,10 +73,141 @@ func inventoryRuntime(t *testing.T, serverURL string) Runtime {
 	}}
 }
 
+func TestInventoryLotListDispatchesByFreshCredentialIdentityAndMemberOutputIsReduced(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		role      string
+		wantRoute string
+		wantJSON  string
+	}{
+		{name: "admin", role: "admin", wantRoute: "/api/v1/inventory/admin/bean-lots", wantJSON: commandInventorySummaryFull()},
+		{name: "member", role: "member", wantRoute: "/api/v1/inventory/bean-lots", wantJSON: commandDesktopLotJSON()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = fmt.Fprint(w, commandIdentityForRoleJSON(test.role))
+				case test.wantRoute:
+					if !reflect.DeepEqual(r.URL.Query(), url.Values{"limit": {"17"}, "cursor": {"opaque"}}) {
+						t.Errorf("query = %#v", r.URL.Query())
+					}
+					_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":null}`, test.wantJSON)
+				default:
+					t.Errorf("unexpected route %q", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "list", "--limit", "17", "--cursor", "opaque")
+			if result.code != 0 || !reflect.DeepEqual(paths, []string{"/api/v1/auth/me", test.wantRoute}) {
+				t.Fatalf("result=%#v paths=%#v", result, paths)
+			}
+			if test.role == "member" {
+				for _, forbidden := range []string{"state", "cover_image", "updated_at", "images", "created_at", "archived_at"} {
+					if strings.Contains(result.stdout, `"`+forbidden+`"`) {
+						t.Fatalf("member output fabricated %q: %s", forbidden, result.stdout)
+					}
+				}
+				for _, required := range []string{"Member lot", "Heirloom", "3750"} {
+					if !strings.Contains(result.stdout, required) {
+						t.Fatalf("member output missing %q: %s", required, result.stdout)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestInventoryLotListRechecksRoleForEveryInvocation(t *testing.T) {
+	identityCalls := 0
+	var listPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			identityCalls++
+			role := "member"
+			if identityCalls == 2 {
+				role = "admin"
+			}
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON(role))
+			return
+		}
+		listPaths = append(listPaths, r.URL.Path)
+		_, _ = fmt.Fprint(w, `{"items":[],"next_cursor":null}`)
+	}))
+	defer server.Close()
+	runtime := inventoryRuntime(t, server.URL)
+	for index := 0; index < 2; index++ {
+		if result := runAuthCommand(t, runtime, "--json", "inventory", "lot", "list"); result.code != 0 {
+			t.Fatalf("invocation %d = %#v", index, result)
+		}
+	}
+	want := []string{"/api/v1/inventory/bean-lots", "/api/v1/inventory/admin/bean-lots"}
+	if identityCalls != 2 || !reflect.DeepEqual(listPaths, want) {
+		t.Fatalf("identityCalls=%d listPaths=%#v", identityCalls, listPaths)
+	}
+}
+
+func TestInventoryMemberLotListAllPaginatesReducedRoute(t *testing.T) {
+	var paths, cursors []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("member"))
+			return
+		}
+		if r.URL.Path != "/api/v1/inventory/bean-lots" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		cursor := r.URL.Query().Get("cursor")
+		cursors = append(cursors, cursor)
+		if cursor == "" {
+			_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"opaque +/="}`, commandDesktopLotJSON())
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"items":[],"next_cursor":null}`)
+	}))
+	defer server.Close()
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "list", "--limit", "1", "--all")
+	if result.code != 0 || !reflect.DeepEqual(cursors, []string{"", "opaque +/="}) || len(paths) != 3 {
+		t.Fatalf("result=%#v paths=%#v cursors=%#v", result, paths, cursors)
+	}
+}
+
+func TestInventoryMemberLotListRefusesAdminFiltersBeforeReducedRoute(t *testing.T) {
+	for _, option := range [][]string{{"--q", "lot"}, {"--state", "active"}, {"--availability", "positive"}, {"--conflict", "none"}, {"--roast-uuid", commandRoastID}} {
+		t.Run(strings.TrimPrefix(option[0], "--"), func(t *testing.T) {
+			var reducedRequests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v1/auth/me" {
+					_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("member"))
+					return
+				}
+				reducedRequests++
+			}))
+			defer server.Close()
+			args := append([]string{"--json", "inventory", "lot", "list"}, option...)
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+			if result.code != 2 || !strings.Contains(result.stdout, `"code":"member_list_filters_unsupported"`) || reducedRequests != 0 {
+				t.Fatalf("result=%#v reducedRequests=%d", result, reducedRequests)
+			}
+		})
+	}
+}
+
 func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 	var query url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
+			return
+		}
 		if r.URL.Path != "/api/v1/inventory/admin/bean-lots" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
@@ -120,8 +259,12 @@ func TestInventoryBearerReflectionIsRefusedInHumanAndJSONModes(t *testing.T) {
 }
 
 func TestInventoryLotListJSONRetainsPageAndCursor(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"next"}`, commandInventorySummaryFull())
 	}))
 	defer server.Close()
@@ -136,6 +279,10 @@ func TestInventoryLotListAllFollowsOpaqueCursorsAndReturnsNullCursor(t *testing.
 	var cursors []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
+			return
+		}
 		cursor := r.URL.Query().Get("cursor")
 		cursors = append(cursors, cursor)
 		if cursor == "" {
@@ -217,8 +364,12 @@ func TestInventoryJSONContractAssertionsDetectMutatedTagsTypesAndKeys(t *testing
 
 func TestInventoryLotListAllPaginationFailureEmitsNoPartialData(t *testing.T) {
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
+			return
+		}
 		requests++
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"same"}`, commandInventorySummary(commandLotID, "must-not-leak", 5000))
 	}))
@@ -450,8 +601,12 @@ func TestInventoryReadUsageAndUpgradeFailuresHaveStableExits(t *testing.T) {
 			t.Fatalf("Run(%v) code = %d, want local usage exit 2; result = %#v", args, result.code, result)
 		}
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"detail":"Not Found"}`)
 	}))

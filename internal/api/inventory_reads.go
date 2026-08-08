@@ -35,6 +35,26 @@ type PageOptions struct {
 	Cursor string
 }
 
+func (c *Client) ListDesktopBeanLots(ctx context.Context, options PageOptions) (DesktopBeanLotPage, *output.Error) {
+	query, failure := pageQuery(options)
+	if failure != nil {
+		return DesktopBeanLotPage{}, failure
+	}
+	var page DesktopBeanLotPage
+	failure = c.doInventoryRead(ctx, "/api/v1/inventory/bean-lots", query, false, &page)
+	return page, failure
+}
+
+func (c *Client) ListAllDesktopBeanLots(ctx context.Context, options PageOptions) (DesktopBeanLotPage, *output.Error) {
+	items, failure := collectInventoryPages(options.Cursor, MaxInventoryAggregateItems, func(cursor string) ([]DesktopBeanLotView, *string, *output.Error) {
+		pageOptions := options
+		pageOptions.Cursor = cursor
+		page, pageFailure := c.ListDesktopBeanLots(ctx, pageOptions)
+		return page.Items, page.NextCursor, pageFailure
+	})
+	return DesktopBeanLotPage{Items: items, NextCursor: nil}, failure
+}
+
 func (c *Client) ListBeanLots(ctx context.Context, options LotListOptions) (BeanLotPage, *output.Error) {
 	query, failure := lotListQuery(options)
 	if failure != nil {

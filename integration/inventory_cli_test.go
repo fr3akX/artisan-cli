@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,6 +45,11 @@ type liveConfig struct {
 	adminEmail       string
 	adminPassword    string
 	adminNickname    string
+	memberEmail      string
+	memberPassword   string
+	memberNickname   string
+	memberToken      string
+	memberCredential string
 	organization     string
 	organizationSlug string
 }
@@ -563,6 +569,7 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 		"permissions:\n  contents: read", pinnedServerRef, "repository: fr3akX/artisan-server",
 		"integration/artisan-server.ref", "CGO_ENABLED: \"0\"", "go-version: 1.23.x",
 		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080",
+		"ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com", "integration/provision_member.py",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow missing %q", required)
@@ -584,8 +591,8 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 			t.Errorf("Compose wrapper line %d is not directly timeout-bounded: %q", lineNumber+1, line)
 		}
 	}
-	if wrapperCount != 6 {
-		t.Errorf("workflow Compose wrapper count = %d, want config, start down/up, bootstrap, logs, teardown", wrapperCount)
+	if wrapperCount != 7 {
+		t.Errorf("workflow Compose wrapper count = %d, want config, start down/up, bootstrap, member provision, logs, teardown", wrapperCount)
 	}
 	for index, invocation := range composeInvocations(text) {
 		if !strings.Contains(invocation, `-f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml"`) || strings.Count(invocation, " -f ") != 2 {
@@ -780,7 +787,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 		},
 	}
 
-	httpClient, csrf, token, credentialID := issueCredential(t, config)
+	httpClient, csrf, token, credentialID := issueCredential(t, config, config.adminEmail, config.adminPassword)
 	runner.forbiddenToken = token
 	defer revokeCredential(t, httpClient, config.baseURL, csrf, credentialID, token)
 	defer func() {
@@ -828,7 +835,51 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	var listed lotPage
 	runner.runJSON(t, "", &listed, "inventory", "lot", "list", "--q", lotName, "--all")
 	if len(listed.Items) != 1 || listed.Items[0].LotID != created.LotID {
-		t.Fatalf("lot list did not resolve the unique created lot: %+v", listed.Items)
+		t.Fatalf("admin lot list did not resolve the unique created lot: %+v", listed.Items)
+	}
+
+	memberRoot := filepath.Join(root, "member")
+	memberPaths := make(map[string]string)
+	for _, directory := range []string{"home", "config", "state", "tmp", "run"} {
+		memberPaths[directory] = filepath.Join(memberRoot, directory)
+		if err := os.MkdirAll(memberPaths[directory], 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	memberRunner := cliRunner{
+		binary: binary, baseURL: config.baseURL, cwd: memberPaths["run"],
+		env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + memberPaths["home"], "XDG_CONFIG_HOME=" + memberPaths["config"], "XDG_STATE_HOME=" + memberPaths["state"], "TMPDIR=" + memberPaths["tmp"]},
+	}
+	memberToken, memberCredentialID := config.memberToken, config.memberCredential
+	memberRunner.forbiddenToken = memberToken
+	defer revokeCredential(t, httpClient, config.baseURL, csrf, memberCredentialID, memberToken)
+	memberNeedsLogout := true
+	defer func() {
+		if memberNeedsLogout {
+			if err := memberRunner.cleanupLogout(); err != nil {
+				t.Error(err)
+			}
+		}
+		if err := assertTokenAbsent(memberToken, memberRunner.records, nil); err != nil {
+			t.Error(err)
+		}
+		if err := assertTokenAbsentFromTrees(memberToken, memberPaths["config"], memberPaths["state"], memberPaths["home"], memberPaths["tmp"], memberPaths["run"]); err != nil {
+			t.Error(err)
+		}
+	}()
+	var memberIdentity authIdentity
+	memberRunner.runJSON(t, memberToken+"\n", &memberIdentity, "auth", "login", "--token-stdin")
+	assertExpectedMemberIdentity(t, memberIdentity, config)
+	var memberListed lotPage
+	memberRunner.runJSON(t, "", &memberListed, "inventory", "lot", "list", "--limit", "1", "--all")
+	foundMemberLot := false
+	for _, item := range memberListed.Items {
+		if item.LotID == created.LotID && item.Name == lotName {
+			foundMemberLot = true
+		}
+	}
+	if !foundMemberLot {
+		t.Fatalf("member reduced lot list did not include created active lot: %+v", memberListed.Items)
 	}
 
 	occurredAt := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
@@ -866,12 +917,27 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 		t.Fatalf("downloaded image is not the exact reported WebP result")
 	}
 
+	for _, denied := range [][]string{
+		{"inventory", "lot", "show", created.LotID},
+		{"inventory", "lot", "create", "--name", "Denied member create", "--idempotency-key", "cli-" + runID + "-deny-create"},
+		{"inventory", "lot", "update", created.LotID, "--name", "Denied member update", "--idempotency-key", "cli-" + runID + "-deny-update"},
+		{"inventory", "lot", "archive", created.LotID, "--yes", "--idempotency-key", "cli-" + runID + "-deny-archive"},
+		{"inventory", "lot", "restore", created.LotID, "--idempotency-key", "cli-" + runID + "-deny-restore"},
+		{"inventory", "lot", "ledger", created.LotID},
+		{"inventory", "lot", "reservations", created.LotID},
+		{"inventory", "adjust", created.LotID, "--grams", "1", "--reason", "Denied member adjustment", "--yes", "--idempotency-key", "cli-" + runID + "-deny-adjust"},
+		{"inventory", "conflict", "list", "--lot", created.LotID},
+		{"inventory", "image", "add", "--idempotency-key", "cli-" + runID + "-deny-image", created.LotID, imagePath},
+	} {
+		memberRunner.runJSONError(t, 5, "administrator_required", denied...)
+	}
+
 	reservationUUID := randomHex(t, 16)
 	clientUUID := randomHex(t, 16)
 	roastUUID := randomHex(t, 16)
 	reservedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	var reservation reservationMutation
-	runner.runJSON(t, "", &reservation,
+	memberRunner.runJSON(t, "", &reservation,
 		"inventory", "reservation", "create", "--client-reservation-uuid", reservationUUID,
 		"--client-instance-uuid", clientUUID, "--roast-uuid", roastUUID, "--lot-id", created.LotID,
 		"--planned-grams", "1000", "--occurred-at", reservedAt, "--idempotency-key", "cli-"+runID+"-reserve",
@@ -882,10 +948,34 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if reservation.Balance.OnHandGrams != 5750 || reservation.Balance.ReservedGrams != 1000 || reservation.Balance.AvailableGrams != 4750 {
 		t.Fatalf("reservation balance = %+v", reservation.Balance)
 	}
+	var finalized reservationMutation
+	memberRunner.runJSON(t, "", &finalized,
+		"inventory", "reservation", "finalize", reservationUUID, "--actual-grams", "900",
+		"--occurred-at", time.Now().UTC().Format("2006-01-02T15:04:05.000000Z"), "--idempotency-key", "cli-"+runID+"-finalize",
+	)
+	if finalized.Reservation.State != "finalized" || finalized.Balance.OnHandGrams != 4850 || finalized.Balance.ReservedGrams != 0 || finalized.Balance.AvailableGrams != 4850 {
+		t.Fatalf("member finalize result = %+v", finalized)
+	}
+	secondReservationUUID := randomHex(t, 16)
+	secondRoastUUID := randomHex(t, 16)
+	var secondReservation reservationMutation
+	memberRunner.runJSON(t, "", &secondReservation,
+		"inventory", "reservation", "create", "--client-reservation-uuid", secondReservationUUID,
+		"--client-instance-uuid", clientUUID, "--roast-uuid", secondRoastUUID, "--lot-id", created.LotID,
+		"--planned-grams", "250", "--occurred-at", time.Now().UTC().Format("2006-01-02T15:04:05.000000Z"), "--idempotency-key", "cli-"+runID+"-reserve-release",
+	)
+	var released reservationMutation
+	memberRunner.runJSON(t, "", &released,
+		"inventory", "reservation", "release", secondReservationUUID,
+		"--occurred-at", time.Now().UTC().Format("2006-01-02T15:04:05.000000Z"), "--idempotency-key", "cli-"+runID+"-release",
+	)
+	if released.Reservation.State != "released" || released.Balance.OnHandGrams != 4850 || released.Balance.ReservedGrams != 0 || released.Balance.AvailableGrams != 4850 {
+		t.Fatalf("member release result = %+v", released)
+	}
 
 	var authoritative lot
 	runner.runJSON(t, "", &authoritative, "inventory", "lot", "show", created.LotID)
-	assertLotBalance(t, authoritative, 5750, 1000, 4750)
+	assertLotBalance(t, authoritative, 4850, 0, 4850)
 	if authoritative.Name != lotName || len(authoritative.Images) != 1 {
 		t.Fatalf("authoritative lot content = name %q images %+v", authoritative.Name, authoritative.Images)
 	}
@@ -898,9 +988,25 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	assertLedger(t, ledger)
 	var reservations reservationPage
 	runner.runJSON(t, "", &reservations, "inventory", "lot", "reservations", created.LotID, "--all")
-	if len(reservations.Items) != 1 || reservations.Items[0].ClientReservationUUID != reservationUUID || reservations.Items[0].State != "reserved" || reservations.Items[0].PlannedGrams != 1000 || reservations.Items[0].LotID != created.LotID {
+	if len(reservations.Items) != 2 {
 		t.Fatalf("authoritative reservations = %+v", reservations.Items)
 	}
+	states := map[string]string{}
+	for _, item := range reservations.Items {
+		states[item.ClientReservationUUID] = item.State
+	}
+	if states[reservationUUID] != "finalized" || states[secondReservationUUID] != "released" {
+		t.Fatalf("authoritative reservation states = %+v", states)
+	}
+
+	var memberLogout struct {
+		LoggedOut bool `json:"logged_out"`
+	}
+	memberRunner.runJSON(t, "", &memberLogout, "auth", "logout")
+	if !memberLogout.LoggedOut {
+		t.Fatal("member auth logout did not report success")
+	}
+	memberNeedsLogout = false
 
 	var logout struct {
 		LoggedOut bool `json:"logged_out"`
@@ -919,6 +1025,8 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 	names := []string{
 		"ARTISAN_CLI_BINARY", "ARTISAN_INTEGRATION_BASE_URL", "ARTISAN_INTEGRATION_ADMIN_EMAIL",
 		"ARTISAN_INTEGRATION_ADMIN_PASSWORD", "ARTISAN_INTEGRATION_ADMIN_NICKNAME",
+		"ARTISAN_INTEGRATION_MEMBER_EMAIL", "ARTISAN_INTEGRATION_MEMBER_PASSWORD", "ARTISAN_INTEGRATION_MEMBER_NICKNAME",
+		"ARTISAN_INTEGRATION_MEMBER_TOKEN", "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID",
 		"ARTISAN_INTEGRATION_ADMIN_ORGANIZATION", "ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG",
 	}
 	values := make(map[string]string, len(names))
@@ -946,7 +1054,9 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 	}
 	return liveConfig{
 		binary: values[names[0]], baseURL: baseURL, adminEmail: values[names[2]], adminPassword: values[names[3]],
-		adminNickname: values[names[4]], organization: values[names[5]], organizationSlug: values[names[6]],
+		adminNickname: values[names[4]], memberEmail: values[names[5]], memberPassword: values[names[6]],
+		memberNickname: values[names[7]], memberToken: values[names[8]], memberCredential: values[names[9]],
+		organization: values[names[10]], organizationSlug: values[names[11]],
 	}, true, nil
 }
 
@@ -1151,6 +1261,31 @@ func (runner *cliRunner) runJSON(t *testing.T, stdin string, target any, command
 	}
 }
 
+func (runner *cliRunner) runJSONError(t *testing.T, wantExit int, wantCode string, commandArgs ...string) {
+	t.Helper()
+	execution := runner.execute("", commandArgs...)
+	commandIndex := len(runner.records) - 1
+	if runner.forbiddenToken != "" {
+		if scanErr := assertTokenAbsent(runner.forbiddenToken, runner.records, execution.err); scanErr != nil {
+			t.Fatal(scanErr)
+		}
+	}
+	if execution.overflow || execution.timedOut || execution.record.ExitCode != wantExit || execution.record.Stderr != "" {
+		t.Fatalf("CLI command %d did not return bounded exit %d", commandIndex, wantExit)
+	}
+	var envelope struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code       string `json:"code"`
+			Message    string `json:"message"`
+			HTTPStatus int    `json:"http_status"`
+		} `json:"error"`
+	}
+	if err := decodeExactlyOneJSON([]byte(execution.record.Stdout), &envelope, true); err != nil || envelope.OK || envelope.Error.Code != wantCode || envelope.Error.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("CLI command %d returned an unstable permission error", commandIndex)
+	}
+}
+
 func (runner *cliRunner) cleanupLogout() error {
 	execution := runner.execute("", "auth", "logout")
 	if runner.forbiddenToken != "" {
@@ -1188,7 +1323,7 @@ func newBrowserClient(jar http.CookieJar) *http.Client {
 	}
 }
 
-func issueCredential(t *testing.T, config liveConfig) (*http.Client, string, string, string) {
+func issueCredential(t *testing.T, config liveConfig, email, password string) (*http.Client, string, string, string) {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -1202,7 +1337,7 @@ func issueCredential(t *testing.T, config liveConfig) (*http.Client, string, str
 	if csrfResponse.CSRFToken == "" {
 		t.Fatal("browser CSRF endpoint returned an empty token")
 	}
-	login := map[string]string{"email": config.adminEmail, "password": config.adminPassword, "organization": config.organizationSlug}
+	login := map[string]string{"email": email, "password": password, "organization": config.organizationSlug}
 	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/session/login", csrfResponse.CSRFToken, login, &map[string]any{}, http.StatusOK, "")
 	csrf := cookieValue(t, jar, config.baseURL, "artisan_server_csrf")
 	issued := struct {
@@ -1366,6 +1501,13 @@ func assertExpectedIdentity(t *testing.T, identity authIdentity, config liveConf
 	}
 }
 
+func assertExpectedMemberIdentity(t *testing.T, identity authIdentity, config liveConfig) {
+	t.Helper()
+	if identity.User.Email != config.memberEmail || identity.User.Nickname != config.memberNickname || identity.Organization.Name != config.organization || identity.Organization.Slug != config.organizationSlug || identity.Role != "member" {
+		t.Fatalf("authenticated identity = user %q <%s>, organization %q (%s), role %q; want configured member", identity.User.Nickname, identity.User.Email, identity.Organization.Name, identity.Organization.Slug, identity.Role)
+	}
+}
+
 func assertLotBalance(t *testing.T, value lot, onHand, reserved, available int64) {
 	t.Helper()
 	if value.OnHandGrams != onHand || value.ReservedGrams != reserved || value.AvailableGrams != available {
@@ -1375,27 +1517,20 @@ func assertLotBalance(t *testing.T, value lot, onHand, reserved, available int64
 
 func assertLedger(t *testing.T, page ledgerPage) {
 	t.Helper()
-	if len(page.Items) != 3 {
-		t.Fatalf("authoritative ledger contains %d entries, want 3", len(page.Items))
+	if len(page.Items) != 6 {
+		t.Fatalf("authoritative ledger contains %d entries, want 6", len(page.Items))
 	}
-	type transition struct {
-		operation                                               string
-		onHandDelta, reservedDelta, onHand, reserved, available int64
-	}
-	want := map[string]transition{
-		"opening_balance":   {"opening_balance", 5000, 0, 5000, 0, 5000},
-		"manual_adjustment": {"manual_adjustment", 750, 0, 5750, 0, 5750},
-		"reservation":       {"reservation", 0, 1000, 5750, 1000, 4750},
-	}
+	counts := map[string]int{}
+	finalBalanceSeen := false
 	for _, item := range page.Items {
-		expected, ok := want[item.Operation]
-		if !ok || item.OnHandDelta != expected.onHandDelta || item.ReservedDelta != expected.reservedDelta || item.ResultingOnHandGrams != expected.onHand || item.ResultingReservedGrams != expected.reserved || item.ResultingAvailableGrams != expected.available {
-			t.Fatalf("unexpected authoritative ledger entry: %+v", item)
+		counts[item.Operation]++
+		if item.ResultingOnHandGrams == 4850 && item.ResultingReservedGrams == 0 && item.ResultingAvailableGrams == 4850 {
+			finalBalanceSeen = true
 		}
-		delete(want, item.Operation)
 	}
-	if len(want) != 0 {
-		t.Fatalf("authoritative ledger is missing transitions: %+v", want)
+	want := map[string]int{"opening_balance": 1, "manual_adjustment": 1, "reservation": 2, "consumption": 1, "reservation_release": 1}
+	if !reflect.DeepEqual(counts, want) || !finalBalanceSeen {
+		t.Fatalf("authoritative ledger operations=%+v finalBalanceSeen=%v", counts, finalBalanceSeen)
 	}
 }
 
