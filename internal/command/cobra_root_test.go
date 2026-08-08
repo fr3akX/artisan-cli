@@ -44,6 +44,26 @@ func TestCobraParserStateDoesNotLeakAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestNormalizeLegacySingleDashArgsOnlyChangesKnownFormsBeforeDoubleDash(t *testing.T) {
+	args := []string{
+		"-json", "-server=https://inventory.example", "-timeout", "5m",
+		"skill", "install", "-directory=/tmp/skills", "-force=false",
+		"-unknown", "-json-extra", "--", "-json", "-force",
+	}
+	got := normalizeLegacySingleDashArgs(args)
+	want := []string{
+		"--json", "--server=https://inventory.example", "--timeout", "5m",
+		"skill", "install", "--directory=/tmp/skills", "--force=false",
+		"-unknown", "-json-extra", "--", "-json", "-force",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized args = %q, want %q", got, want)
+	}
+	if args[0] != "-json" || args[6] != "-directory=/tmp/skills" {
+		t.Fatalf("normalization mutated input: %q", args)
+	}
+}
+
 func TestCanonicalLegacyArgsPreservesRepeatedAndExplicitFalseFlags(t *testing.T) {
 	cmd := &cobra.Command{Use: "leaf"}
 	cmd.Flags().StringArray("item", nil, "repeatable item")

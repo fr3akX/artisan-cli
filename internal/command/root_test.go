@@ -143,6 +143,31 @@ func TestParseFailureJSONIntentIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestLegacySingleDashGlobalFlagsRemainAccepted(t *testing.T) {
+	humanVersion := "artisan dev (unknown)\n"
+	jsonVersion := "{\"ok\":true,\"data\":{\"version\":\"dev\",\"commit\":\"unknown\"}}\n"
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+	}{
+		{name: "json", args: []string{"-json", "version"}, wantStdout: jsonVersion},
+		{name: "json equals", args: []string{"-json=true", "version"}, wantStdout: jsonVersion},
+		{name: "server", args: []string{"-server", "https://inventory.example", "version"}, wantStdout: humanVersion},
+		{name: "server equals", args: []string{"-server=https://inventory.example", "version"}, wantStdout: humanVersion},
+		{name: "timeout", args: []string{"-timeout", "5m", "version"}, wantStdout: humanVersion},
+		{name: "timeout equals", args: []string{"-timeout=5m", "version"}, wantStdout: humanVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runCommand(t, tt.args...)
+			if code != 0 || stdout != tt.wantStdout || stderr != "" {
+				t.Fatalf("result = (%d, %q, %q), want (0, %q, empty)", code, stdout, stderr, tt.wantStdout)
+			}
+		})
+	}
+}
+
 func TestGlobalFlagsAreAcceptedAfterCommand(t *testing.T) {
 	code, stdout, stderr := runCommand(t, "version", "--json")
 	if code != 0 {
@@ -170,8 +195,18 @@ func TestGlobalParseFailuresNeverEchoRawValues(t *testing.T) {
 			wantStderr: "Invalid global option\n",
 		},
 		{
+			name:       "legacy single-dash secret shaped timeout human",
+			args:       []string{"-timeout=test-secret-token", "version"},
+			wantStderr: "Invalid global option\n",
+		},
+		{
 			name:       "secret shaped timeout with later JSON intent",
 			args:       []string{"--timeout=test-secret-token", "--json", "version"},
+			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid global option\"}}\n",
+		},
+		{
+			name:       "legacy single-dash secret with later JSON intent",
+			args:       []string{"-timeout=test-secret-token", "-json", "version"},
 			wantStdout: "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"Invalid global option\"}}\n",
 		},
 		{
@@ -208,6 +243,11 @@ func TestExplicitGlobalServerAndTimeoutValidationAreStableUsageFailures(t *testi
 		{
 			name:       "invalid server human",
 			args:       []string{"--server=test-secret-token", "version"},
+			wantStderr: "Server URL is invalid\n",
+		},
+		{
+			name:       "legacy single-dash invalid server human",
+			args:       []string{"-server=test-secret-token", "version"},
 			wantStderr: "Server URL is invalid\n",
 		},
 		{

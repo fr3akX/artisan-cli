@@ -36,6 +36,27 @@ func setCommandExit(state *cobraState, code int) {
 	state.exitCode = code
 }
 
+func normalizeLegacySingleDashArgs(args []string) []string {
+	result := append([]string(nil), args...)
+	for i, arg := range result {
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name := strings.TrimPrefix(arg, "-")
+		if before, _, found := strings.Cut(name, "="); found {
+			name = before
+		}
+		switch name {
+		case "json", "server", "timeout", "directory", "force":
+			result[i] = "-" + arg
+		}
+	}
+	return result
+}
+
 func canonicalLegacyArgs(cmd *cobra.Command, positionals []string) []string {
 	result := make([]string, 0, cmd.Flags().NFlag()+len(positionals))
 	cmd.LocalNonPersistentFlags().VisitAll(func(item *pflag.Flag) {

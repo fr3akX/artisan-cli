@@ -73,6 +73,35 @@ func TestSkillHelpAndUsage(t *testing.T) {
 	}
 }
 
+func TestSkillInstallAcceptsLegacySingleDashFlags(t *testing.T) {
+	root := canonicalSkillFixtureRoot(t)
+	result := runAuthCommand(t, Runtime{}, "skill", "install", "-directory", root)
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("single-dash directory install = %#v", result)
+	}
+
+	forcedRoot := canonicalSkillFixtureRoot(t)
+	dir := filepath.Join(forcedRoot, embeddedskill.Name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, embeddedskill.FileName)
+	if err := os.WriteFile(path, []byte("local content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = runAuthCommand(t, Runtime{}, "skill", "install", "-directory="+forcedRoot, "-force=true")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("single-dash equals install = %#v", result)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), "---\nname: artisan-inventory\n") {
+		t.Fatal("single-dash force did not install embedded content")
+	}
+}
+
 func TestSkillInstallHumanJSONAndNoNetworkConfiguration(t *testing.T) {
 	root := canonicalSkillFixtureRoot(t)
 	result := runAuthCommand(t, Runtime{

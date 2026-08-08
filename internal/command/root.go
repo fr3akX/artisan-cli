@@ -21,6 +21,7 @@ const (
 // Run parses args, executes a command, and returns the process exit code.
 func Run(ctx context.Context, args []string, runtime Runtime) int {
 	runtime = normalizeRuntime(runtime)
+	args = normalizeLegacySingleDashArgs(args)
 	root, state := newRootCommand(ctx, runtime, args)
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
