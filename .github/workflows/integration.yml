@@ -1,0 +1,207 @@
+name: Artisan Server integration
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  live-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080
+      ARTISAN_INTEGRATION_ADMIN_EMAIL: owner@example.com
+      ARTISAN_INTEGRATION_ADMIN_NICKNAME: Owner
+      ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com
+      ARTISAN_INTEGRATION_MEMBER_NICKNAME: Member
+      ARTISAN_INTEGRATION_ADMIN_ORGANIZATION: My Roastery
+      ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG: my-roastery
+      ARTISAN_SERVER_HTTP_PORT: "18080"
+      ARTISAN_SERVER_E2E_PUBLIC_ORIGIN: http://127.0.0.1:18080
+      ARTISAN_SERVER_E2E_POSTGRES_PORT: "15432"
+      ARTISAN_SERVER_E2E_MINIO_PORT: "19000"
+      ARTISAN_SERVER_E2E_MAILPIT_HTTP_PORT: "18025"
+    steps:
+      - name: Check out Artisan CLI
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate pinned server ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Eq '^[0-9a-f]{40}$' integration/artisan-server.ref
+          test "$(wc -l < integration/artisan-server.ref)" -eq 1
+          test "$(cat integration/artisan-server.ref)" = "4c0136fe98f6728f4bb94e416c5abe570e7f4831"
+
+      - name: Check out pinned Artisan Server
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: fr3akX/artisan-server
+          ref: 4c0136fe98f6728f4bb94e416c5abe570e7f4831
+          path: artisan-server
+
+      - name: Verify server checkout HEAD
+        shell: bash
+        run: test "$(git -C artisan-server rev-parse HEAD)" = "$(cat integration/artisan-server.ref)"
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: 1.23.x
+          cache: true
+
+      - name: Prepare disposable stack inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="artisan-server-e2e-$(openssl rand -hex 6)"
+          admin_password="$(openssl rand -base64 36 | tr -d '\n')"
+          member_password="$(openssl rand -base64 36 | tr -d '\n')"
+          echo "::add-mask::$admin_password"
+          echo "::add-mask::$member_password"
+          {
+            echo "ARTISAN_SERVER_E2E_PROJECT_NAME=$project"
+            echo "ARTISAN_INTEGRATION_ADMIN_PASSWORD=$admin_password"
+            echo "ARTISAN_INTEGRATION_MEMBER_PASSWORD=$member_password"
+          } >> "$GITHUB_ENV"
+          mkdir -p artisan-server/secrets
+          chmod 0700 artisan-server/secrets
+          openssl rand -base64 24 > artisan-server/secrets/postgres_password.txt
+          openssl rand -base64 24 > artisan-server/secrets/minio_password.txt
+          openssl rand -base64 48 > artisan-server/secrets/session_secret.txt
+          printf '%s' "$admin_password" > artisan-server/secrets/admin_password.txt
+          chmod 0444 artisan-server/secrets/*.txt
+
+      - name: Validate disposable Compose configuration
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" config --quiet
+
+      - name: Start disposable Artisan Server
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 90s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans
+          timeout --signal=TERM --kill-after=30s 12m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" up -d --build
+
+      - name: Wait for bounded readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=5s 125s python3 - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                  return None
+
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+          target = "http://127.0.0.1:18080/api/v1/health/ready"
+          deadline = time.monotonic() + 120
+          while True:
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise SystemExit("Artisan Server did not become ready within 120 seconds")
+              try:
+                  with opener.open(target, timeout=min(2, remaining)) as response:
+                      body = response.read(65537)
+                      if len(body) <= 65536 and response.status == 200 and json.loads(body).get("components") == {"database": "ok", "object_store": "ok"}:
+                          break
+              except (OSError, urllib.error.URLError, json.JSONDecodeError):
+                  pass
+              time.sleep(min(1, max(0, deadline - time.monotonic())))
+          PY
+
+      - name: Bootstrap disposable administrator
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" \
+            run --rm api python -m app.cli bootstrap-admin \
+            --email "$ARTISAN_INTEGRATION_ADMIN_EMAIL" \
+            --nickname "$ARTISAN_INTEGRATION_ADMIN_NICKNAME" \
+            --organization "$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION" \
+            --slug "$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+            --password-file /run/secrets/admin_password
+
+      - name: Provision disposable member
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          workspace_input="$GITHUB_WORKSPACE"
+          [[ -d "$workspace_input" && ! -L "$workspace_input" ]]
+          workspace="$(realpath -e -- "$workspace_input")"
+          [[ "$workspace" == "$workspace_input" ]]
+          script_input="$workspace/integration/provision_member.py"
+          [[ -f "$script_input" && ! -L "$script_input" ]]
+          script="$(realpath -e -- "$script_input")"
+          [[ "$script" == "$script_input" && "$script" == "$workspace/"* ]]
+          issued_file="$(mktemp)"
+          trap 'rm -f "$issued_file"' EXIT
+          timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" \
+            run --rm \
+            -e "ARTISAN_E2E_MEMBER_EMAIL=$ARTISAN_INTEGRATION_MEMBER_EMAIL" \
+            -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
+            -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
+            -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+            -v "$script:/tmp/provision_member.py:ro" \
+            api python /tmp/provision_member.py > "$issued_file"
+          IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
+          [[ "$member_token" =~ ^[^[:space:]]+$ ]]
+          [[ "$member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+          echo "::add-mask::$member_token"
+          {
+            echo "ARTISAN_INTEGRATION_MEMBER_TOKEN=$member_token"
+            echo "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID=$member_credential_id"
+          } >> "$GITHUB_ENV"
+          rm -f "$issued_file"
+          trap - EXIT
+
+      - name: Build compiled CLI
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          timeout --signal=TERM --kill-after=10s 5m go build -trimpath -o "$GITHUB_WORKSPACE/dist/artisan-integration" ./cmd/artisan
+
+      - name: Run pinned live integration
+        shell: bash
+        env:
+          ARTISAN_CLI_BINARY: ${{ github.workspace }}/dist/artisan-integration
+        run: timeout --signal=TERM --kill-after=10s 12m go test ./integration -count=1 -v
+
+      - name: Print bounded server logs on failure
+        if: failure()
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 60s ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" logs --no-color --tail 200 2>&1 | head -c 65536 || true
+
+      - name: Tear down disposable stack
+        if: always()
+        shell: bash
+        working-directory: artisan-server
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=15s 2m ./scripts/e2e_compose.py --project "$ARTISAN_SERVER_E2E_PROJECT_NAME" \
+            -f "$PWD/compose.yaml" -f "$PWD/compose.e2e.yaml" down -v --remove-orphans

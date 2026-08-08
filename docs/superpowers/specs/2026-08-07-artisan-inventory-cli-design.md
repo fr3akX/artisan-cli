@@ -335,12 +335,23 @@ a usage error; this prevents ambiguous precedence.
 - `conflict show CONFLICT_ID` displays one conflict.
 - `conflict resolve CONFLICT_ID --note TEXT` resolves it through the server's
   existing nonnegative-availability rule.
-- `image add LOT_ID FILE...` accepts JPEG/PNG files plus per-image caption, alt
-  text, and cover metadata.
-- `image update` edits caption, alt text, or cover state.
-- `image reorder` requires the complete ordered image-ID list.
-- `image delete` removes one image.
-- `image download` selects `display` or `thumbnail`, writes through a temporary
+- `image add [OPTIONS] LOT_ID FILE...` accepts JPEG/PNG files plus per-image
+  caption, alt text, and cover metadata. Metadata is bound without positional
+  ambiguity by a zero-based file index: repeatable `--caption INDEX=TEXT`,
+  repeatable `--alt-text INDEX=TEXT`, and optional `--cover INDEX`. Options
+  precede `LOT_ID` and the ordered file list.
+- Lot create uses the same declaration model with repeatable `--image FILE`,
+  `--image-caption INDEX=TEXT`, `--image-alt-text INDEX=TEXT`, and
+  `--image-cover INDEX`. With `--from-json`, repeated `--image FILE` values pair
+  with the exact manifest's contiguous `upload_index` values; metadata flags
+  cannot be mixed with the JSON metadata.
+- `image update [OPTIONS] LOT_ID IMAGE_ID` edits caption, alt text, or cover
+  state; `--clear-caption` and `--clear-alt-text` explicitly send JSON null.
+- `image reorder [OPTIONS] LOT_ID IMAGE_ID...` requires the complete ordered
+  image-ID list.
+- `image delete [OPTIONS] LOT_ID IMAGE_ID` removes one image.
+- `image download [--variant display|thumbnail] [--force] LOT_ID IMAGE_ID
+  DESTINATION` selects `display` or `thumbnail`, writes through a temporary
   file, and does not overwrite unless `--force` is present.
 
 Input UUIDs may be canonical compact lowercase UUIDs or standard dashed UUIDs.

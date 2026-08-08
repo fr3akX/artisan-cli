@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: 1.23.x
+          cache: true
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l $(find cmd internal integration -name '*.go' -type f))"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        run: go test ./... -race
+      - name: Check generated skill
+        shell: bash
+        run: |
+          go generate ./internal/skill
+          git diff --exit-code
+
+  native-build-smoke:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-14
+          - windows-2022
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: 1.23.x
+          cache: true
+      - name: Test on native platform
+        run: go test ./...
+      - name: Build and smoke native executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=
+          if [[ "${{ runner.os }}" == "Windows" ]]; then suffix=.exe; fi
+          go build -trimpath -o "artisan-ci${suffix}" ./cmd/artisan
+          "./artisan-ci${suffix}" --json version

@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: 1.23.x
+          cache: true
+      - name: Test and check generated skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./...
+          go generate ./internal/skill
+          git diff --exit-code
+      - name: Validate release identity
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]]
+          [[ "$COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]
+      - name: Build and verify static release archives
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: scripts/build-release.sh "$VERSION" "$COMMIT" release
+      - name: Verify release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist/release -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find dist/release -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 6
+          (cd dist/release && sha256sum -c checksums.txt)
+      - name: Attest archives and checksums
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: 'dist/release/*'
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8
+        with:
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/*.tar.gz
+            dist/release/*.zip
+            dist/release/checksums.txt
