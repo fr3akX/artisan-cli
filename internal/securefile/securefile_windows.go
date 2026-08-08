@@ -115,11 +115,11 @@ func protectPrivate(file *os.File, directory bool) error {
 }
 
 func applyPrivateACL(path string, directory bool) error {
-	acl, err := privateACL(directory)
+	descriptor, acl, err := privateACL(directory)
 	if err != nil {
 		return err
 	}
-	if err := windows.SetNamedSecurityInfo(
+	err = windows.SetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
@@ -127,18 +127,20 @@ func applyPrivateACL(path string, directory bool) error {
 		nil,
 		acl,
 		nil,
-	); err != nil {
+	)
+	runtime.KeepAlive(descriptor)
+	if err != nil {
 		return fmt.Errorf("set private ACL: %w", err)
 	}
 	return nil
 }
 
 func applyPrivateACLHandle(handle windows.Handle, directory bool) error {
-	acl, err := privateACL(directory)
+	descriptor, acl, err := privateACL(directory)
 	if err != nil {
 		return err
 	}
-	if err := windows.SetSecurityInfo(
+	err = windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
@@ -146,63 +148,47 @@ func applyPrivateACLHandle(handle windows.Handle, directory bool) error {
 		nil,
 		acl,
 		nil,
-	); err != nil {
+	)
+	runtime.KeepAlive(descriptor)
+	if err != nil {
 		return fmt.Errorf("set private ACL on opened handle: %w", err)
 	}
 	return nil
 }
 
-func privateACL(directory bool) (*windows.ACL, error) {
+func privateACL(directory bool) (*windows.SECURITY_DESCRIPTOR, *windows.ACL, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return nil, fmt.Errorf("get current user SID: %w", err)
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return nil, fmt.Errorf("get SYSTEM SID: %w", err)
-	}
-	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return nil, fmt.Errorf("get Administrators SID: %w", err)
+		return nil, nil, fmt.Errorf("get current user SID: %w", err)
 	}
 
-	inheritance := uint32(windows.NO_INHERITANCE)
+	flags := ""
 	if directory {
-		inheritance = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+		flags = "OICI"
 	}
-	entries := []windows.EXPLICIT_ACCESS{
-		privateAccessEntry(user.User.Sid, windows.TRUSTEE_IS_USER, inheritance),
-		privateAccessEntry(system, windows.TRUSTEE_IS_USER, inheritance),
-		privateAccessEntry(administrators, windows.TRUSTEE_IS_GROUP, inheritance),
-	}
-	acl, err := windows.ACLFromEntries(entries, nil)
-	runtime.KeepAlive(user)
-	runtime.KeepAlive(system)
-	runtime.KeepAlive(administrators)
+	sddl := fmt.Sprintf(
+		"D:P(A;%s;GA;;;%s)(A;%s;GA;;;SY)(A;%s;GA;;;BA)",
+		flags, user.User.Sid.String(), flags, flags,
+	)
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		return nil, fmt.Errorf("build private ACL: %w", err)
+		return nil, nil, fmt.Errorf("build private security descriptor: %w", err)
 	}
-	return acl, nil
+	acl, _, err := descriptor.DACL()
+	if err != nil {
+		return nil, nil, fmt.Errorf("extract private DACL: %w", err)
+	}
+	return descriptor, acl, nil
 }
 
-func privateAccessEntry(sid *windows.SID, trusteeType windows.TRUSTEE_TYPE, inheritance uint32) windows.EXPLICIT_ACCESS {
-	return windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.GENERIC_ALL,
-		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       inheritance,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  trusteeType,
-			TrusteeValue: windows.TrusteeValueFromSID(sid),
-		},
-	}
-}
+const windowsFileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 
 func verifyPrivateHandle(handle windows.Handle, directory bool) error {
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("read DACL from opened handle: %w", err)
 	}
+	defer runtime.KeepAlive(descriptor)
 	control, _, err := descriptor.Control()
 	if err != nil {
 		return fmt.Errorf("read DACL control: %w", err)
@@ -231,12 +217,17 @@ func verifyPrivateHandle(handle windows.Handle, directory bool) error {
 		return fmt.Errorf("get Administrators SID: %w", err)
 	}
 	allowed := []*windows.SID{user.User.Sid, system, administrators}
-	seen := make([]bool, len(allowed))
-
-	expectedFlags := uint8(0)
+	wantCount := uint16(len(allowed))
 	if directory {
-		expectedFlags = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+		wantCount *= 2
 	}
+	if dacl.AceCount != wantCount {
+		return fmt.Errorf("unsafe_private_file: DACL contains %d entries, want %d", dacl.AceCount, wantCount)
+	}
+	effectiveSeen := make([]bool, len(allowed))
+	propagationSeen := make([]bool, len(allowed))
+	propagationFlags := uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE)
+
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
@@ -244,9 +235,6 @@ func verifyPrivateHandle(handle windows.Handle, directory bool) error {
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			return fmt.Errorf("unsafe_private_file: DACL contains unsupported ACE type %d", ace.Header.AceType)
-		}
-		if ace.Header.AceFlags != expectedFlags {
-			return fmt.Errorf("unsafe_private_file: DACL ACE flags %#x do not match required %#x", ace.Header.AceFlags, expectedFlags)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		matched := -1
@@ -259,17 +247,28 @@ func verifyPrivateHandle(handle windows.Handle, directory bool) error {
 		if matched < 0 {
 			return fmt.Errorf("unsafe_private_file: DACL grants access to unexpected SID %s", sid)
 		}
-		if seen[matched] {
-			return fmt.Errorf("unsafe_private_file: DACL contains duplicate access for SID %s", sid)
+
+		switch {
+		case ace.Header.AceFlags == 0 && ace.Mask == windowsFileAllAccess:
+			if effectiveSeen[matched] {
+				return fmt.Errorf("unsafe_private_file: DACL contains duplicate effective access for SID %s", sid)
+			}
+			effectiveSeen[matched] = true
+		case directory && ace.Header.AceFlags == propagationFlags && ace.Mask == windows.GENERIC_ALL:
+			if propagationSeen[matched] {
+				return fmt.Errorf("unsafe_private_file: DACL contains duplicate propagation access for SID %s", sid)
+			}
+			propagationSeen[matched] = true
+		default:
+			return fmt.Errorf("unsafe_private_file: DACL entry for SID %s has flags %#x mask %#x, want exact native full-access shape", sid, ace.Header.AceFlags, ace.Mask)
 		}
-		if ace.Mask&windows.GENERIC_ALL == 0 {
-			return fmt.Errorf("unsafe_private_file: DACL does not grant full access to SID %s", sid)
-		}
-		seen[matched] = true
 	}
-	for index, present := range seen {
-		if !present {
-			return fmt.Errorf("unsafe_private_file: DACL omits required SID %s", allowed[index])
+	for index, allowedSID := range allowed {
+		if !effectiveSeen[index] {
+			return fmt.Errorf("unsafe_private_file: DACL omits effective full access for SID %s", allowedSID)
+		}
+		if directory && !propagationSeen[index] {
+			return fmt.Errorf("unsafe_private_file: DACL omits propagation full access for SID %s", allowedSID)
 		}
 	}
 	return nil

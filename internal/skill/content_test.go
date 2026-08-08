@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestSkillContentMatchesCanonicalSource(t *testing.T) {
@@ -111,8 +113,18 @@ func TestSkillContentContract(t *testing.T) {
 	}
 }
 
-func TestInstallCreatesPreservesRefusesAndForces(t *testing.T) {
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
 	root := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func TestInstallCreatesPreservesRefusesAndForces(t *testing.T) {
+	root := canonicalTempDir(t)
 	result, err := Install(root, false)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +183,7 @@ func TestInstallRejectsUnsafeTargets(t *testing.T) {
 		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
 	}
 	t.Run("skill directory symlink", func(t *testing.T) {
-		root, outside := t.TempDir(), t.TempDir()
+		root, outside := canonicalTempDir(t), t.TempDir()
 		if err := os.Symlink(outside, filepath.Join(root, "artisan-inventory")); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +195,7 @@ func TestInstallRejectsUnsafeTargets(t *testing.T) {
 		}
 	})
 	t.Run("skill file symlink", func(t *testing.T) {
-		root, outside := t.TempDir(), filepath.Join(t.TempDir(), "outside")
+		root, outside := canonicalTempDir(t), filepath.Join(t.TempDir(), "outside")
 		if err := os.Mkdir(filepath.Join(root, "artisan-inventory"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +216,7 @@ func TestInstallRejectsUnsafeTargets(t *testing.T) {
 }
 
 func TestInstallConcurrentCallsLeaveWholeContent(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	type outcome struct {
 		result InstallResult
 		err    error
@@ -243,7 +255,7 @@ func TestInstallConcurrentCallsLeaveWholeContent(t *testing.T) {
 }
 
 func TestForcedInstallAtomicallyReplacesVisibleContent(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	directory := filepath.Join(root, "artisan-inventory")
 	if err := os.Mkdir(directory, 0o755); err != nil {
 		t.Fatal(err)
@@ -260,6 +272,20 @@ func TestForcedInstallAtomicallyReplacesVisibleContent(t *testing.T) {
 		for {
 			got, err := os.ReadFile(target)
 			if err != nil {
+				if len(got) != 0 && !bytes.Equal(got, old) && !bytes.Equal(got, Content) {
+					readerResult <- errors.New("reader observed partial content with read error")
+					return
+				}
+				const windowsErrorSharingViolation = syscall.Errno(32) // ERROR_SHARING_VIOLATION
+				if runtime.GOOS == "windows" && errors.Is(err, windowsErrorSharingViolation) {
+					select {
+					case <-stop:
+						readerResult <- nil
+						return
+					case <-time.After(time.Millisecond):
+						continue
+					}
+				}
 				readerResult <- err
 				return
 			}
@@ -282,7 +308,26 @@ func TestForcedInstallAtomicallyReplacesVisibleContent(t *testing.T) {
 	<-ready
 	_, installErr := Install(root, true)
 	close(stop)
-	if readErr := <-readerResult; installErr != nil || readErr != nil {
-		t.Fatalf("Install() error = %v; reader error = %v", installErr, readErr)
+	if readErr := <-readerResult; readErr != nil {
+		t.Fatalf("reader error = %v", readErr)
+	}
+
+	if runtime.GOOS == "windows" && installErr != nil {
+		got, err := os.ReadFile(target)
+		if err != nil || !bytes.Equal(got, old) {
+			t.Fatalf("failed replacement changed old content: %v", err)
+		}
+		_, installErr = Install(root, true)
+	}
+	if installErr != nil {
+		t.Fatalf("Install() error = %v", installErr)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, Content) {
+		t.Fatalf("forced install left incomplete content: %v", err)
+	}
+	if temporary, err := filepath.Glob(filepath.Join(directory, ".SKILL.md.tmp-*")); err != nil || len(temporary) != 0 {
+		t.Fatalf("temporary files remain: %v, %v", temporary, err)
 	}
 }

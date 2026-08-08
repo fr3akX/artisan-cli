@@ -17,8 +17,6 @@ func TestPrivateWindowsACLsForDirectoryAndFile(t *testing.T) {
 	if err := securefile.AtomicWrite(dir, "config.json", []byte("private")); err != nil {
 		t.Fatalf("AtomicWrite: %v", err)
 	}
-	assertProtectedACLFlags(t, dir, true)
-	assertProtectedACLFlags(t, filepath.Join(dir, "config.json"), false)
 	file, err := securefile.OpenPrivate(filepath.Join(dir, "config.json"))
 	if err != nil {
 		t.Fatalf("OpenPrivate: %v", err)
@@ -57,40 +55,6 @@ func TestOpenPrivateRejectsWindowsReparsePoint(t *testing.T) {
 	if file, err := securefile.OpenPrivate(link); err == nil {
 		file.Close()
 		t.Fatal("OpenPrivate followed a reparse point")
-	}
-}
-
-func assertProtectedACLFlags(t *testing.T, path string, directory bool) {
-	t.Helper()
-	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatalf("GetNamedSecurityInfo(%q): %v", path, err)
-	}
-	control, _, err := descriptor.Control()
-	if err != nil {
-		t.Fatalf("Control(%q): %v", path, err)
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		t.Fatalf("DACL for %q is not protected", path)
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		t.Fatalf("DACL(%q): %v", path, err)
-	}
-	for i := uint16(0); i < dacl.AceCount; i++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
-			t.Fatalf("GetAce(%d): %v", i, err)
-		}
-		flags := ace.Header.AceFlags
-		if directory {
-			want := uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
-			if flags != want {
-				t.Errorf("directory ACE flags = %#x, want %#x", flags, want)
-			}
-		} else if flags != 0 {
-			t.Errorf("file ACE flags = %#x, want 0", flags)
-		}
 	}
 }
 

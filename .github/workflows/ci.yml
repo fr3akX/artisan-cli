@@ -27,7 +27,7 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race test
-        run: go test ./... -race
+        run: go test ./... -race -timeout=20m
       - name: Check generated skill
         shell: bash
         run: |

@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -337,8 +339,18 @@ func TestReadBoundedBrowserJSON(t *testing.T) {
 	}
 }
 
-func TestTokenTreeScannerFindsChunkBoundaryAndRejectsSymlinks(t *testing.T) {
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
 	root := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func TestTokenTreeScannerFindsChunkBoundaryAndRejectsSymlinks(t *testing.T) {
+	root := canonicalTempDir(t)
 	token := "boundary-secret-token"
 	contents := append(bytes.Repeat([]byte{'x'}, (32<<10)-5), []byte(token)...)
 	if err := os.WriteFile(filepath.Join(root, "state"), contents, 0o600); err != nil {
@@ -374,14 +386,27 @@ func TestBrowserClientDisablesProxiesAndRedirects(t *testing.T) {
 }
 
 func TestResolveTrustedExecutableRejectsFinalSymlink(t *testing.T) {
-	root := t.TempDir()
-	target := filepath.Join(root, "artisan-real")
+	root := canonicalTempDir(t)
+	name := "artisan-real"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	target := filepath.Join(root, name)
 	if err := os.WriteFile(target, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := resolveTrustedExecutable(target)
 	if err != nil || resolved != target {
 		t.Fatalf("regular executable = (%q, %v), want exact resolved path", resolved, err)
+	}
+	if runtime.GOOS == "windows" {
+		nonExecutable := filepath.Join(root, "artisan-no-extension")
+		if err := os.WriteFile(nonExecutable, []byte("binary"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveTrustedExecutable(nonExecutable); err == nil {
+			t.Fatal("Windows regular file without .exe extension unexpectedly accepted")
+		}
 	}
 	link := filepath.Join(root, "artisan-link")
 	if err := os.Symlink(target, link); err != nil {
@@ -393,7 +418,10 @@ func TestResolveTrustedExecutableRejectsFinalSymlink(t *testing.T) {
 }
 
 func TestCLIRunnerUsesIsolatedCWDAndBoundsChildPipeWait(t *testing.T) {
-	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script executable fixtures are Unix-specific; native Windows executable behavior is covered by the CI smoke build")
+	}
+	root := canonicalTempDir(t)
 	runDirectory := filepath.Join(root, "run")
 	if err := os.Mkdir(runDirectory, 0o700); err != nil {
 		t.Fatal(err)
@@ -402,9 +430,17 @@ func TestCLIRunnerUsesIsolatedCWDAndBoundsChildPipeWait(t *testing.T) {
 	if err := os.WriteFile(cwdScript, []byte("#!/bin/sh\nprintf '{\"ok\":true,\"data\":{\"cwd\":\"%s\"}}\\n' \"$PWD\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	wantRunDirectory := runDirectory
+	if runtime.GOOS == "darwin" {
+		canonical, err := filepath.EvalSymlinks(runDirectory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRunDirectory = canonical
+	}
 	runner := cliRunner{binary: cwdScript, baseURL: "http://127.0.0.1", cwd: runDirectory, env: []string{"PATH=" + os.Getenv("PATH")}}
 	execution := runner.execute("")
-	if execution.err != nil || execution.overflow || execution.timedOut || !strings.Contains(execution.record.Stdout, `"cwd":"`+runDirectory+`"`) {
+	if execution.err != nil || execution.overflow || execution.timedOut || !strings.Contains(execution.record.Stdout, `"cwd":"`+wantRunDirectory+`"`) {
 		t.Fatalf("isolated cwd execution = %+v", execution)
 	}
 
@@ -570,9 +606,11 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 	text := string(contents)
 	for _, required := range []string{
 		"permissions:\n  contents: read", pinnedServerRef, "repository: fr3akX/artisan-server",
+		"token: ${{ secrets.ARTISAN_SERVER_REPOSITORY_TOKEN }}",
 		"integration/artisan-server.ref", "CGO_ENABLED: \"0\"", "go-version: 1.23.x",
 		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080",
 		"ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com", "integration/provision_member.py",
+		`if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow missing %q", required)
@@ -608,9 +646,29 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 	teardown := workflowStep(t, text, "Tear down disposable stack")
 	assertGuardedComposeStep(t, teardown, true, "down -v --remove-orphans")
 	logs := workflowStep(t, text, "Print bounded server logs on failure")
-	for _, required := range []string{"timeout --signal=TERM --kill-after=", "logs --no-color --tail 200", "head -c 65536"} {
+	for _, required := range []string{
+		`if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then`,
+		"cd artisan-server", "timeout --signal=TERM --kill-after=", "logs --no-color --tail 200", "head -c 65536",
+	} {
 		if !strings.Contains(logs, required) {
 			t.Errorf("failure log step missing %q", required)
+		}
+	}
+	if strings.Contains(logs, "working-directory:") {
+		t.Error("failure log step working directory must not depend on a successful server checkout")
+	}
+}
+
+func TestRepositoryTextAttributes(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", ".gitattributes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(contents), "\n")
+	for _, pattern := range []string{"*.go", "*.md", "*.yml", "*.yaml", "*.sh", "*.py", "*.ref", "*.mod", "*.sum", "*.ps1"} {
+		want := pattern + " text eol=lf"
+		if !slices.Contains(lines, want) {
+			t.Errorf(".gitattributes missing %q", want)
 		}
 	}
 }
@@ -913,7 +971,19 @@ func assertGuardedComposeStep(t *testing.T, step string, always bool, operations
 	if (strings.Contains(step, "        if: always()")) != always {
 		t.Errorf("step always condition = %v, want %v", strings.Contains(step, "        if: always()"), always)
 	}
-	if !strings.Contains(step, "working-directory: artisan-server") {
+	if always {
+		for _, required := range []string{
+			`if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then`,
+			"cd artisan-server",
+		} {
+			if !strings.Contains(step, required) {
+				t.Errorf("failure-only Compose step missing %q", required)
+			}
+		}
+		if strings.Contains(step, "working-directory:") {
+			t.Error("failure-only Compose step working directory must not depend on a successful server checkout")
+		}
+	} else if !strings.Contains(step, "working-directory: artisan-server") {
 		t.Error("guarded Compose step does not use the pinned server directory")
 	}
 	invocations := composeInvocations(step)
@@ -1324,7 +1394,14 @@ func resolveTrustedExecutable(raw string) (string, error) {
 		return "", errors.New("ARTISAN_CLI_BINARY could not be resolved")
 	}
 	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("ARTISAN_CLI_BINARY must name an existing executable regular file")
+	}
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(filepath.Ext(resolved), ".exe") {
+			return "", errors.New("ARTISAN_CLI_BINARY must name an existing .exe regular file")
+		}
+	} else if info.Mode()&0o111 == 0 {
 		return "", errors.New("ARTISAN_CLI_BINARY must name an existing executable regular file")
 	}
 	return resolved, nil

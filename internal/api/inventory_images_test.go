@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 func TestOversizedImageIsRejectedBeforeLotCreateOrImageAddNetwork(t *testing.T) {
@@ -352,6 +354,13 @@ func TestDownloadInventoryImageStreamsPrivateWebPAtomically(t *testing.T) {
 		temps, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*"))
 		if err != nil || len(temps) != 1 {
 			t.Errorf("active temporary files = %v, %v", temps, err)
+		} else if runtime.GOOS == "windows" {
+			file, openErr := securefile.OpenPrivate(temps[0])
+			if openErr != nil {
+				t.Errorf("open private temporary file: %v", openErr)
+			} else if closeErr := file.Close(); closeErr != nil {
+				t.Errorf("close private temporary file: %v", closeErr)
+			}
 		} else if info, statErr := os.Stat(temps[0]); statErr != nil || info.Mode().Perm()&0o077 != 0 {
 			t.Errorf("temporary mode = %v, %v", info, statErr)
 		}
@@ -370,9 +379,19 @@ func TestDownloadInventoryImageStreamsPrivateWebPAtomically(t *testing.T) {
 	if err != nil || string(contents) != "private-webp-bytes" {
 		t.Fatalf("contents = %q, %v", contents, err)
 	}
-	info, err := os.Stat(destination)
-	if err != nil || info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("mode = %v, %v", info.Mode(), err)
+	if runtime.GOOS == "windows" {
+		file, err := securefile.OpenPrivate(destination)
+		if err != nil {
+			t.Fatalf("open private destination: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("close private destination: %v", err)
+		}
+	} else {
+		info, err := os.Stat(destination)
+		if err != nil || info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("mode = %v, %v", info, err)
+		}
 	}
 	if result.Path != destination || result.Variant != "thumbnail" || result.Bytes != int64(len(contents)) {
 		t.Fatalf("result = %#v", result)

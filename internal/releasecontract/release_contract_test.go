@@ -84,7 +84,8 @@ func TestWorkflowValidatorRejectsBypasses(t *testing.T) {
 		"alternate event":          {"on:\n  pull_request:\n  push:", "on: [pull_request, push]"},
 		"job permissions":          {"quality:\n    runs-on:", "quality:\n    permissions: write-all\n    runs-on:"},
 		"extra permission scope":   {"permissions:\n  contents: read", "permissions:\n  contents: read\n  actions: read"},
-		"race flags":               {"run: go test ./... -race", "run: go test -race"},
+		"race flags":               {"run: go test ./... -race -timeout=20m", "run: go test -race -timeout=20m"},
+		"race timeout":             {"run: go test ./... -race -timeout=20m", "run: go test ./... -race -timeout=10m"},
 		"build command":            {"go build -trimpath", "echo no-build"},
 		"smoke command":            {`"./artisan-ci${suffix}" --json version`, "echo smoke-disabled"},
 		"permissions":              {"contents: read", "contents: write"},
@@ -432,7 +433,7 @@ func validateCIWorkflow(contents []byte) error {
 		{"Check formatting", "bash", `test -z "$(gofmt -l $(find cmd internal integration -name '*.go' -type f))"`},
 		{"Vet", "", "go vet ./..."},
 		{"Test", "", "go test ./..."},
-		{"Race test", "", "go test ./... -race"},
+		{"Race test", "", "go test ./... -race -timeout=20m"},
 		{"Check generated skill", "bash", "go generate ./internal/skill\ngit diff --exit-code"},
 	} {
 		if err := requireRunStep(quality, expected.name, expected.shell, expected.run); err != nil {
@@ -910,6 +911,13 @@ func copyReleaseRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "darwin" {
+		canonical, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root = canonical
+	}
 	t.Cleanup(func() {
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil || entry.Type()&os.ModeSymlink != 0 {
@@ -959,12 +967,15 @@ func copyReleaseRoot(t *testing.T) string {
 
 func assertIsolatedReleaseRoot(t *testing.T, source, root string) {
 	t.Helper()
-	relative, err := filepath.Rel(source, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
-		t.Fatalf("mutable release root %q is inside developer checkout %q", root, source)
+	sourceVolume, rootVolume := filepath.VolumeName(source), filepath.VolumeName(root)
+	if sourceVolume == "" || rootVolume == "" || strings.EqualFold(sourceVolume, rootVolume) {
+		relative, err := filepath.Rel(source, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+			t.Fatalf("mutable release root %q is inside developer checkout %q", root, source)
+		}
 	}
 	wantTopLevel := []string{"LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt", "cmd", "dist", "go.mod", "go.sum", "internal", "scripts", "skills"}
 	entries, err := os.ReadDir(root)
@@ -993,7 +1004,7 @@ func assertIsolatedReleaseRoot(t *testing.T, source, root string) {
 		t.Fatal(err)
 	}
 	dist, err := os.Lstat(filepath.Join(root, "dist"))
-	if err != nil || !dist.IsDir() || dist.Mode()&os.ModeSymlink != 0 || dist.Mode().Perm() != 0o755 {
+	if err != nil || !dist.IsDir() || dist.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && dist.Mode().Perm() != 0o755) {
 		t.Fatalf("isolated release dist is not a canonical directory: %v %v", dist, err)
 	}
 }
