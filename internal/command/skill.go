@@ -91,7 +91,7 @@ func skillInstallFailure(err error) output.Error {
 	case errors.Is(err, embeddedskill.ErrInvalidDirectory):
 		return output.Error{ExitCode: usageExitCode, Code: "invalid_skill_directory", Message: "Skill directory must be an existing safe directory without parent traversal"}
 	case errors.Is(err, embeddedskill.ErrDifferentContent):
-		return output.Error{ExitCode: 4, Code: "skill_exists", Message: "Installed skill differs; use --force to replace it"}
+		return output.Error{ExitCode: 3, Code: "skill_exists", Message: "Installed skill differs; use --force to replace it"}
 	case errors.Is(err, embeddedskill.ErrUnsafeTarget):
 		return output.Error{ExitCode: 3, Code: "unsafe_skill_target", Message: "Skill install target is unsafe"}
 	default:

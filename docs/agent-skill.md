@@ -32,8 +32,8 @@ agents use that path. Create/select the root yourself and pass its exact path.
 
 Installation is idempotent when the existing canonical file has identical
 bytes: it reports `Already installed` / JSON `unchanged:true`. If bytes differ,
-it fails with `skill_exists` and exit 4. Review the difference, then intentionally
-replace only that skill with:
+it fails with `skill_exists` and exit 3, the local storage/install failure class.
+Review the difference, then intentionally replace only that skill with:
 
 ```sh
 artisan skill install --directory ROOT --force

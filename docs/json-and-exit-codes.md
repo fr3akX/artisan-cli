@@ -37,8 +37,8 @@ download result); consumers must reject malformed or incomplete fields.
 | 0 | Success |
 | 1 | Local runtime/input/output preparation failure, including secure idempotency-key generation |
 | 2 | Usage or local validation failure |
-| 3 | Missing/unsafe configuration or local storage/install failure |
-| 4 | HTTP 401, or an installed skill differs and needs explicit `--force` |
+| 3 | Missing/unsafe configuration or local storage/install failure, including an installed skill that differs and needs explicit `--force` |
+| 4 | HTTP 401 only |
 | 5 | HTTP 403 |
 | 6 | HTTP 404 |
 | 7 | Other HTTP 4xx response, including HTTP 409 |

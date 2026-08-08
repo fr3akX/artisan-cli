@@ -91,24 +91,62 @@ func TestInventoryLotUpdateSupportsNullableClearsAndStateCommandsAreExact(t *tes
 	}
 }
 
+func TestInventoryLotArchiveCanonicalizesConfirmationAndStatePaths(t *testing.T) {
+	const rawLotID = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+	const canonicalLotID = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		paths = append(paths, r.URL.EscapedPath())
+		_, _ = fmt.Fprint(w, strings.ReplaceAll(commandLotDetailFullJSON(), commandLotID, canonicalLotID))
+	}))
+	defer server.Close()
+
+	archiveRuntime := inventoryRuntime(t, server.URL)
+	archiveRuntime.In = strings.NewReader("yes\n")
+	archiveRuntime.IsTerminal = func(int) bool { return true }
+	archived := runAuthCommand(t, archiveRuntime, "inventory", "lot", "archive", rawLotID, "--idempotency-key", "archive-key")
+	wantPrompt := "Archive lot " + canonicalLotID + "? Type yes to continue: "
+	if archived.code != 0 || archived.stderr != wantPrompt {
+		t.Fatalf("archive = %#v, want prompt %q", archived, wantPrompt)
+	}
+
+	restoreRuntime := inventoryRuntime(t, server.URL)
+	restoreRuntime.IsTerminal = func(int) bool { t.Fatal("restore checked terminal state"); return false }
+	restored := runAuthCommand(t, restoreRuntime, "inventory", "lot", "restore", rawLotID, "--idempotency-key", "restore-key")
+	if restored.code != 0 {
+		t.Fatalf("restore = %#v", restored)
+	}
+	wantPaths := []string{
+		"/api/v1/inventory/admin/bean-lots/" + canonicalLotID,
+		"/api/v1/inventory/admin/bean-lots/" + canonicalLotID,
+	}
+	if fmt.Sprint(paths) != fmt.Sprint(wantPaths) {
+		t.Fatalf("paths = %q, want %q", paths, wantPaths)
+	}
+}
+
 func TestInventoryLotArchiveDeclineAndNonTTYMissingYesMakeNoRequest(t *testing.T) {
+	const rawLotID = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+	const canonicalLotID = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		requests.Add(1)
-		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+		_, _ = fmt.Fprint(w, strings.ReplaceAll(commandLotDetailFullJSON(), commandLotID, canonicalLotID))
 	}))
 	defer server.Close()
 	interactive := inventoryRuntime(t, server.URL)
 	interactive.In = strings.NewReader("no\n")
 	interactive.IsTerminal = func(int) bool { return true }
-	declined := runAuthCommand(t, interactive, "inventory", "lot", "archive", commandLotID)
-	if declined.code != 10 || !strings.Contains(declined.stderr, commandLotID) || !strings.Contains(declined.stderr, "Archive") {
-		t.Fatalf("declined = %#v", declined)
+	declined := runAuthCommand(t, interactive, "inventory", "lot", "archive", rawLotID)
+	wantPrompt := "Archive lot " + canonicalLotID + "? Type yes to continue: "
+	if declined.code != 10 || declined.stderr != wantPrompt+"Confirmation declined\n" {
+		t.Fatalf("declined = %#v, want canonical prompt %q", declined, wantPrompt)
 	}
 	nonTTY := inventoryRuntime(t, server.URL)
 	nonTTY.IsTerminal = func(int) bool { return false }
-	missing := runAuthCommand(t, nonTTY, "--json", "inventory", "lot", "archive", commandLotID)
+	missing := runAuthCommand(t, nonTTY, "--json", "inventory", "lot", "archive", rawLotID)
 	if missing.code != 10 || !strings.Contains(missing.stdout, `"code":"confirmation_required"`) {
 		t.Fatalf("missing = %#v", missing)
 	}

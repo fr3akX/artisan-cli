@@ -179,7 +179,8 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 }
 
 func runInventoryLotState(ctx context.Context, state, lotID string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
-	if _, failure := api.NormalizeInventoryUUID(lotID); failure != nil {
+	canonicalLotID, failure := api.NormalizeInventoryUUID(lotID)
+	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
 	flags := flag.NewFlagSet("artisan inventory lot "+state, flag.ContinueOnError)
@@ -199,7 +200,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 		}
 	}
 	if state == "archive" {
-		approved, code := confirmMutation(runtime, jsonMode, yes, "Archive lot "+lotID+"?")
+		approved, code := confirmMutation(runtime, jsonMode, yes, "Archive lot "+canonicalLotID+"?")
 		if !approved {
 			return code
 		}
@@ -217,7 +218,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 	if client == nil {
 		return code
 	}
-	lot, apiFailure := client.PatchBeanLot(ctx, lotID, patch, key)
+	lot, apiFailure := client.PatchBeanLot(ctx, canonicalLotID, patch, key)
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}

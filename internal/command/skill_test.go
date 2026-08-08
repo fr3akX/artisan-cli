@@ -118,8 +118,13 @@ func TestSkillInstallRefusalForceAndStableJSONError(t *testing.T) {
 
 	result := runAuthCommand(t, Runtime{}, "--json", "skill", "install", "--directory", root)
 	want := "{\"ok\":false,\"error\":{\"code\":\"skill_exists\",\"message\":\"Installed skill differs; use --force to replace it\"}}\n"
-	if result.code != 4 || result.stdout != want || result.stderr != "" {
-		t.Fatalf("refusal = %#v, want stdout %q", result, want)
+	if result.code != 3 || result.stdout != want || result.stderr != "" {
+		t.Fatalf("JSON refusal = %#v, want stdout %q and exit 3", result, want)
+	}
+	result = runAuthCommand(t, Runtime{}, "skill", "install", "--directory", root)
+	wantHuman := "Installed skill differs; use --force to replace it\n"
+	if result.code != 3 || result.stdout != "" || result.stderr != wantHuman {
+		t.Fatalf("human refusal = %#v, want stderr %q and exit 3", result, wantHuman)
 	}
 	got, _ := os.ReadFile(path)
 	if string(got) != "local content\n" {
