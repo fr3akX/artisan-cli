@@ -39,23 +39,37 @@ func setCommandExit(state *cobraState, code int) {
 
 func normalizeLegacySingleDashArgs(args []string) []string {
 	result := append([]string(nil), args...)
-	for i, arg := range result {
+	for i := 0; i < len(result); i++ {
+		arg := result[i]
 		if arg == "--" {
 			break
 		}
-		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		if !strings.HasPrefix(arg, "-") {
 			continue
 		}
-		name := strings.TrimPrefix(arg, "-")
-		if before, _, found := strings.Cut(name, "="); found {
-			name = before
-		}
-		switch name {
-		case "json", "server", "timeout", "directory", "force", "token-stdin":
+		nameValue := strings.TrimLeft(arg, "-")
+		name, _, hasValue := strings.Cut(nameValue, "=")
+		if !strings.HasPrefix(arg, "--") && isKnownLegacySingleDashFlag(name) {
 			result[i] = "-" + arg
+		}
+		if cobraFlagConsumesValue(name) && !hasValue && i+1 < len(result) {
+			i++
 		}
 	}
 	return result
+}
+
+func isKnownLegacySingleDashFlag(name string) bool {
+	switch name {
+	case "json", "server", "timeout", "directory", "force", "token-stdin",
+		"limit", "cursor", "all", "q", "state", "availability", "conflict", "roast-uuid",
+		"grams", "reason", "reference", "occurred-at", "yes", "idempotency-key",
+		"client-reservation-uuid", "client-instance-uuid", "lot-id", "planned-grams",
+		"actual-grams", "lot", "note":
+		return true
+	default:
+		return false
+	}
 }
 
 func canonicalLegacyArgs(cmd *cobra.Command, positionals []string) []string {
@@ -139,7 +153,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 
 	root.AddCommand(
 		newAuthCommand(ctx, state),
-		newLegacyGroupCommand(ctx, state, "inventory", "Manage green-coffee inventory", runInventory),
+		newInventoryCommand(ctx, state),
 		newSkillCommand(ctx, state),
 		newVersionCommand(state),
 	)
@@ -252,6 +266,14 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			message = "Unknown auth command"
 		case "skill":
 			message = "Unknown skill command"
+		case "inventory":
+			message = "Unknown inventory command"
+		case "inventory lot":
+			message = "Unknown inventory lot command"
+		case "inventory reservation":
+			message = "Unknown inventory reservation command"
+		case "inventory conflict":
+			message = "Unknown inventory conflict command"
 		case "":
 			if command := firstCommandArg(args); command != "" {
 				message = "Unknown command: " + command
@@ -273,6 +295,10 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 				message = "skill install requires --directory ROOT"
 			case "skill show":
 				message = "skill show does not accept arguments"
+			default:
+				if inventoryMessage := inventoryCobraParseFailureMessage(path); inventoryMessage != "" {
+					message = inventoryMessage
+				}
 			}
 		}
 	}
@@ -284,7 +310,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 }
 
 func cobraJSONModeForParseFailure(args []string) bool {
-	if firstCommandArg(args) != "auth" {
+	command := firstCommandArg(args)
+	if command != "auth" && command != "inventory" {
 		return jsonModeForParseFailure(args)
 	}
 
@@ -307,13 +334,24 @@ func cobraJSONModeForParseFailure(args []string) bool {
 			if parsed, err := strconv.ParseBool(value); err == nil {
 				jsonMode = parsed
 			}
-		case "server", "timeout":
-			if !hasValue && i+1 < len(args) {
+		default:
+			if cobraFlagConsumesValue(name) && !hasValue && i+1 < len(args) {
 				i++
 			}
 		}
 	}
 	return jsonMode
+}
+
+func cobraFlagConsumesValue(name string) bool {
+	switch name {
+	case "server", "timeout", "directory", "limit", "cursor", "q", "state", "availability", "conflict", "roast-uuid",
+		"grams", "reason", "reference", "occurred-at", "idempotency-key", "client-reservation-uuid",
+		"client-instance-uuid", "lot-id", "planned-grams", "actual-grams", "lot", "note":
+		return true
+	default:
+		return false
+	}
 }
 
 func isGlobalFlagParseError(err error) bool {
@@ -348,6 +386,8 @@ func knownCommandPath(args []string) string {
 			}
 		}
 		return "skill"
+	case "inventory":
+		return knownInventoryCommandPath(args)
 	default:
 		return ""
 	}

@@ -73,6 +73,33 @@ func TestInventoryReservationCommandsSendEveryExactFieldWithoutPrompt(t *testing
 	}
 }
 
+func TestInventoryReservationFinalizeAcceptsFlagsAfterUUID(t *testing.T) {
+	var body, key string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		body, key = string(contents), r.Header.Get("Idempotency-Key")
+		_, _ = fmt.Fprint(w, commandReservationMutationJSONForActualGrams(900))
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "reservation", "finalize", commandEntryID, "--actual-grams", "900", "--occurred-at", commandTimestamp)
+	if result.code != 0 || result.stderr != "" || key == "" {
+		t.Fatalf("result=%#v key=%q", result, key)
+	}
+	if body != `{"actual_grams":900,"occurred_at":"`+commandTimestamp+`"}` {
+		t.Fatalf("body=%q", body)
+	}
+	if result.stdout != `{"ok":true,"data":`+commandReservationMutationJSONForActualGrams(900)+"}\n" {
+		t.Fatalf("stdout=%q", result.stdout)
+	}
+}
+
+func commandReservationMutationJSONForActualGrams(actual int64) string {
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"finalized","planned_grams":1250,"actual_grams":%d,"reserved_at":"%s","completed_at":"%s","created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":false}`,
+		commandReservationID, commandEntryID, commandLotID, commandRoastID, commandClientID, actual, commandTimestamp, commandTimestamp, commandTimestamp, commandTimestamp, commandLotID, 5000-actual, 5000-actual)
+}
+
 func commandReservationHumanOutput(state string, replay bool) string {
 	actual, completed := "-", "-"
 	onHand, reserved := "5000", "1250"

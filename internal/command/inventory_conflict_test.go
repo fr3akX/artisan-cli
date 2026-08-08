@@ -85,6 +85,30 @@ func TestInventoryConflictResolveConfirmsExactTargetAndNoteAndUsesOneKey(t *test
 	}
 }
 
+func TestInventoryConflictResolveAcceptsFlagsAfterConflictID(t *testing.T) {
+	var path, body, key string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path = r.URL.Path
+		key = r.Header.Get("Idempotency-Key")
+		contents, _ := io.ReadAll(r.Body)
+		body = string(contents)
+		_, _ = fmt.Fprint(w, commandResolvedConflictJSON())
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "conflict", "resolve", commandConflictID, "--note", "counted", "--yes")
+	if result.code != 0 || result.stderr != "" || key == "" {
+		t.Fatalf("result=%#v key=%q", result, key)
+	}
+	if path != "/api/v1/inventory/admin/conflicts/"+commandConflictID+"/resolve" || body != `{"resolution_note":"counted"}` {
+		t.Fatalf("path=%q body=%q", path, body)
+	}
+	if result.stdout != `{"ok":true,"data":`+commandResolvedConflictJSON()+"}\n" {
+		t.Fatalf("stdout=%q", result.stdout)
+	}
+}
+
 func TestInventoryConflictResolveDeclineNonTTYAndInvalidConfirmationIssueZeroRequests(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

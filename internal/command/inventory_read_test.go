@@ -305,6 +305,24 @@ func TestInventoryLotListAllFollowsOpaqueCursorsAndReturnsNullCursor(t *testing.
 	}, nil))
 }
 
+func TestInventoryLotLedgerAcceptsFlagsAfterLotID(t *testing.T) {
+	var query url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		query = r.URL.Query()
+		_, _ = io.WriteString(w, `{"items":[],"next_cursor":null}`)
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "ledger", commandLotID, "--limit", "100")
+	if result.code != 0 || result.stderr != "" || result.stdout != "{\"ok\":true,\"data\":{\"items\":[],\"next_cursor\":null}}\n" {
+		t.Fatalf("result = %#v", result)
+	}
+	if !reflect.DeepEqual(query, url.Values{"limit": {"100"}}) {
+		t.Fatalf("query = %#v", query)
+	}
+}
+
 func TestInventoryJSONContractsForDetailAndHistoryCommands(t *testing.T) {
 	tests := []struct {
 		name     string

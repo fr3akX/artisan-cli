@@ -41,6 +41,28 @@ func TestInventoryAdjustConfirmationIncludesExactChangeAndSendsCanonicalBody(t *
 	}
 }
 
+func TestInventoryAdjustAcceptsFlagsAfterLotID(t *testing.T) {
+	var body, key string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		body, key = string(contents), r.Header.Get("Idempotency-Key")
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "adjust", commandLotID, "--grams", "-25", "--reason", "count", "--yes")
+	if result.code != 0 || result.stderr != "" || key == "" {
+		t.Fatalf("result=%#v key=%q", result, key)
+	}
+	if !strings.Contains(body, `"quantity_grams":-25`) || !strings.Contains(body, `"reason":"count"`) || !strings.Contains(body, `"occurred_at":"`) {
+		t.Fatalf("body=%q", body)
+	}
+	if result.stdout != `{"ok":true,"data":`+commandLotDetailFullJSON()+"}\n" {
+		t.Fatalf("stdout=%q", result.stdout)
+	}
+}
+
 func TestInventoryAdjustJSONYesSkipsPromptAndSendsNormalizedAdjustment(t *testing.T) {
 	var body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
