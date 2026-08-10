@@ -62,6 +62,104 @@ func TestCobraLotCreateRepeatedVarietalsPreserveOrder(t *testing.T) {
 	}
 }
 
+func TestInventoryLotPricePerKgCreateUpdateAndClearBodies(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		body := string(contents)
+		if r.Method == http.MethodPost {
+			body = rawCommandMutationManifest(t, body, r.Header.Get("Content-Type"))
+			w.WriteHeader(http.StatusCreated)
+		}
+		bodies = append(bodies, body)
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	runtime := inventoryRuntime(t, server.URL)
+	runtime.IsTerminal = func(int) bool { t.Fatal("price mutation checked terminal state"); return false }
+	results := []commandResult{
+		runAuthCommand(t, runtime, "inventory", "lot", "create", "--name", "Lot", "--idempotency-key", "create-omitted"),
+		runAuthCommand(t, runtime, "inventory", "lot", "create", "--name", "Lot", "--price-per-kg-eur", "12.34", "--idempotency-key", "create-price"),
+		runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--notes", "note", "--idempotency-key", "update-omitted"),
+		runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--price-per-kg-eur", "0", "--idempotency-key", "update-zero"),
+		runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--clear", "price-per-kg-eur", "--idempotency-key", "clear-hyphen"),
+		runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--clear", "price_per_kg_eur", "--idempotency-key", "clear-underscore"),
+	}
+	for index, result := range results {
+		if result.code != 0 || result.stderr != "" {
+			t.Fatalf("result %d = %#v", index, result)
+		}
+		if !strings.Contains(result.stdout, "€12.34") {
+			t.Fatalf("result %d did not render authoritative returned price: %q", index, result.stdout)
+		}
+	}
+
+	const omitted = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
+	const priced = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":1234,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
+	want := []string{omitted, priced, `{"notes":"note"}`, `{"price_per_kg_eur_cents":0}`, `{"price_per_kg_eur_cents":null}`, `{"price_per_kg_eur_cents":null}`}
+	if fmt.Sprint(bodies) != fmt.Sprint(want) {
+		t.Fatalf("bodies = %q, want %q", bodies, want)
+	}
+}
+
+func TestInventoryLotPriceClearConflictAndInvalidDecimalsAreLocal(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	withoutConfig := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "--json", "inventory", "lot", "update", commandLotID, "--price-per-kg-eur", "12.34", "--clear", "price-per-kg-eur")
+	if withoutConfig.code != 2 || !strings.Contains(withoutConfig.stdout, `"code":"conflicting_field"`) {
+		t.Fatalf("conflict before configuration result = %#v", withoutConfig)
+	}
+
+	for _, alias := range []string{"price-per-kg-eur", "price_per_kg_eur"} {
+		result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "update", commandLotID, "--price-per-kg-eur", "12.34", "--clear", alias)
+		if result.code != 2 || !strings.Contains(result.stdout, `"code":"conflicting_field"`) {
+			t.Errorf("conflict alias %q result = %#v", alias, result)
+		}
+	}
+
+	invalid := []string{"", " 1", "1 ", "+1", "-1", "00", "01", ".1", "1.", "1.234", "1,00", "1_00", "1e2", "NaN", "١", "21474836.48"}
+	for _, raw := range invalid {
+		for _, command := range [][]string{
+			{"inventory", "lot", "create", "--name", "Lot", "--price-per-kg-eur", raw},
+			{"inventory", "lot", "update", commandLotID, "--price-per-kg-eur", raw},
+		} {
+			args := append([]string{"--json"}, command...)
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+			if result.code != 2 || !strings.Contains(result.stdout, `"code":"invalid_price_per_kg_eur"`) {
+				t.Errorf("args %q result = %#v", command, result)
+			}
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("local validation sent %d requests", requests.Load())
+	}
+}
+
+func rawCommandMutationManifest(t *testing.T, body, contentType string) string {
+	t.Helper()
+	_, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := multipart.NewReader(strings.NewReader(body), parameters["boundary"]).NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := io.ReadAll(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
+}
+
 func TestCobraLotUpdateRepeatedClearsAfterPositionalAndStateCommandsAreExact(t *testing.T) {
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

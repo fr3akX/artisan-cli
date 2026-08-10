@@ -24,10 +24,10 @@ func (values *repeatedStringFlag) Set(value string) error {
 }
 
 type lotFieldFlags struct {
-	name, origin, producer, supplier, externalReference               string
-	receivedDate, scaScore, processingMethod, processingDetail, notes string
-	cropYear, altitudeMin, altitudeMax                                int64
-	varietals                                                         repeatedStringFlag
+	name, origin, producer, supplier, externalReference, pricePerKgEUR string
+	receivedDate, scaScore, processingMethod, processingDetail, notes  string
+	cropYear, altitudeMin, altitudeMax                                 int64
+	varietals                                                          repeatedStringFlag
 }
 
 func addLotFieldFlags(flags *flag.FlagSet, values *lotFieldFlags) {
@@ -38,6 +38,7 @@ func addLotFieldFlags(flags *flag.FlagSet, values *lotFieldFlags) {
 	flags.StringVar(&values.externalReference, "external-reference", "", "external reference")
 	flags.StringVar(&values.receivedDate, "received-date", "", "received date")
 	flags.Int64Var(&values.cropYear, "crop-year", 0, "crop year")
+	flags.StringVar(&values.pricePerKgEUR, "price-per-kg-eur", "", "EUR price per kilogram")
 	flags.Var(&values.varietals, "varietal", "varietal (repeatable)")
 	flags.StringVar(&values.scaScore, "sca-score", "", "SCA score")
 	flags.StringVar(&values.processingMethod, "processing-method", "", "processing method")
@@ -85,7 +86,11 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 			return inventoryUsageFailure(runtime, jsonMode, "--from-json image metadata must match repeated --image files")
 		}
 	} else {
-		manifest = createManifestFromFlags(values, visited, *openingGrams, *openingReason, *openingReference)
+		var fieldFailure *output.Error
+		manifest, fieldFailure = createManifestFromFlags(values, visited, *openingGrams, *openingReason, *openingReference)
+		if fieldFailure != nil {
+			return writeFailure(runtime, jsonMode, *fieldFailure)
+		}
 		if len(imagePaths) != 0 || visited["image-caption"] || visited["image-alt-text"] || visited["image-cover"] {
 			images, imageFailure := imageManifestFromFlags(len(imagePaths), imageMetadata)
 			if imageFailure != nil {
@@ -222,12 +227,19 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
-func createManifestFromFlags(values lotFieldFlags, visited map[string]bool, openingGrams int64, openingReason, openingReference string) api.BeanLotCreateManifest {
+func createManifestFromFlags(values lotFieldFlags, visited map[string]bool, openingGrams int64, openingReason, openingReference string) (api.BeanLotCreateManifest, *output.Error) {
 	fields := api.BeanLotFields{Name: values.name, Varietals: append([]string(nil), values.varietals...)}
 	if fields.Varietals == nil {
 		fields.Varietals = []string{}
 	}
 	setOptionalLotFields(&fields, values, visited)
+	if visited["price-per-kg-eur"] {
+		price, failure := parsePricePerKgEUR(values.pricePerKgEUR)
+		if failure != nil {
+			return api.BeanLotCreateManifest{}, failure
+		}
+		fields.PricePerKgEURCents = &price
+	}
 	manifest := api.BeanLotCreateManifest{Fields: fields, OpeningGrams: openingGrams, Images: []api.ImageUploadManifest{}}
 	if visited["opening-reason"] {
 		manifest.OpeningReason = &openingReason
@@ -235,7 +247,7 @@ func createManifestFromFlags(values lotFieldFlags, visited map[string]bool, open
 	if visited["opening-reference"] {
 		manifest.OpeningReference = &openingReference
 	}
-	return manifest
+	return manifest, nil
 }
 
 func setOptionalLotFields(fields *api.BeanLotFields, values lotFieldFlags, visited map[string]bool) {
@@ -293,11 +305,19 @@ func patchFieldsFromFlags(values lotFieldFlags, clears []string, visited map[str
 	if visited["varietal"] {
 		fields["varietals"] = append([]string(nil), values.varietals...)
 	}
+	if visited["price-per-kg-eur"] {
+		price, failure := parsePricePerKgEUR(values.pricePerKgEUR)
+		if failure != nil {
+			return nil, failure
+		}
+		fields["price_per_kg_eur_cents"] = price
+	}
 	clearable := map[string]string{
 		"origin": "origin", "producer": "producer", "supplier": "supplier", "notes": "notes", "varietals": "varietals",
 		"external-reference": "external_reference", "external_reference": "external_reference",
 		"received-date": "received_date", "received_date": "received_date",
 		"crop-year": "crop_year", "crop_year": "crop_year",
+		"price-per-kg-eur": "price_per_kg_eur_cents", "price_per_kg_eur": "price_per_kg_eur_cents",
 		"sca-score": "sca_score", "sca_score": "sca_score",
 		"processing-method": "processing_method", "processing_method": "processing_method",
 		"processing-detail": "processing_detail", "processing_detail": "processing_detail",

@@ -276,7 +276,7 @@ func isKnownLegacySingleDashFlag(name string) bool {
 
 func cobraLotFieldFlag(name string) bool {
 	return stringIn(name,
-		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
 		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
 	)
 }
@@ -632,7 +632,7 @@ func cobraFlagConsumesValue(name string) bool {
 	case "server", "timeout", "directory", "limit", "cursor", "q", "state", "availability", "conflict", "roast-uuid",
 		"grams", "reason", "reference", "occurred-at", "idempotency-key", "client-reservation-uuid",
 		"client-instance-uuid", "lot-id", "planned-grams", "actual-grams", "lot", "note",
-		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
 		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
 		"opening-grams", "opening-reason", "opening-reference", "from-json", "image", "image-caption", "image-alt-text",
 		"image-cover", "clear", "caption", "alt-text", "variant":

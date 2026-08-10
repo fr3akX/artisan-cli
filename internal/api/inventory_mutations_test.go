@@ -112,6 +112,36 @@ func TestMutationRetriesReplayIdenticalJSONAndIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestBeanLotPricePerKgRetryReplaysExactBodyAndIdempotencyKey(t *testing.T) {
+	var bodies, keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(contents))
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		if len(bodies) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"busy","message":"busy","details":null}}`)
+			return
+		}
+		_, _ = io.WriteString(w, mutationLotJSON(1))
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	patch, failure := NewBeanLotPatch(map[string]any{"price_per_kg_eur_cents": int64(1234)})
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if _, failure = client.PatchBeanLot(context.Background(), mutationLotID, patch, "price-retry-key"); failure != nil {
+		t.Fatal(failure)
+	}
+	wantBodies := []string{`{"price_per_kg_eur_cents":1234}`, `{"price_per_kg_eur_cents":1234}`, `{"price_per_kg_eur_cents":1234}`}
+	wantKeys := []string{"price-retry-key", "price-retry-key", "price-retry-key"}
+	if !reflect.DeepEqual(bodies, wantBodies) || !reflect.DeepEqual(keys, wantKeys) {
+		t.Fatalf("bodies=%q keys=%v", bodies, keys)
+	}
+}
+
 func TestStrictMutationModelsRejectLocally(t *testing.T) {
 	invalidCreates := []BeanLotCreateManifest{
 		{Fields: BeanLotFields{Name: ""}, Images: []ImageUploadManifest{}},
@@ -180,6 +210,20 @@ func TestBeanLotPriceCreateAndPatchContracts(t *testing.T) {
 		})
 	}
 
+	for raw, want := range map[string]string{
+		`{"price_per_kg_eur_cents":null}`: `{"price_per_kg_eur_cents":null}`,
+		`{"price_per_kg_eur_cents":0}`:    `{"price_per_kg_eur_cents":0}`,
+	} {
+		patch, failure := DecodeBeanLotPatch([]byte(raw))
+		if failure != nil {
+			t.Errorf("valid patch price %s failure = %#v", raw, failure)
+			continue
+		}
+		encoded, _ := json.Marshal(patch)
+		if string(encoded) != want || !patch.HasField("price_per_kg_eur_cents") {
+			t.Errorf("patch %s encoded = %s, has field = %t", raw, encoded, patch.HasField("price_per_kg_eur_cents"))
+		}
+	}
 	for _, value := range []any{nil, int64(0), int64(2_147_483_647), json.Number("1234")} {
 		patch, failure := NewBeanLotPatch(map[string]any{"price_per_kg_eur_cents": value})
 		if failure != nil {
@@ -189,6 +233,14 @@ func TestBeanLotPriceCreateAndPatchContracts(t *testing.T) {
 		if !patch.HasField("price_per_kg_eur_cents") {
 			t.Errorf("patch lost price field for %#v", value)
 		}
+	}
+	for _, raw := range []string{"-1", "2147483648", "1.5", "true", `"1234"`, "9223372036854775808"} {
+		t.Run("patch JSON "+raw, func(t *testing.T) {
+			payload := `{"price_per_kg_eur_cents":` + raw + `}`
+			if _, failure := DecodeBeanLotPatch([]byte(payload)); failure == nil {
+				t.Fatalf("accepted patch JSON price %s", raw)
+			}
+		})
 	}
 	for _, value := range []any{int64(-1), int64(2_147_483_648), json.Number("1.5"), true, "1234", json.Number("9223372036854775808")} {
 		t.Run(fmt.Sprintf("patch %#v", value), func(t *testing.T) {

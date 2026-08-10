@@ -15,6 +15,7 @@ func addCobraLotFieldFlags(flags *pflag.FlagSet) {
 	flags.String("external-reference", "", "External reference")
 	flags.String("received-date", "", "Received date (YYYY-MM-DD)")
 	flags.Int64("crop-year", 0, "Crop year")
+	flags.String("price-per-kg-eur", "", "EUR price per kilogram")
 	flags.StringArray("varietal", nil, "Varietal; repeat for multiple values")
 	flags.String("sca-score", "", "SCA score")
 	flags.String("processing-method", "", "Processing method")
@@ -52,7 +53,7 @@ func newInventoryLotCreateCommand(ctx context.Context, state *cobraState) *cobra
 		return []string{"-"}, cobra.ShellCompDirectiveDefault
 	})
 	disableFlagFileCompletion(cmd,
-		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
 		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
 		"opening-grams", "opening-reason", "opening-reference", "idempotency-key", "image-caption", "image-alt-text", "image-cover",
 	)
@@ -78,7 +79,7 @@ func newInventoryLotUpdateCommand(ctx context.Context, state *cobraState) *cobra
 		return []string{"-"}, cobra.ShellCompDirectiveDefault
 	})
 	disableFlagFileCompletion(cmd,
-		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "varietal",
+		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
 		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
 		"clear", "idempotency-key",
 	)
