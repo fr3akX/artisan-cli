@@ -175,6 +175,13 @@ func TestParseFailureJSONIntentIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestDescriptionValueIsNotMistakenForJSONIntent(t *testing.T) {
+	args := []string{"inventory", "lot", "update", "not-a-lot", "--description", "--json", "--bad"}
+	if cobraJSONModeForParseFailure(args) {
+		t.Fatalf("description value selected JSON mode for %q", args)
+	}
+}
+
 func TestLegacySingleDashGlobalFlagsRemainAccepted(t *testing.T) {
 	humanVersion := "artisan dev (unknown)\n"
 	jsonVersion := "{\"ok\":true,\"data\":{\"version\":\"dev\",\"commit\":\"unknown\"}}\n"

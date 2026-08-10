@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/fr3akX/artisan-cli/internal/api"
 )
 
 const commandLotID = "11111111111141118111111111111111"
@@ -193,6 +195,21 @@ func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 	}
 }
 
+func TestInventoryLotListHumanRowsRemainDescriptionFree(t *testing.T) {
+	var rendered bytes.Buffer
+	page := api.BeanLotPage{Items: []api.BeanLotSummary{{
+		LotID: "lot-1", Name: "Lot", State: "active", OnHandGrams: 1, ReservedGrams: 2, AvailableGrams: -1, UnresolvedConflictCount: 3,
+	}}}
+	if err := writeLotTable(&rendered, page); err != nil {
+		t.Fatal(err)
+	}
+	const want = "LOT ID  NAME  STATE   PRICE/KG  ON HAND GRAMS  RESERVED GRAMS  AVAILABLE GRAMS  CONFLICTS\n" +
+		"lot-1   Lot   active  -         1              2               -1               3\n"
+	if rendered.String() != want || strings.Contains(rendered.String(), "DESCRIPTION") {
+		t.Fatalf("lot list = %q, want %q", rendered.String(), want)
+	}
+}
+
 func TestInventoryLotListHumanShowsPricePerKg(t *testing.T) {
 	zeroPrice := strings.Replace(commandInventorySummary(commandImageID, "Zero", 20), `"price_per_kg_eur_cents":null`, `"price_per_kg_eur_cents":0`, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -215,6 +232,24 @@ func TestInventoryLotListHumanShowsPricePerKg(t *testing.T) {
 		if strings.Contains(line, unpricedRow) && !strings.Contains(line, "  -  ") {
 			t.Errorf("unpriced row does not contain null marker: %q", line)
 		}
+	}
+}
+
+func TestInventoryLotDescriptionHumanDetailAndJSONPreserveValue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "lot", "show", commandLotID)
+	if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, `Public description: First paragraph\nSecond paragraph`+"\n") {
+		t.Fatalf("human result = %#v", result)
+	}
+	jsonResult := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "show", commandLotID)
+	wantJSON := `{"ok":true,"data":` + commandLotDetailFullJSON() + "}\n"
+	if jsonResult.code != 0 || jsonResult.stderr != "" || jsonResult.stdout != wantJSON {
+		t.Fatalf("JSON result = %#v, want stdout %q", jsonResult, wantJSON)
 	}
 }
 
@@ -641,7 +676,7 @@ func inventoryExpectedLotDetail() map[string]any {
 	for key, item := range map[string]any{
 		"producer": "Producer", "supplier": nil, "external_reference": "EXT-1", "received_date": "2026-08-01",
 		"varietals": []any{"Heirloom", "74110"}, "sca_score": "87.50", "processing_detail": "Raised beds",
-		"altitude_min_metres": json.Number("1900"), "altitude_max_metres": nil, "description": nil, "notes": "seasonal",
+		"altitude_min_metres": json.Number("1900"), "altitude_max_metres": nil, "description": "First paragraph\nSecond paragraph", "notes": "seasonal",
 		"images": []any{inventoryExpectedImage()}, "created_at": commandTimestamp, "archived_at": nil,
 		"links": map[string]any{
 			"self":         "/api/v1/inventory/read/bean-lots/" + commandLotID,
@@ -776,7 +811,7 @@ func commandConflictJSON() string {
 }
 
 func commandLotDetailFullJSON() string {
-	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"description":null,"notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
+	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"description":"First paragraph\nSecond paragraph","notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
 }
 
 func commandLotDetailJSON() string {

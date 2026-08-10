@@ -25,7 +25,8 @@ func (values *repeatedStringFlag) Set(value string) error {
 
 type lotFieldFlags struct {
 	name, origin, producer, supplier, externalReference, pricePerKgEUR string
-	receivedDate, scaScore, processingMethod, processingDetail, notes  string
+	receivedDate, scaScore, processingMethod, processingDetail         string
+	description, notes                                                 string
 	cropYear, altitudeMin, altitudeMax                                 int64
 	varietals                                                          repeatedStringFlag
 }
@@ -45,6 +46,7 @@ func addLotFieldFlags(flags *flag.FlagSet, values *lotFieldFlags) {
 	flags.StringVar(&values.processingDetail, "processing-detail", "", "processing detail")
 	flags.Int64Var(&values.altitudeMin, "altitude-min-metres", 0, "minimum altitude")
 	flags.Int64Var(&values.altitudeMax, "altitude-max-metres", 0, "maximum altitude")
+	flags.StringVar(&values.description, "description", "", "public description")
 	flags.StringVar(&values.notes, "notes", "", "notes")
 }
 
@@ -284,6 +286,9 @@ func setOptionalLotFields(fields *api.BeanLotFields, values lotFieldFlags, visit
 	if visited["altitude-max-metres"] {
 		fields.AltitudeMaxMetres = &values.altitudeMax
 	}
+	if visited["description"] {
+		fields.Description = &values.description
+	}
 	if visited["notes"] {
 		fields.Notes = &values.notes
 	}
@@ -291,7 +296,7 @@ func setOptionalLotFields(fields *api.BeanLotFields, values lotFieldFlags, visit
 
 func patchFieldsFromFlags(values lotFieldFlags, clears []string, visited map[string]bool) (map[string]any, *output.Error) {
 	fields := make(map[string]any)
-	stringValues := map[string]string{"name": values.name, "origin": values.origin, "producer": values.producer, "supplier": values.supplier, "external-reference": values.externalReference, "received-date": values.receivedDate, "sca-score": values.scaScore, "processing-method": values.processingMethod, "processing-detail": values.processingDetail, "notes": values.notes}
+	stringValues := map[string]string{"name": values.name, "origin": values.origin, "producer": values.producer, "supplier": values.supplier, "external-reference": values.externalReference, "received-date": values.receivedDate, "sca-score": values.scaScore, "processing-method": values.processingMethod, "processing-detail": values.processingDetail, "description": values.description, "notes": values.notes}
 	for flagName, value := range stringValues {
 		if visited[flagName] {
 			fields[strings.ReplaceAll(flagName, "-", "_")] = value
@@ -313,7 +318,7 @@ func patchFieldsFromFlags(values lotFieldFlags, clears []string, visited map[str
 		fields["price_per_kg_eur_cents"] = price
 	}
 	clearable := map[string]string{
-		"origin": "origin", "producer": "producer", "supplier": "supplier", "notes": "notes", "varietals": "varietals",
+		"origin": "origin", "producer": "producer", "supplier": "supplier", "description": "description", "notes": "notes", "varietals": "varietals",
 		"external-reference": "external_reference", "external_reference": "external_reference",
 		"received-date": "received_date", "received_date": "received_date",
 		"crop-year": "crop_year", "crop_year": "crop_year",

@@ -22,11 +22,12 @@ func addCobraLotFieldFlags(flags *pflag.FlagSet) {
 	flags.String("processing-detail", "", "Processing detail")
 	flags.Int64("altitude-min-metres", 0, "Minimum altitude in metres")
 	flags.Int64("altitude-max-metres", 0, "Maximum altitude in metres")
+	flags.String("description", "", "Public description shown on linked public roast pages")
 	flags.String("notes", "", "Notes")
 }
 
 var inventoryLotClearCompletions = []string{
-	"origin", "producer", "supplier", "notes", "varietals",
+	"origin", "producer", "supplier", "description", "notes", "varietals",
 	"external-reference", "external_reference",
 	"received-date", "received_date",
 	"crop-year", "crop_year",
@@ -67,7 +68,7 @@ func newInventoryLotCreateCommand(ctx context.Context, state *cobraState) *cobra
 	})
 	disableFlagFileCompletion(cmd,
 		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
-		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
+		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "description", "notes",
 		"opening-grams", "opening-reason", "opening-reference", "idempotency-key", "image-caption", "image-alt-text", "image-cover",
 	)
 	return cmd
@@ -93,7 +94,7 @@ func newInventoryLotUpdateCommand(ctx context.Context, state *cobraState) *cobra
 	})
 	disableFlagFileCompletion(cmd,
 		"name", "origin", "producer", "supplier", "external-reference", "received-date", "crop-year", "price-per-kg-eur", "varietal",
-		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "notes",
+		"sca-score", "processing-method", "processing-detail", "altitude-min-metres", "altitude-max-metres", "description", "notes",
 		"idempotency-key",
 	)
 	registerStaticFlagCompletion(cmd, "clear", inventoryLotClearCompletions...)

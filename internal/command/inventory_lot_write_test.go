@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -37,17 +38,21 @@ func TestCobraLotCreateRepeatedVarietalsPreserveOrder(t *testing.T) {
 	runtime := inventoryRuntime(t, server.URL)
 	runtime.IsTerminal = func(int) bool { t.Fatal("create checked terminal state"); return false }
 	result := runAuthCommand(t, runtime, "inventory", "lot", "create",
-		"--name", " New Lot ", "--origin", " Kenya ", "--producer", "Producer", "--supplier", "Supplier",
+		"--name", " New Lot ", "--description", "  Cafe\u0301 story\r\nSecond paragraph  ", "--origin", " Kenya ", "--producer", "Producer", "--supplier", "Supplier",
 		"--external-reference", "ext-1", "--received-date", "2026-08-07", "--crop-year", "2026",
 		"--varietal", " SL28 ", "--varietal", "Ruiru 11", "--sca-score", "87.50", "--processing-method", "washed",
 		"--processing-detail", " \t ", "--altitude-min-metres", "1800", "--altitude-max-metres", "2000",
-		"--notes", " notes ", "--opening-grams", "2500", "--opening-reason", " count\r\nline ", "--opening-reference", " sheet ")
-	if result.code != 0 || result.stderr != "" || key == "" {
+		"--notes", " notes ", "--opening-grams", "2500", "--opening-reason", " count\r\nline ", "--opening-reference", " sheet ",
+		"--idempotency-key", "create-key")
+	if result.code != 0 || result.stderr != "" || key != "create-key" {
 		t.Fatalf("result=%#v key=%q", result, key)
 	}
 	fields := manifest["fields"].(map[string]any)
 	if fields["name"] != "New Lot" || fields["origin"] != "Kenya" || fields["received_date"] != "2026-08-07" || fields["sca_score"] != "87.50" || fields["processing_detail"] != nil || fields["notes"] != "notes" {
 		t.Fatalf("fields = %#v", fields)
+	}
+	if fields["description"] != "Café story\nSecond paragraph" {
+		t.Fatalf("description = %#v", fields["description"])
 	}
 	if manifest["opening_reason"] != "count\nline" || manifest["opening_reference"] != "sheet" {
 		t.Fatalf("opening fields = %#v", manifest)
@@ -101,6 +106,67 @@ func TestInventoryLotPricePerKgCreateUpdateAndClearBodies(t *testing.T) {
 	want := []string{omitted, priced, `{"notes":"note"}`, `{"price_per_kg_eur_cents":0}`, `{"price_per_kg_eur_cents":null}`, `{"price_per_kg_eur_cents":null}`}
 	if fmt.Sprint(bodies) != fmt.Sprint(want) {
 		t.Fatalf("bodies = %q, want %q", bodies, want)
+	}
+}
+
+func TestInventoryLotDescriptionUpdateClearAndConflictAreLocal(t *testing.T) {
+	var bodies []string
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		contents, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(contents))
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	runtime := inventoryRuntime(t, server.URL)
+	set := runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--description", " New public story ", "--idempotency-key", "set-description")
+	clear := runAuthCommand(t, runtime, "inventory", "lot", "update", commandLotID, "--clear", "description", "--idempotency-key", "clear-description")
+	if set.code != 0 || set.stderr != "" || clear.code != 0 || clear.stderr != "" {
+		t.Fatalf("set=%#v clear=%#v", set, clear)
+	}
+	wantBodies := []string{`{"description":"New public story"}`, `{"description":null}`}
+	if !reflect.DeepEqual(bodies, wantBodies) {
+		t.Fatalf("bodies = %q, want %q", bodies, wantBodies)
+	}
+
+	conflict := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "--json", "inventory", "lot", "update", commandLotID, "--description", "story", "--clear", "description")
+	if conflict.code != 2 || !strings.Contains(conflict.stdout, `"code":"conflicting_field"`) {
+		t.Fatalf("conflict before configuration = %#v", conflict)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("conflict sent request; requests = %d", requests.Load())
+	}
+}
+
+func TestInventoryLotDescriptionInvalidValuesAreLocal(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	defer server.Close()
+
+	for name, value := range map[string]string{
+		"too many runes": strings.Repeat("é", 2001),
+		"NUL":            "public\x00story",
+		"C1 control":     "public\u0085story",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, args := range [][]string{
+				{"inventory", "lot", "create", "--name", "Lot", "--description", value},
+				{"inventory", "lot", "update", commandLotID, "--description", value},
+			} {
+				result := runAuthCommand(t, inventoryRuntime(t, server.URL), append([]string{"--json"}, args...)...)
+				if result.code != 2 {
+					t.Errorf("args %q result = %#v", args[:3], result)
+				}
+			}
+		})
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid descriptions sent %d requests", requests.Load())
 	}
 }
 

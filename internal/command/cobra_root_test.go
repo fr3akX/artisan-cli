@@ -326,6 +326,20 @@ func TestNormalizeLegacySingleDashArgsOnlyChangesKnownFormsBeforeDoubleDash(t *t
 	}
 }
 
+func TestDescriptionIsKnownValueConsumingLotFlag(t *testing.T) {
+	for _, path := range []string{"inventory lot create", "inventory lot update"} {
+		if !isKnownLegacySingleDashFlagForPath("description", path) {
+			t.Errorf("description is not a known flag for %q", path)
+		}
+		if !cobraFlagConsumesValueForPath("description", path) {
+			t.Errorf("description does not consume a value for %q", path)
+		}
+	}
+	if !cobraFlagConsumesValue("description") {
+		t.Fatal("description is absent from exact value-consuming flag enumeration")
+	}
+}
+
 func TestCanonicalLegacyArgsPreservesRepeatedAndExplicitFalseFlags(t *testing.T) {
 	cmd := &cobra.Command{Use: "leaf"}
 	cmd.Flags().StringArray("item", nil, "repeatable item")

@@ -195,11 +195,14 @@ func TestInventoryTotalsCobraCompletionMatchesLotList(t *testing.T) {
 	}
 }
 
-func TestInventoryPriceCobraHelpCompletionAndDecimalPreservation(t *testing.T) {
+func TestInventoryPriceAndDescriptionCobraHelpCompletionAndPreservation(t *testing.T) {
 	for _, leaf := range []string{"create", "update"} {
 		result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "lot", leaf, "--help")
 		if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, "--price-per-kg-eur") {
 			t.Errorf("%s help = %#v", leaf, result)
+		}
+		if !strings.Contains(result.stdout, "--description string") || !strings.Contains(result.stdout, "Public description shown on linked public roast pages") {
+			t.Errorf("%s help missing description flag:\n%s", leaf, result.stdout)
 		}
 	}
 
@@ -212,8 +215,8 @@ func TestInventoryPriceCobraHelpCompletionAndDecimalPreservation(t *testing.T) {
 	if !exists {
 		t.Fatal("completion for --clear is not registered")
 	}
-	values, directive := completion(update, nil, "price")
-	for _, alias := range []string{"price-per-kg-eur", "price_per_kg_eur"} {
+	values, directive := completion(update, nil, "")
+	for _, alias := range []string{"price-per-kg-eur", "price_per_kg_eur", "description"} {
 		if !containsString(values, alias) {
 			t.Errorf("--clear completion missing %q: %q", alias, values)
 		}
@@ -227,14 +230,16 @@ func TestInventoryPriceCobraHelpCompletionAndDecimalPreservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, cmd := range []*cobra.Command{create, update} {
-		priceCompletion, exists := cmd.GetFlagCompletionFunc("price-per-kg-eur")
-		if !exists {
-			t.Errorf("%s price completion is not registered", cmd.CommandPath())
-			continue
-		}
-		values, directive := priceCompletion(cmd, nil, "")
-		if len(values) != 0 || directive != cobra.ShellCompDirectiveNoFileComp {
-			t.Errorf("%s price completion = %q, %v", cmd.CommandPath(), values, directive)
+		for _, flagName := range []string{"price-per-kg-eur", "description"} {
+			flagCompletion, exists := cmd.GetFlagCompletionFunc(flagName)
+			if !exists {
+				t.Errorf("%s %s completion is not registered", cmd.CommandPath(), flagName)
+				continue
+			}
+			values, directive := flagCompletion(cmd, nil, "")
+			if len(values) != 0 || directive != cobra.ShellCompDirectiveNoFileComp {
+				t.Errorf("%s %s completion = %q, %v", cmd.CommandPath(), flagName, values, directive)
+			}
 		}
 	}
 	if err := create.Flags().Parse([]string{"--price-per-kg-eur", "12.30"}); err != nil {
@@ -242,6 +247,23 @@ func TestInventoryPriceCobraHelpCompletionAndDecimalPreservation(t *testing.T) {
 	}
 	if got := canonicalLegacyArgs(create, nil); !reflect.DeepEqual(got, []string{"--price-per-kg-eur=12.30"}) {
 		t.Fatalf("canonical price args = %q", got)
+	}
+}
+
+func TestInventoryDescriptionDashPrefixedValueSurvivesCanonicalRouting(t *testing.T) {
+	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{}), nil)
+	update, _, err := root.Find([]string{"inventory", "lot", "update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"inventory", "lot", "update", commandLotID, "--description", "-bright coffee", "--idempotency-key", "key"}
+	if err := update.Flags().Parse(args[4:]); err != nil {
+		t.Fatal(err)
+	}
+	got := canonicalLegacyArgs(update, nil)
+	want := []string{"--description=-bright coffee", "--idempotency-key=key"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("canonicalLegacyArgs for %q = %q, want %q", args, got, want)
 	}
 }
 
