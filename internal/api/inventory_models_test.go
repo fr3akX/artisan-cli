@@ -26,7 +26,7 @@ func validImageJSON() string {
 func validSummaryJSON() string {
 	return `{
 		"lot_id":"` + inventoryLotID + `","name":"Ethiopia Guji","origin":"Ethiopia","processing_method":"washed",
-		"crop_year":2026,"state":"active","on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,
+		"crop_year":2026,"state":"active","price_per_kg_eur_cents":1234,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,
 		"unresolved_conflict_count":0,"cover_image":` + validImageJSON() + `,"updated_at":"` + inventoryTimestamp + `"
 	}`
 }
@@ -48,7 +48,7 @@ func TestInventoryModelsAcceptCanonicalFixtureAndUnknownAdditiveFields(t *testin
 	if err := json.Unmarshal([]byte(payload), &lot); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if lot.LotID != inventoryLotID || lot.OnHandGrams != 5000 || lot.SCAScore == nil || *lot.SCAScore != "87.50" {
+	if lot.LotID != inventoryLotID || lot.PricePerKgEURCents == nil || *lot.PricePerKgEURCents != 1234 || lot.OnHandGrams != 5000 || lot.SCAScore == nil || *lot.SCAScore != "87.50" {
 		t.Fatalf("decoded lot = %#v", lot)
 	}
 	encoded, err := json.Marshal(lot)
@@ -57,6 +57,125 @@ func TestInventoryModelsAcceptCanonicalFixtureAndUnknownAdditiveFields(t *testin
 	}
 	if strings.Contains(string(encoded), "future_field") {
 		t.Fatal("unknown response field was retained")
+	}
+}
+
+func TestInventoryModelsRequireAndValidatePricePerKgEURCents(t *testing.T) {
+	missing := mutateInventoryJSONField(t, validSummaryJSON(), "price_per_kg_eur_cents", nil, true)
+	if err := json.Unmarshal(missing, &BeanLotSummary{}); err == nil {
+		t.Fatal("accepted summary missing price_per_kg_eur_cents")
+	}
+	missingDetail := mutateInventoryJSONField(t, validDetailJSON(), "price_per_kg_eur_cents", nil, true)
+	if err := json.Unmarshal(missingDetail, &BeanLotDetail{}); err == nil {
+		t.Fatal("accepted detail missing price_per_kg_eur_cents")
+	}
+	for _, raw := range []string{"0", "2147483647"} {
+		payload := strings.Replace(validSummaryJSON(), `"price_per_kg_eur_cents":1234`, `"price_per_kg_eur_cents":`+raw, 1)
+		if err := json.Unmarshal([]byte(payload), &BeanLotSummary{}); err != nil {
+			t.Errorf("rejected boundary price %s: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"-1", "2147483648", "1.5", "true", `"1234"`, "9223372036854775808"} {
+		t.Run(raw, func(t *testing.T) {
+			payload := strings.Replace(validSummaryJSON(), `"price_per_kg_eur_cents":1234`, `"price_per_kg_eur_cents":`+raw, 1)
+			if err := json.Unmarshal([]byte(payload), &BeanLotSummary{}); err == nil {
+				t.Fatalf("accepted price_per_kg_eur_cents %s", raw)
+			}
+		})
+	}
+}
+
+func TestInventoryModelsRequireAndValidateRoastCostEURCents(t *testing.T) {
+	missing := mutateInventoryJSONField(t, validReservationJSON(), "roast_cost_eur_cents", nil, true)
+	if err := json.Unmarshal(missing, &InventoryReservation{}); err == nil {
+		t.Fatal("accepted reservation missing roast_cost_eur_cents")
+	}
+	for _, raw := range []string{"0", "9007199254740991"} {
+		payload := strings.Replace(validReservationJSON(), `"roast_cost_eur_cents":1234`, `"roast_cost_eur_cents":`+raw, 1)
+		if err := json.Unmarshal([]byte(payload), &InventoryReservation{}); err != nil {
+			t.Errorf("rejected boundary roast cost %s: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"-1", "9007199254740992", "1.5", "true", `"1234"`, "9223372036854775808"} {
+		t.Run(raw, func(t *testing.T) {
+			payload := strings.Replace(validReservationJSON(), `"roast_cost_eur_cents":1234`, `"roast_cost_eur_cents":`+raw, 1)
+			if err := json.Unmarshal([]byte(payload), &InventoryReservation{}); err == nil {
+				t.Fatalf("accepted roast_cost_eur_cents %s", raw)
+			}
+		})
+	}
+}
+
+func TestInventoryTotalsValidateRequiredFieldsAndInvariants(t *testing.T) {
+	valid := `{"lot_count":3,"on_hand_grams":1000,"reserved_grams":250,"available_grams":750,"on_hand_value_eur_cents":1234,"priced_lot_count":2,"unpriced_lot_count":1,"future":true}`
+	var totals InventoryTotals
+	if err := json.Unmarshal([]byte(valid), &totals); err != nil {
+		t.Fatalf("valid totals error = %v", err)
+	}
+	if totals.LotCount != 3 || totals.OnHandValueEURCents == nil || *totals.OnHandValueEURCents != 1234 {
+		t.Fatalf("totals = %#v", totals)
+	}
+	noPriced := `{"lot_count":1,"on_hand_grams":-100,"reserved_grams":50,"available_grams":-150,"on_hand_value_eur_cents":null,"priced_lot_count":0,"unpriced_lot_count":1}`
+	if err := json.Unmarshal([]byte(noPriced), &totals); err != nil {
+		t.Fatalf("valid no-priced totals error = %v", err)
+	}
+	boundaries := []string{
+		`{"lot_count":9007199254740991,"on_hand_grams":9007199254740991,"reserved_grams":9007199254740991,"available_grams":0,"on_hand_value_eur_cents":9007199254740991,"priced_lot_count":9007199254740991,"unpriced_lot_count":0}`,
+		`{"lot_count":1,"on_hand_grams":-9007199254740991,"reserved_grams":0,"available_grams":-9007199254740991,"on_hand_value_eur_cents":-9007199254740991,"priced_lot_count":1,"unpriced_lot_count":0}`,
+	}
+	for _, payload := range boundaries {
+		if err := json.Unmarshal([]byte(payload), &totals); err != nil {
+			t.Errorf("valid boundary totals error = %v", err)
+		}
+	}
+
+	for _, field := range []string{"lot_count", "on_hand_grams", "reserved_grams", "available_grams", "on_hand_value_eur_cents", "priced_lot_count", "unpriced_lot_count"} {
+		t.Run("missing "+field, func(t *testing.T) {
+			payload := mutateInventoryJSONField(t, valid, field, nil, true)
+			if err := json.Unmarshal(payload, &InventoryTotals{}); err == nil {
+				t.Fatalf("accepted missing field %q", field)
+			}
+		})
+		if field != "on_hand_value_eur_cents" {
+			t.Run("null "+field, func(t *testing.T) {
+				payload := mutateInventoryJSONField(t, valid, field, nil, false)
+				if err := json.Unmarshal(payload, &InventoryTotals{}); err == nil {
+					t.Fatalf("accepted null field %q", field)
+				}
+			})
+		}
+	}
+
+	invalid := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "negative lot count", old: `"lot_count":3`, new: `"lot_count":-1`},
+		{name: "unsafe lot count", old: `"lot_count":3`, new: `"lot_count":9007199254740992`},
+		{name: "negative priced count", old: `"priced_lot_count":2`, new: `"priced_lot_count":-1`},
+		{name: "unsafe unpriced count", old: `"unpriced_lot_count":1`, new: `"unpriced_lot_count":9007199254740992`},
+		{name: "fractional count", old: `"lot_count":3`, new: `"lot_count":3.5`},
+		{name: "boolean count", old: `"lot_count":3`, new: `"lot_count":true`},
+		{name: "string count", old: `"lot_count":3`, new: `"lot_count":"3"`},
+		{name: "overflow count", old: `"lot_count":3`, new: `"lot_count":9223372036854775808`},
+		{name: "unsafe quantity", old: `"on_hand_grams":1000`, new: `"on_hand_grams":9007199254740992`},
+		{name: "unsafe negative quantity", old: `"reserved_grams":250`, new: `"reserved_grams":-9007199254740992`},
+		{name: "quantity balance", old: `"available_grams":750`, new: `"available_grams":749`},
+		{name: "lot count coverage", old: `"unpriced_lot_count":1`, new: `"unpriced_lot_count":2`},
+		{name: "null valuation with priced lots", old: `"on_hand_value_eur_cents":1234`, new: `"on_hand_value_eur_cents":null`},
+		{name: "non-null valuation without priced lots", old: valid, new: `{"lot_count":1,"on_hand_grams":0,"reserved_grams":0,"available_grams":0,"on_hand_value_eur_cents":0,"priced_lot_count":0,"unpriced_lot_count":1}`},
+		{name: "unsafe positive valuation", old: `"on_hand_value_eur_cents":1234`, new: `"on_hand_value_eur_cents":9007199254740992`},
+		{name: "unsafe negative valuation", old: `"on_hand_value_eur_cents":1234`, new: `"on_hand_value_eur_cents":-9007199254740992`},
+		{name: "fractional valuation", old: `"on_hand_value_eur_cents":1234`, new: `"on_hand_value_eur_cents":1.5`},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := strings.Replace(valid, tt.old, tt.new, 1)
+			if err := json.Unmarshal([]byte(payload), &InventoryTotals{}); err == nil {
+				t.Fatalf("accepted invalid totals: %s", payload)
+			}
+		})
 	}
 }
 
@@ -110,7 +229,7 @@ func TestInventoryHistoryModelsValidateEnumsIDsTimestampsAndBalances(t *testing.
 		},
 		{
 			name:    "reservation",
-			payload: `{"reservation_id":"` + inventoryReservationID + `","client_reservation_uuid":"` + inventoryEntryID + `","lot_id":"` + inventoryLotID + `","roast_uuid":"` + inventoryImageID + `","client_instance_uuid":"` + inventoryConflictID + `","state":"reserved","planned_grams":1250,"actual_grams":null,"reserved_at":"` + inventoryTimestamp + `","completed_at":null,"created_at":"` + inventoryTimestamp + `","updated_at":"` + inventoryTimestamp + `","open_conflict_id":null}`,
+			payload: `{"reservation_id":"` + inventoryReservationID + `","client_reservation_uuid":"` + inventoryEntryID + `","lot_id":"` + inventoryLotID + `","roast_uuid":"` + inventoryImageID + `","client_instance_uuid":"` + inventoryConflictID + `","state":"reserved","planned_grams":1250,"actual_grams":null,"roast_cost_eur_cents":1234,"reserved_at":"` + inventoryTimestamp + `","completed_at":null,"created_at":"` + inventoryTimestamp + `","updated_at":"` + inventoryTimestamp + `","open_conflict_id":null}`,
 			target:  &InventoryReservation{},
 		},
 		{
@@ -194,9 +313,11 @@ func TestInventoryModelsRejectNullForEveryRequiredNonNullField(t *testing.T) {
 		target  any
 	}{
 		{name: "summary nullable explicit null", payload: mutateInventoryJSONString(t, validSummaryJSON(), "origin", nil, false), target: &BeanLotSummary{}},
+		{name: "summary price explicit null", payload: mutateInventoryJSONString(t, validSummaryJSON(), "price_per_kg_eur_cents", nil, false), target: &BeanLotSummary{}},
 		{name: "detail nullable explicit null", payload: mutateInventoryJSONString(t, validDetailJSON(), "producer", nil, false), target: &BeanLotDetail{}},
 		{name: "ledger nullable explicit null", payload: mutateInventoryJSONString(t, validLedgerJSON(), "reference", nil, false), target: &InventoryLedgerEntry{}},
 		{name: "reservation nullable explicit null", payload: mutateInventoryJSONString(t, validReservationJSON(), "actual_grams", nil, false), target: &InventoryReservation{}},
+		{name: "reservation roast cost explicit null", payload: mutateInventoryJSONString(t, validReservationJSON(), "roast_cost_eur_cents", nil, false), target: &InventoryReservation{}},
 		{name: "conflict nullable explicit null", payload: mutateInventoryJSONString(t, validConflictJSON(), "resolved_at", nil, false), target: &InventoryConflict{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -275,7 +396,7 @@ func validLedgerJSON() string {
 }
 
 func validReservationJSON() string {
-	return `{"reservation_id":"` + inventoryReservationID + `","client_reservation_uuid":"` + inventoryEntryID + `","lot_id":"` + inventoryLotID + `","roast_uuid":"` + inventoryImageID + `","client_instance_uuid":"` + inventoryConflictID + `","state":"reserved","planned_grams":1250,"actual_grams":null,"reserved_at":"` + inventoryTimestamp + `","completed_at":null,"created_at":"` + inventoryTimestamp + `","updated_at":"` + inventoryTimestamp + `","open_conflict_id":null}`
+	return `{"reservation_id":"` + inventoryReservationID + `","client_reservation_uuid":"` + inventoryEntryID + `","lot_id":"` + inventoryLotID + `","roast_uuid":"` + inventoryImageID + `","client_instance_uuid":"` + inventoryConflictID + `","state":"reserved","planned_grams":1250,"actual_grams":null,"roast_cost_eur_cents":1234,"reserved_at":"` + inventoryTimestamp + `","completed_at":null,"created_at":"` + inventoryTimestamp + `","updated_at":"` + inventoryTimestamp + `","open_conflict_id":null}`
 }
 
 func validConflictJSON() string {

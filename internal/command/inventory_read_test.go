@@ -32,7 +32,7 @@ func commandDesktopLotJSON() string {
 }
 
 func commandInventorySummary(id, name string, available int) string {
-	return fmt.Sprintf(`{"lot_id":%q,"name":%q,"origin":null,"processing_method":null,"crop_year":null,"state":"active","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":%q}`,
+	return fmt.Sprintf(`{"lot_id":%q,"name":%q,"origin":null,"processing_method":null,"crop_year":null,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":%q}`,
 		id, name, available, available, commandTimestamp)
 }
 
@@ -41,7 +41,7 @@ func commandInventoryImageJSON() string {
 }
 
 func commandInventorySummaryFull() string {
-	return `{"lot_id":"` + commandLotID + `","name":"Lot","origin":"Ethiopia","processing_method":"washed","crop_year":2026,"state":"active","on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2,"cover_image":` + commandInventoryImageJSON() + `,"updated_at":"` + commandTimestamp + `"}`
+	return `{"lot_id":"` + commandLotID + `","name":"Lot","origin":"Ethiopia","processing_method":"washed","crop_year":2026,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2,"cover_image":` + commandInventoryImageJSON() + `,"updated_at":"` + commandTimestamp + `"}`
 }
 
 func commandLedgerJSON() string {
@@ -49,7 +49,7 @@ func commandLedgerJSON() string {
 }
 
 func commandReservationJSON() string {
-	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"reserved_at":"` + commandTimestamp + `","completed_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
+	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"roast_cost_eur_cents":null,"reserved_at":"` + commandTimestamp + `","completed_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
 }
 
 func commandResolvedConflictJSON() string { return commandResolvedConflictJSONWithNote("counted") }
@@ -484,7 +484,7 @@ func inventoryExpectedImage() map[string]any {
 func inventoryExpectedSummaryFull() map[string]any {
 	return map[string]any{
 		"lot_id": commandLotID, "name": "Lot", "origin": "Ethiopia", "processing_method": "washed",
-		"crop_year": json.Number("2026"), "state": "active", "on_hand_grams": json.Number("5000"),
+		"crop_year": json.Number("2026"), "state": "active", "price_per_kg_eur_cents": nil, "on_hand_grams": json.Number("5000"),
 		"reserved_grams": json.Number("1250"), "available_grams": json.Number("3750"),
 		"unresolved_conflict_count": json.Number("2"), "cover_image": inventoryExpectedImage(), "updated_at": commandTimestamp,
 	}
@@ -494,7 +494,7 @@ func inventoryExpectedSummaryNullable(id, name string, available int) map[string
 	grams := json.Number(fmt.Sprintf("%d", available))
 	return map[string]any{
 		"lot_id": id, "name": name, "origin": nil, "processing_method": nil, "crop_year": nil,
-		"state": "active", "on_hand_grams": grams, "reserved_grams": json.Number("0"),
+		"state": "active", "price_per_kg_eur_cents": nil, "on_hand_grams": grams, "reserved_grams": json.Number("0"),
 		"available_grams": grams, "unresolved_conflict_count": json.Number("0"), "cover_image": nil, "updated_at": commandTimestamp,
 	}
 }
@@ -533,7 +533,7 @@ func inventoryExpectedReservation() map[string]any {
 		"reservation_id": commandReservationID, "client_reservation_uuid": commandEntryID,
 		"lot_id": commandLotID, "roast_uuid": commandRoastID, "client_instance_uuid": commandClientID,
 		"state": "finalized", "planned_grams": json.Number("1250"), "actual_grams": json.Number("1200"),
-		"reserved_at": commandTimestamp, "completed_at": commandTimestamp, "created_at": commandTimestamp,
+		"roast_cost_eur_cents": nil, "reserved_at": commandTimestamp, "completed_at": commandTimestamp, "created_at": commandTimestamp,
 		"updated_at": commandTimestamp, "open_conflict_id": commandConflictID,
 	}
 }

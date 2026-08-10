@@ -23,7 +23,7 @@ const mutationLotID = "11111111111141118111111111111111"
 const mutationStamp = "2026-08-07T12:34:56.000000Z"
 
 func mutationLotJSON(onHand int64) string {
-	return fmt.Sprintf(`{"lot_id":"%s","name":"Lot","origin":null,"processing_method":null,"crop_year":null,"state":"active","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":"%s","producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"%s","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/%s","ledger":"/api/v1/inventory/admin/bean-lots/%s/ledger","reservations":"/api/v1/inventory/admin/bean-lots/%s/reservations"}}`, mutationLotID, onHand, onHand, mutationStamp, mutationStamp, mutationLotID, mutationLotID, mutationLotID)
+	return fmt.Sprintf(`{"lot_id":"%s","name":"Lot","origin":null,"processing_method":null,"crop_year":null,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":"%s","producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"%s","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/%s","ledger":"/api/v1/inventory/admin/bean-lots/%s/ledger","reservations":"/api/v1/inventory/admin/bean-lots/%s/reservations"}}`, mutationLotID, onHand, onHand, mutationStamp, mutationStamp, mutationLotID, mutationLotID, mutationLotID)
 }
 
 func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
@@ -75,7 +75,7 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 		t.Fatalf("content types = %v", types)
 	}
 	gotManifest := rawMutationManifest(t, bodies[0], types[0])
-	wantManifest := `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"varietals":["SL28","Ruiru 11"],"sca_score":null,"processing_method":"washed","processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":25,"opening_reason":"count\nline","opening_reference":null,"images":[]}`
+	wantManifest := `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":["SL28","Ruiru 11"],"sca_score":null,"processing_method":"washed","processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":25,"opening_reason":"count\nline","opening_reference":null,"images":[]}`
 	if gotManifest != wantManifest {
 		t.Fatalf("manifest body = %q, want %q", gotManifest, wantManifest)
 	}
@@ -153,6 +153,53 @@ func TestStrictCreateJSONRequiresNonNullArrays(t *testing.T) {
 	} {
 		if _, failure := DecodeBeanLotCreateManifest([]byte(raw)); failure == nil {
 			t.Errorf("accepted strict create JSON %s", raw)
+		}
+	}
+}
+
+func TestBeanLotPriceCreateAndPatchContracts(t *testing.T) {
+	manifest, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","price_per_kg_eur_cents":2147483647,"varietals":[]},"images":[]}`))
+	if failure != nil {
+		t.Fatalf("valid price create failure = %#v", failure)
+	}
+	if manifest.Fields.PricePerKgEURCents == nil || *manifest.Fields.PricePerKgEURCents != 2147483647 {
+		t.Fatalf("decoded price = %#v", manifest.Fields.PricePerKgEURCents)
+	}
+	if _, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","price_per_kg_eur_cents":null,"varietals":[]},"images":[]}`)); failure != nil {
+		t.Fatalf("nullable create price failure = %#v", failure)
+	}
+	if _, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","price_per_kg_euros_cents":1,"varietals":[]},"images":[]}`)); failure == nil {
+		t.Fatal("accepted unknown price create key")
+	}
+	for _, raw := range []string{"-1", "2147483648", "1.5", "true", `"1234"`, "9223372036854775808"} {
+		t.Run("create "+raw, func(t *testing.T) {
+			payload := `{"fields":{"name":"Lot","price_per_kg_eur_cents":` + raw + `,"varietals":[]},"images":[]}`
+			if _, failure := DecodeBeanLotCreateManifest([]byte(payload)); failure == nil {
+				t.Fatalf("accepted create price %s", raw)
+			}
+		})
+	}
+
+	for _, value := range []any{nil, int64(0), int64(2_147_483_647), json.Number("1234")} {
+		patch, failure := NewBeanLotPatch(map[string]any{"price_per_kg_eur_cents": value})
+		if failure != nil {
+			t.Errorf("valid patch price %#v failure = %#v", value, failure)
+			continue
+		}
+		if !patch.HasField("price_per_kg_eur_cents") {
+			t.Errorf("patch lost price field for %#v", value)
+		}
+	}
+	for _, value := range []any{int64(-1), int64(2_147_483_648), json.Number("1.5"), true, "1234", json.Number("9223372036854775808")} {
+		t.Run(fmt.Sprintf("patch %#v", value), func(t *testing.T) {
+			if _, failure := NewBeanLotPatch(map[string]any{"price_per_kg_eur_cents": value}); failure == nil {
+				t.Fatalf("accepted patch price %#v", value)
+			}
+		})
+	}
+	for _, invalid := range []int64{-1, 2_147_483_648} {
+		if failure := ValidateBeanLotCreateManifest(BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", PricePerKgEURCents: &invalid, Varietals: []string{}}, Images: []ImageUploadManifest{}}); failure == nil {
+			t.Fatalf("accepted programmatic create price %d", invalid)
 		}
 	}
 }

@@ -20,7 +20,7 @@ func commandReservationMutationJSON(state string, replay bool) string {
 		completed = `"` + commandTimestamp + `"`
 		reserved = 0
 	}
-	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":%t}`,
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"roast_cost_eur_cents":null,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":%t}`,
 		commandReservationID, commandEntryID, commandLotID, commandRoastID, commandClientID, state, actual, commandTimestamp, completed, commandTimestamp, commandTimestamp, commandLotID, onHand, reserved, onHand-reserved, replay)
 }
 
@@ -96,7 +96,7 @@ func TestInventoryReservationFinalizeAcceptsFlagsAfterUUID(t *testing.T) {
 }
 
 func commandReservationMutationJSONForActualGrams(actual int64) string {
-	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"finalized","planned_grams":1250,"actual_grams":%d,"reserved_at":"%s","completed_at":"%s","created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":false}`,
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"finalized","planned_grams":1250,"actual_grams":%d,"roast_cost_eur_cents":null,"reserved_at":"%s","completed_at":"%s","created_at":"%s","updated_at":"%s","open_conflict_id":null},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0},"conflict":null,"idempotent_replay":false}`,
 		commandReservationID, commandEntryID, commandLotID, commandRoastID, commandClientID, actual, commandTimestamp, commandTimestamp, commandTimestamp, commandTimestamp, commandLotID, 5000-actual, 5000-actual)
 }
 

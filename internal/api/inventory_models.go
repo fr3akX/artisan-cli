@@ -11,7 +11,11 @@ import (
 	"unicode/utf8"
 )
 
-const maxInventoryGrams int64 = 2_147_483_647
+const (
+	maxInventoryGrams     int64 = 2_147_483_647
+	maxPricePerKgEURCents int64 = 2_147_483_647
+	maxSafeInteger        int64 = 9_007_199_254_740_991
+)
 
 var (
 	canonicalInventoryUUID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -56,6 +60,7 @@ type BeanLotSummary struct {
 	ProcessingMethod        *string         `json:"processing_method"`
 	CropYear                *int64          `json:"crop_year"`
 	State                   string          `json:"state"`
+	PricePerKgEURCents      *int64          `json:"price_per_kg_eur_cents"`
 	OnHandGrams             int64           `json:"on_hand_grams"`
 	ReservedGrams           int64           `json:"reserved_grams"`
 	AvailableGrams          int64           `json:"available_grams"`
@@ -119,11 +124,23 @@ type InventoryReservation struct {
 	State                 string  `json:"state"`
 	PlannedGrams          int64   `json:"planned_grams"`
 	ActualGrams           *int64  `json:"actual_grams"`
+	RoastCostEURCents     *int64  `json:"roast_cost_eur_cents"`
 	ReservedAt            string  `json:"reserved_at"`
 	CompletedAt           *string `json:"completed_at"`
 	CreatedAt             string  `json:"created_at"`
 	UpdatedAt             string  `json:"updated_at"`
 	OpenConflictID        *string `json:"open_conflict_id"`
+}
+
+// InventoryTotals contains aggregate inventory counts, quantities, and partial valuation.
+type InventoryTotals struct {
+	LotCount            int64  `json:"lot_count"`
+	OnHandGrams         int64  `json:"on_hand_grams"`
+	ReservedGrams       int64  `json:"reserved_grams"`
+	AvailableGrams      int64  `json:"available_grams"`
+	OnHandValueEURCents *int64 `json:"on_hand_value_eur_cents"`
+	PricedLotCount      int64  `json:"priced_lot_count"`
+	UnpricedLotCount    int64  `json:"unpriced_lot_count"`
 }
 
 // InventoryConflict is an inventory consistency conflict projection.
@@ -194,7 +211,7 @@ func (value *DesktopBeanLotView) UnmarshalJSON(data []byte) error {
 func (value *BeanLotSummary) UnmarshalJSON(data []byte) error {
 	type wire BeanLotSummary
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, []string{"origin", "processing_method", "crop_year", "cover_image"}, "lot_id", "name", "origin", "processing_method", "crop_year", "state", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count", "cover_image", "updated_at"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"origin", "processing_method", "crop_year", "price_per_kg_eur_cents", "cover_image"}, "lot_id", "name", "origin", "processing_method", "crop_year", "state", "price_per_kg_eur_cents", "on_hand_grams", "reserved_grams", "available_grams", "unresolved_conflict_count", "cover_image", "updated_at"); err != nil {
 		return err
 	}
 	*value = BeanLotSummary(decoded)
@@ -265,10 +282,20 @@ func (value *InventoryLedgerEntry) UnmarshalJSON(data []byte) error {
 func (value *InventoryReservation) UnmarshalJSON(data []byte) error {
 	type wire InventoryReservation
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, []string{"actual_grams", "completed_at", "open_conflict_id"}, "reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "actual_grams", "reserved_at", "completed_at", "created_at", "updated_at", "open_conflict_id"); err != nil {
+	if err := decodeRequiredObject(data, &decoded, []string{"actual_grams", "roast_cost_eur_cents", "completed_at", "open_conflict_id"}, "reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "actual_grams", "roast_cost_eur_cents", "reserved_at", "completed_at", "created_at", "updated_at", "open_conflict_id"); err != nil {
 		return err
 	}
 	*value = InventoryReservation(decoded)
+	return value.validate()
+}
+
+func (value *InventoryTotals) UnmarshalJSON(data []byte) error {
+	type wire InventoryTotals
+	var decoded wire
+	if err := decodeRequiredObject(data, &decoded, []string{"on_hand_value_eur_cents"}, "lot_count", "on_hand_grams", "reserved_grams", "available_grams", "on_hand_value_eur_cents", "priced_lot_count", "unpriced_lot_count"); err != nil {
+		return err
+	}
+	*value = InventoryTotals(decoded)
 	return value.validate()
 }
 
@@ -436,7 +463,7 @@ func (value DesktopBeanLotView) validate() error {
 
 func (value BeanLotSummary) validate() error {
 	name, nameOK := normalizeRequestText(value.Name, 200, 800, true, false)
-	if !nameOK || name != value.Name || !validResponseOptionalText(value.Origin, 100, 400, false) || !validUUID(value.LotID) || !oneOf(value.State, "active", "archived") || !validOptionalEnum(value.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") || !validGrams(value.OnHandGrams) || !between(value.ReservedGrams, 0, maxInventoryGrams) || !validGrams(value.AvailableGrams) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams || !between(value.UnresolvedConflictCount, 0, maxInventoryGrams) || !validTimestamp(value.UpdatedAt) {
+	if !nameOK || name != value.Name || !validResponseOptionalText(value.Origin, 100, 400, false) || !validUUID(value.LotID) || !oneOf(value.State, "active", "archived") || !validOptionalEnum(value.ProcessingMethod, "washed", "natural", "honey", "pulped-natural", "wet-hulled", "anaerobic", "experimental", "other") || (value.PricePerKgEURCents != nil && !between(*value.PricePerKgEURCents, 0, maxPricePerKgEURCents)) || !validGrams(value.OnHandGrams) || !between(value.ReservedGrams, 0, maxInventoryGrams) || !validGrams(value.AvailableGrams) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams || !between(value.UnresolvedConflictCount, 0, maxInventoryGrams) || !validTimestamp(value.UpdatedAt) {
 		return errors.New("invalid bean lot summary")
 	}
 	if value.CropYear != nil && !between(*value.CropYear, 1000, 9999) {
@@ -549,7 +576,7 @@ func (value InventoryLedgerEntry) validate() error {
 }
 
 func (value InventoryReservation) validate() error {
-	if !validUUID(value.ReservationID) || !validUUID(value.ClientReservationUUID) || !validUUID(value.LotID) || !validUUID(value.RoastUUID) || !validUUID(value.ClientInstanceUUID) || !validOptionalUUID(value.OpenConflictID) || !oneOf(value.State, "reserved", "finalized", "released") || !between(value.PlannedGrams, 1, maxInventoryGrams) || (value.ActualGrams != nil && !between(*value.ActualGrams, 1, maxInventoryGrams)) || !validTimestamp(value.ReservedAt) || !validTimestamp(value.CreatedAt) || !validTimestamp(value.UpdatedAt) || (value.CompletedAt != nil && !validTimestamp(*value.CompletedAt)) {
+	if !validUUID(value.ReservationID) || !validUUID(value.ClientReservationUUID) || !validUUID(value.LotID) || !validUUID(value.RoastUUID) || !validUUID(value.ClientInstanceUUID) || !validOptionalUUID(value.OpenConflictID) || !oneOf(value.State, "reserved", "finalized", "released") || !between(value.PlannedGrams, 1, maxInventoryGrams) || (value.ActualGrams != nil && !between(*value.ActualGrams, 1, maxInventoryGrams)) || (value.RoastCostEURCents != nil && !between(*value.RoastCostEURCents, 0, maxSafeInteger)) || !validTimestamp(value.ReservedAt) || !validTimestamp(value.CreatedAt) || !validTimestamp(value.UpdatedAt) || (value.CompletedAt != nil && !validTimestamp(*value.CompletedAt)) {
 		return errors.New("invalid inventory reservation")
 	}
 	switch value.State {
@@ -571,6 +598,25 @@ func (value InventoryReservation) validate() error {
 	}
 	if value.CompletedAt != nil && !timestampNotBefore(*value.CompletedAt, value.ReservedAt) {
 		return errors.New("reservation completed before it was reserved")
+	}
+	return nil
+}
+
+func (value InventoryTotals) validate() error {
+	if !between(value.LotCount, 0, maxSafeInteger) || !between(value.PricedLotCount, 0, maxSafeInteger) || !between(value.UnpricedLotCount, 0, maxSafeInteger) || value.PricedLotCount+value.UnpricedLotCount != value.LotCount {
+		return errors.New("invalid inventory totals counts")
+	}
+	if !between(value.OnHandGrams, -maxSafeInteger, maxSafeInteger) || !between(value.ReservedGrams, -maxSafeInteger, maxSafeInteger) || !between(value.AvailableGrams, -maxSafeInteger, maxSafeInteger) || value.AvailableGrams != value.OnHandGrams-value.ReservedGrams {
+		return errors.New("invalid inventory totals quantities")
+	}
+	if value.PricedLotCount == 0 {
+		if value.OnHandValueEURCents != nil {
+			return errors.New("invalid inventory totals valuation")
+		}
+		return nil
+	}
+	if value.OnHandValueEURCents == nil || !between(*value.OnHandValueEURCents, -maxSafeInteger, maxSafeInteger) {
+		return errors.New("invalid inventory totals valuation")
 	}
 	return nil
 }

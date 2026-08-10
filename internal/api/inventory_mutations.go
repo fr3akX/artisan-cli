@@ -17,20 +17,21 @@ import (
 
 // BeanLotFields is the exact metadata object nested in BeanLotCreateManifest.
 type BeanLotFields struct {
-	Name              string   `json:"name"`
-	Origin            *string  `json:"origin"`
-	Producer          *string  `json:"producer"`
-	Supplier          *string  `json:"supplier"`
-	ExternalReference *string  `json:"external_reference"`
-	ReceivedDate      *string  `json:"received_date"`
-	CropYear          *int64   `json:"crop_year"`
-	Varietals         []string `json:"varietals"`
-	SCAScore          *string  `json:"sca_score"`
-	ProcessingMethod  *string  `json:"processing_method"`
-	ProcessingDetail  *string  `json:"processing_detail"`
-	AltitudeMinMetres *int64   `json:"altitude_min_metres"`
-	AltitudeMaxMetres *int64   `json:"altitude_max_metres"`
-	Notes             *string  `json:"notes"`
+	Name               string   `json:"name"`
+	Origin             *string  `json:"origin"`
+	Producer           *string  `json:"producer"`
+	Supplier           *string  `json:"supplier"`
+	ExternalReference  *string  `json:"external_reference"`
+	ReceivedDate       *string  `json:"received_date"`
+	CropYear           *int64   `json:"crop_year"`
+	PricePerKgEURCents *int64   `json:"price_per_kg_eur_cents"`
+	Varietals          []string `json:"varietals"`
+	SCAScore           *string  `json:"sca_score"`
+	ProcessingMethod   *string  `json:"processing_method"`
+	ProcessingDetail   *string  `json:"processing_detail"`
+	AltitudeMinMetres  *int64   `json:"altitude_min_metres"`
+	AltitudeMaxMetres  *int64   `json:"altitude_max_metres"`
+	Notes              *string  `json:"notes"`
 }
 
 // ImageUploadManifest binds zero-based upload order to per-image metadata.
@@ -82,20 +83,21 @@ func (manifest *BeanLotCreateManifest) UnmarshalJSON(data []byte) error {
 
 func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 	type wire struct {
-		Name              string          `json:"name"`
-		Origin            *string         `json:"origin"`
-		Producer          *string         `json:"producer"`
-		Supplier          *string         `json:"supplier"`
-		ExternalReference *string         `json:"external_reference"`
-		ReceivedDate      *string         `json:"received_date"`
-		CropYear          *int64          `json:"crop_year"`
-		Varietals         json.RawMessage `json:"varietals"`
-		SCAScore          json.RawMessage `json:"sca_score"`
-		ProcessingMethod  *string         `json:"processing_method"`
-		ProcessingDetail  *string         `json:"processing_detail"`
-		AltitudeMinMetres *int64          `json:"altitude_min_metres"`
-		AltitudeMaxMetres *int64          `json:"altitude_max_metres"`
-		Notes             *string         `json:"notes"`
+		Name               string          `json:"name"`
+		Origin             *string         `json:"origin"`
+		Producer           *string         `json:"producer"`
+		Supplier           *string         `json:"supplier"`
+		ExternalReference  *string         `json:"external_reference"`
+		ReceivedDate       *string         `json:"received_date"`
+		CropYear           *int64          `json:"crop_year"`
+		PricePerKgEURCents *int64          `json:"price_per_kg_eur_cents"`
+		Varietals          json.RawMessage `json:"varietals"`
+		SCAScore           json.RawMessage `json:"sca_score"`
+		ProcessingMethod   *string         `json:"processing_method"`
+		ProcessingDetail   *string         `json:"processing_detail"`
+		AltitudeMinMetres  *int64          `json:"altitude_min_metres"`
+		AltitudeMaxMetres  *int64          `json:"altitude_max_metres"`
+		Notes              *string         `json:"notes"`
 	}
 	var decoded wire
 	if err := decodeStrictMutationJSON(data, &decoded); err != nil {
@@ -116,7 +118,7 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 	*fields = BeanLotFields{
 		Name: decoded.Name, Origin: decoded.Origin, Producer: decoded.Producer, Supplier: decoded.Supplier,
 		ExternalReference: decoded.ExternalReference, ReceivedDate: decoded.ReceivedDate, CropYear: decoded.CropYear,
-		Varietals: varietals, SCAScore: score, ProcessingMethod: decoded.ProcessingMethod,
+		PricePerKgEURCents: decoded.PricePerKgEURCents, Varietals: varietals, SCAScore: score, ProcessingMethod: decoded.ProcessingMethod,
 		ProcessingDetail: decoded.ProcessingDetail, AltitudeMinMetres: decoded.AltitudeMinMetres,
 		AltitudeMaxMetres: decoded.AltitudeMaxMetres, Notes: decoded.Notes,
 	}
@@ -146,7 +148,7 @@ func NewBeanLotPatch(fields map[string]any) (BeanLotPatch, *output.Error) {
 	}
 	allowed := map[string]string{
 		"name": "string", "origin": "nullable-string", "producer": "nullable-string", "supplier": "nullable-string",
-		"external_reference": "nullable-string", "received_date": "date", "crop_year": "integer", "varietals": "varietals",
+		"external_reference": "nullable-string", "received_date": "date", "crop_year": "integer", "price_per_kg_eur_cents": "price", "varietals": "varietals",
 		"sca_score": "score", "processing_method": "processing", "processing_detail": "nullable-string",
 		"altitude_min_metres": "altitude", "altitude_max_metres": "altitude", "notes": "nullable-string", "state": "state",
 	}
@@ -220,6 +222,9 @@ func normalizeBeanLotCreateManifest(manifest BeanLotCreateManifest) (BeanLotCrea
 	}
 	if manifest.Fields.CropYear != nil && !between(*manifest.Fields.CropYear, 1000, 9999) {
 		return manifest, mutationUsage("invalid_crop_year", "Crop year must be between 1000 and 9999")
+	}
+	if manifest.Fields.PricePerKgEURCents != nil && !between(*manifest.Fields.PricePerKgEURCents, 0, maxPricePerKgEURCents) {
+		return manifest, mutationUsage("invalid_price_per_kg_eur", "Price per kg must be between 0 and 2147483647 cents")
 	}
 	if manifest.Fields.SCAScore != nil && !validRequestScore(*manifest.Fields.SCAScore) {
 		return manifest, mutationUsage("invalid_sca_score", "SCA score must be between 0.00 and 100.00 with two decimal places")
@@ -435,7 +440,7 @@ func decodeRequiredArray(data json.RawMessage, destination any) error {
 
 func canonicalPatchValue(name, kind string, value any) (any, bool) {
 	if value == nil {
-		if strings.HasPrefix(kind, "nullable-") || kind == "date" || kind == "integer" || kind == "varietals" || kind == "score" || kind == "processing" || kind == "altitude" {
+		if strings.HasPrefix(kind, "nullable-") || kind == "date" || kind == "integer" || kind == "price" || kind == "varietals" || kind == "score" || kind == "processing" || kind == "altitude" {
 			return nil, true
 		}
 		return nil, false
@@ -464,6 +469,9 @@ func canonicalPatchValue(name, kind string, value any) (any, bool) {
 	case "altitude":
 		integer, ok := exactInt64(value)
 		return integer, ok && between(integer, 0, 9000)
+	case "price":
+		integer, ok := exactInt64(value)
+		return integer, ok && between(integer, 0, maxPricePerKgEURCents)
 	case "varietals":
 		items, ok := value.([]any)
 		if !ok {
