@@ -386,7 +386,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		}
 	}
 
-	endpoint, err := c.endpointURL(inventoryAdminRoot+"/bean-lots/"+lotID+"/images/"+imageID+"/"+variant, nil)
+	endpoint, err := c.endpointURL(inventoryReadRoot+"/bean-lots/"+lotID+"/images/"+imageID+"/"+variant, nil)
 	if err != nil {
 		return result, localFailure("invalid_request", "A valid API path is required")
 	}
@@ -460,7 +460,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 			if readErr != nil || oversized || status < 400 || status >= 600 {
 				return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
-			return result, classifyInventoryAdminFailure(decodeAPIError(status, body, c.token, c.serverURL.String()), true)
+			return result, classifyInventoryAPIFailure(decodeAPIError(status, body, c.token, c.serverURL.String()), true)
 		}
 		if response.Header.Get("Content-Type") != "image/webp" || response.ContentLength > maxImageDownloadBytes {
 			_ = response.Body.Close()

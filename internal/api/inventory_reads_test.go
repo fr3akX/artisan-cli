@@ -30,10 +30,12 @@ func writeInventoryJSON(w http.ResponseWriter, payload string) {
 	_, _ = fmt.Fprint(w, payload)
 }
 
-func TestListBeanLotsSendsExactFiltersAndEscapesValues(t *testing.T) {
-	var gotPath, gotRawQuery string
+func TestListBeanLotsUsesReadRootWithoutIdentityPreflightAndEscapesFilters(t *testing.T) {
+	var paths []string
+	var gotRawQuery string
 	client := inventoryAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotRawQuery = r.URL.Path, r.URL.RawQuery
+		paths = append(paths, r.URL.Path)
+		gotRawQuery = r.URL.RawQuery
 		writeInventoryJSON(w, `{"items":[],"next_cursor":"next +/= cursor"}`)
 	})
 	page, failure := client.ListBeanLots(context.Background(), LotListOptions{
@@ -43,8 +45,8 @@ func TestListBeanLotsSendsExactFiltersAndEscapesValues(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("ListBeanLots() failure = %#v", failure)
 	}
-	if gotPath != "/api/v1/inventory/admin/bean-lots" {
-		t.Fatalf("path = %q", gotPath)
+	if !reflect.DeepEqual(paths, []string{"/api/v1/inventory/read/bean-lots"}) {
+		t.Fatalf("paths = %#v; list must use the read root without an identity preflight", paths)
 	}
 	got, err := url.ParseQuery(gotRawQuery)
 	if err != nil {
@@ -146,14 +148,14 @@ func TestListAllBeanLotsPreservesFiltersWhenBindingEachCursor(t *testing.T) {
 	}
 }
 
-func TestInventoryReadRoutesNormalizeDashedAndCompactUUIDs(t *testing.T) {
+func TestInventoryReadRoutesNormalizeDashedAndCompactUUIDsAndUseReadRoot(t *testing.T) {
 	var paths []string
 	client := inventoryAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		switch {
-		case r.URL.Path == "/api/v1/inventory/admin/bean-lots/"+inventoryLotID:
-			writeInventoryJSON(w, validDetailJSON())
-		case r.URL.Path == "/api/v1/inventory/admin/conflicts/"+inventoryConflictID:
+		case r.URL.Path == "/api/v1/inventory/read/bean-lots/"+inventoryLotID:
+			writeInventoryJSON(w, strings.ReplaceAll(validDetailJSON(), inventoryAdminRoot, inventoryReadRoot))
+		case r.URL.Path == "/api/v1/inventory/read/conflicts/"+inventoryConflictID:
 			writeInventoryJSON(w, `{"conflict_id":"`+inventoryConflictID+`","lot_id":"`+inventoryLotID+`","source_ledger_entry_id":"`+inventoryEntryID+`","roast_uuid":null,"reservation_id":null,"trigger_operation":"manual_adjustment","available_grams_snapshot":-1,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"`+inventoryTimestamp+`"}`)
 		default:
 			writeInventoryJSON(w, `{"items":[],"next_cursor":null}`)
@@ -177,11 +179,11 @@ func TestInventoryReadRoutesNormalizeDashedAndCompactUUIDs(t *testing.T) {
 		t.Fatalf("InventoryConflict() failure = %#v", failure)
 	}
 	want := []string{
-		"/api/v1/inventory/admin/bean-lots/" + inventoryLotID,
-		"/api/v1/inventory/admin/bean-lots/" + inventoryLotID + "/ledger",
-		"/api/v1/inventory/admin/bean-lots/" + inventoryLotID + "/reservations",
-		"/api/v1/inventory/admin/bean-lots/" + inventoryLotID + "/conflicts",
-		"/api/v1/inventory/admin/conflicts/" + inventoryConflictID,
+		"/api/v1/inventory/read/bean-lots/" + inventoryLotID,
+		"/api/v1/inventory/read/bean-lots/" + inventoryLotID + "/ledger",
+		"/api/v1/inventory/read/bean-lots/" + inventoryLotID + "/reservations",
+		"/api/v1/inventory/read/bean-lots/" + inventoryLotID + "/conflicts",
+		"/api/v1/inventory/read/conflicts/" + inventoryConflictID,
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths = %#v, want %#v", paths, want)
@@ -282,7 +284,63 @@ func TestCollectInventoryPagesEnforcesIndependentPageCeiling(t *testing.T) {
 	})
 }
 
-func TestMissingAdminNamespaceMapsToServerUpgradeWithoutMaskingEntityNotFound(t *testing.T) {
+func TestInventoryTotalsUsesReadRootWithOnlyValidatedFilters(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	client := inventoryAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.Query()
+		writeInventoryJSON(w, `{"lot_count":3,"on_hand_grams":1000,"reserved_grams":250,"available_grams":750,"on_hand_value_eur_cents":1234,"priced_lot_count":2,"unpriced_lot_count":1}`)
+	})
+	options := InventoryTotalsOptions{
+		Query: "guji", State: "active", Availability: "negative", Conflict: "open",
+		RoastUUID: "11111111-1111-4111-8111-111111111111",
+	}
+	totals, failure := client.InventoryTotals(context.Background(), options)
+	if failure != nil {
+		t.Fatalf("InventoryTotals() failure = %#v", failure)
+	}
+	if gotPath != "/api/v1/inventory/read/bean-lots/totals" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	want := url.Values{
+		"q": {"guji"}, "state": {"active"}, "availability": {"negative"}, "conflict": {"open"},
+		"roast_uuid": {inventoryLotID},
+	}
+	if !reflect.DeepEqual(gotQuery, want) {
+		t.Fatalf("query = %#v, want %#v", gotQuery, want)
+	}
+	for _, forbidden := range []string{"limit", "cursor", "all"} {
+		if gotQuery.Has(forbidden) {
+			t.Fatalf("totals query contains pagination option %q", forbidden)
+		}
+	}
+	if totals.LotCount != 3 || totals.OnHandValueEURCents == nil || *totals.OnHandValueEURCents != 1234 {
+		t.Fatalf("totals = %#v", totals)
+	}
+}
+
+func TestValidateInventoryTotalsOptionsRejectsInvalidFiltersWithoutRequest(t *testing.T) {
+	requests := 0
+	client := inventoryAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		writeInventoryJSON(w, `{}`)
+	})
+	for _, options := range []InventoryTotalsOptions{
+		{State: "deleted"}, {Availability: "scarce"}, {Conflict: "resolved"}, {RoastUUID: "invalid"},
+	} {
+		if failure := ValidateInventoryTotalsOptions(options); failure == nil || failure.ExitCode != 2 {
+			t.Errorf("ValidateInventoryTotalsOptions(%#v) = %#v", options, failure)
+		}
+		if _, failure := client.InventoryTotals(context.Background(), options); failure == nil || failure.ExitCode != 2 {
+			t.Errorf("InventoryTotals(%#v) = %#v", options, failure)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+func TestMissingReadNamespaceMapsToServerUpgradeWithoutMaskingEntityNotFound(t *testing.T) {
 	tests := []struct {
 		name     string
 		body     string
@@ -301,6 +359,9 @@ func TestMissingAdminNamespaceMapsToServerUpgradeWithoutMaskingEntityNotFound(t 
 			_, failure := client.BeanLot(context.Background(), inventoryLotID)
 			if failure == nil || failure.Code != tt.wantCode {
 				t.Fatalf("failure = %#v, want code %q", failure, tt.wantCode)
+			}
+			if tt.wantCode == "server_upgrade_required" && failure.Message != "The server does not provide the inventory read API; upgrade Artisan Server" {
+				t.Fatalf("message = %q", failure.Message)
 			}
 		})
 	}

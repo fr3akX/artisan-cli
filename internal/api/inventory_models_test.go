@@ -42,6 +42,44 @@ func validDetailJSON() string {
 	}`
 }
 
+func TestBeanLotDetailAcceptsCoherentAdminOrReadProjectionRoot(t *testing.T) {
+	for _, root := range []string{"/api/v1/inventory/admin", "/api/v1/inventory/read"} {
+		t.Run(root, func(t *testing.T) {
+			payload := strings.ReplaceAll(validDetailJSON(), "/api/v1/inventory/admin", root)
+			if err := json.Unmarshal([]byte(payload), &BeanLotDetail{}); err != nil {
+				t.Fatalf("coherent projection root rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestBeanLotDetailRejectsMixedOrPublicProjectionRoots(t *testing.T) {
+	readPayload := strings.ReplaceAll(validDetailJSON(), "/api/v1/inventory/admin", "/api/v1/inventory/read")
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "mixed links",
+			payload: strings.Replace(readPayload, `"ledger":"/api/v1/inventory/read`, `"ledger":"/api/v1/inventory/admin`, 1),
+		},
+		{
+			name:    "mixed image",
+			payload: strings.Replace(readPayload, `"display_url":"/api/v1/inventory/read`, `"display_url":"/api/v1/inventory/admin`, 1),
+		},
+		{
+			name:    "browser root",
+			payload: strings.ReplaceAll(validDetailJSON(), "/api/v1/inventory/admin", "/api/v1/browser"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(test.payload), &BeanLotDetail{}); err == nil {
+				t.Fatal("incoherent projection roots accepted")
+			}
+		})
+	}
+}
+
 func TestInventoryModelsAcceptCanonicalFixtureAndUnknownAdditiveFields(t *testing.T) {
 	payload := strings.TrimSuffix(validDetailJSON(), "}") + `,"future_field":{"safe":true}}`
 	var lot BeanLotDetail

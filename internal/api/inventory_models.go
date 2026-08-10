@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -18,9 +19,13 @@ const (
 )
 
 var (
-	canonicalInventoryUUID = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	canonicalScore         = regexp.MustCompile(`^(?:0|[1-9][0-9]?|100)\.[0-9]{2}$`)
-	canonicalDate          = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	canonicalInventoryUUID   = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	canonicalScore           = regexp.MustCompile(`^(?:0|[1-9][0-9]?|100)\.[0-9]{2}$`)
+	canonicalDate            = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	inventoryProjectionRoots = []string{
+		"/api/v1/inventory/admin",
+		"/api/v1/inventory/read",
+	}
 )
 
 // InventoryImage is a private inventory image projection.
@@ -424,13 +429,30 @@ func (value InventoryImage) validate(expectedLot string) error {
 	if !validUUID(value.ImageID) || value.Position < 0 || value.Position >= MaxInventoryImages || !between(value.DisplayWidth, 1, 12000) || !between(value.DisplayHeight, 1, 12000) || !between(value.ThumbnailWidth, 1, 12000) || !between(value.ThumbnailHeight, 1, 12000) || !validResponseOptionalText(value.Caption, 500, 2000, false) || !validResponseOptionalText(value.AltText, 300, 1200, false) {
 		return errors.New("invalid inventory image")
 	}
-	basePattern := regexp.MustCompile(`^/api/v1/inventory/admin/bean-lots/([0-9a-f]{32})/images/([0-9a-f]{32})/(display|thumbnail)$`)
-	display := basePattern.FindStringSubmatch(value.DisplayURL)
-	thumbnail := basePattern.FindStringSubmatch(value.ThumbnailURL)
-	if len(display) != 4 || len(thumbnail) != 4 || display[3] != "display" || thumbnail[3] != "thumbnail" || display[1] != thumbnail[1] || display[2] != value.ImageID || thumbnail[2] != value.ImageID || !validUUID(display[1]) || (expectedLot != "" && display[1] != expectedLot) {
+	if _, _, ok := value.projectionRootAndLot(expectedLot); !ok {
 		return errors.New("invalid inventory image link")
 	}
 	return nil
+}
+
+func (value InventoryImage) projectionRootAndLot(expectedLot string) (string, string, bool) {
+	for _, root := range inventoryProjectionRoots {
+		prefix := root + "/bean-lots/"
+		if !strings.HasPrefix(value.DisplayURL, prefix) {
+			continue
+		}
+		remainder := strings.TrimPrefix(value.DisplayURL, prefix)
+		separator := strings.Index(remainder, "/images/")
+		if separator < 0 {
+			continue
+		}
+		lotID := remainder[:separator]
+		base := prefix + lotID + "/images/" + value.ImageID
+		if validUUID(lotID) && (expectedLot == "" || lotID == expectedLot) && value.DisplayURL == base+"/display" && value.ThumbnailURL == base+"/thumbnail" {
+			return root, lotID, true
+		}
+	}
+	return "", "", false
 }
 
 func (value DesktopBeanLotView) validate() error {
@@ -538,9 +560,22 @@ func (value BeanLotDetail) validate() error {
 	if !sameInventoryImage(value.CoverImage, detailCover) {
 		return errors.New("inconsistent cover image")
 	}
-	base := "/api/v1/inventory/admin/bean-lots/" + value.LotID
-	if value.Links.Self != base || value.Links.Ledger != base+"/ledger" || value.Links.Reservations != base+"/reservations" {
+	projectionRoot := ""
+	for _, root := range inventoryProjectionRoots {
+		base := root + "/bean-lots/" + value.LotID
+		if value.Links.Self == base && value.Links.Ledger == base+"/ledger" && value.Links.Reservations == base+"/reservations" {
+			projectionRoot = root
+			break
+		}
+	}
+	if projectionRoot == "" {
 		return errors.New("invalid bean lot links")
+	}
+	for _, image := range value.Images {
+		root, lotID, ok := image.projectionRootAndLot(value.LotID)
+		if !ok || root != projectionRoot || lotID != value.LotID {
+			return errors.New("incoherent bean lot image links")
+		}
 	}
 	return nil
 }

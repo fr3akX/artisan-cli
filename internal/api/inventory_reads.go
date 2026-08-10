@@ -12,6 +12,7 @@ import (
 
 const (
 	inventoryAdminRoot = "/api/v1/inventory/admin"
+	inventoryReadRoot  = "/api/v1/inventory/read"
 	// MaxInventoryAggregateItems is the finite item ceiling for every --all traversal.
 	MaxInventoryAggregateItems = 10_000
 	// MaxInventoryAggregatePages bounds requests and cursor-tracking memory for every --all traversal.
@@ -22,6 +23,15 @@ const (
 type LotListOptions struct {
 	Limit        int
 	Cursor       string
+	Query        string
+	State        string
+	Availability string
+	Conflict     string
+	RoastUUID    string
+}
+
+// InventoryTotalsOptions contains every server-supported totals filter.
+type InventoryTotalsOptions struct {
 	Query        string
 	State        string
 	Availability string
@@ -61,7 +71,7 @@ func (c *Client) ListBeanLots(ctx context.Context, options LotListOptions) (Bean
 		return BeanLotPage{}, failure
 	}
 	var page BeanLotPage
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots", query, false, &page)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots", query, false, &page)
 	return page, failure
 }
 
@@ -81,7 +91,7 @@ func (c *Client) BeanLot(ctx context.Context, rawLotID string) (BeanLotDetail, *
 		return BeanLotDetail{}, failure
 	}
 	var lot BeanLotDetail
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID, nil, true, &lot)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots/"+lotID, nil, true, &lot)
 	if failure == nil && lot.LotID != lotID {
 		return BeanLotDetail{}, invalidServerResponse(http.StatusOK)
 	}
@@ -98,7 +108,7 @@ func (c *Client) BeanLotLedger(ctx context.Context, rawLotID string, options Pag
 		return InventoryLedgerEntryPage{}, failure
 	}
 	var page InventoryLedgerEntryPage
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/ledger", query, true, &page)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots/"+lotID+"/ledger", query, true, &page)
 	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryLedgerEntry) string { return item.LotID }) {
 		return InventoryLedgerEntryPage{}, invalidServerResponse(http.StatusOK)
 	}
@@ -125,7 +135,7 @@ func (c *Client) BeanLotReservations(ctx context.Context, rawLotID string, optio
 		return InventoryReservationPage{}, failure
 	}
 	var page InventoryReservationPage
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/reservations", query, true, &page)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots/"+lotID+"/reservations", query, true, &page)
 	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryReservation) string { return item.LotID }) {
 		return InventoryReservationPage{}, invalidServerResponse(http.StatusOK)
 	}
@@ -152,7 +162,7 @@ func (c *Client) BeanLotConflicts(ctx context.Context, rawLotID string, options 
 		return InventoryConflictPage{}, failure
 	}
 	var page InventoryConflictPage
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/bean-lots/"+lotID+"/conflicts", query, true, &page)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots/"+lotID+"/conflicts", query, true, &page)
 	if failure == nil && !allInventoryItemsMatchLot(page.Items, lotID, func(item InventoryConflict) string { return item.LotID }) {
 		return InventoryConflictPage{}, invalidServerResponse(http.StatusOK)
 	}
@@ -175,26 +185,41 @@ func (c *Client) InventoryConflict(ctx context.Context, rawConflictID string) (I
 		return InventoryConflict{}, failure
 	}
 	var conflict InventoryConflict
-	failure = c.doInventoryRead(ctx, inventoryAdminRoot+"/conflicts/"+conflictID, nil, true, &conflict)
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/conflicts/"+conflictID, nil, true, &conflict)
 	if failure == nil && conflict.ConflictID != conflictID {
 		return InventoryConflict{}, invalidServerResponse(http.StatusOK)
 	}
 	return conflict, failure
 }
 
+func (c *Client) InventoryTotals(ctx context.Context, options InventoryTotalsOptions) (InventoryTotals, *output.Error) {
+	query, failure := inventoryTotalsQuery(options)
+	if failure != nil {
+		return InventoryTotals{}, failure
+	}
+	var totals InventoryTotals
+	failure = c.doInventoryRead(ctx, inventoryReadRoot+"/bean-lots/totals", query, false, &totals)
+	return totals, failure
+}
+
 func (c *Client) doInventoryRead(ctx context.Context, path string, query url.Values, preserveEntityNotFound bool, destination any) *output.Error {
 	request := Request{Method: http.MethodGet, Path: path, Query: query, ExpectedStatus: http.StatusOK}
-	if strings.HasPrefix(path, inventoryAdminRoot) {
-		return c.doInventoryAdminJSON(ctx, request, destination, preserveEntityNotFound)
+	failure := c.Do(ctx, request, destination)
+	if strings.HasPrefix(path, inventoryReadRoot) {
+		return classifyInventoryAPIFailure(failure, preserveEntityNotFound)
 	}
-	return c.Do(ctx, request, destination)
+	return failure
 }
 
 func (c *Client) doInventoryAdminJSON(ctx context.Context, request Request, destination any, preserveEntityNotFound bool) *output.Error {
-	return classifyInventoryAdminFailure(c.Do(ctx, request, destination), preserveEntityNotFound)
+	failure := classifyInventoryAPIFailure(c.Do(ctx, request, destination), preserveEntityNotFound)
+	if failure != nil && failure.Code == "server_upgrade_required" {
+		failure.Message = "The server does not provide the inventory administration API; upgrade Artisan Server"
+	}
+	return failure
 }
 
-func classifyInventoryAdminFailure(failure *output.Error, preserveEntityNotFound bool) *output.Error {
+func classifyInventoryAPIFailure(failure *output.Error, preserveEntityNotFound bool) *output.Error {
 	if failure == nil || failure.HTTPStatus == nil || *failure.HTTPStatus != http.StatusNotFound {
 		return failure
 	}
@@ -206,7 +231,7 @@ func classifyInventoryAdminFailure(failure *output.Error, preserveEntityNotFound
 	return &output.Error{
 		ExitCode:   9,
 		Code:       "server_upgrade_required",
-		Message:    "The server does not provide the inventory administration API; upgrade Artisan Server",
+		Message:    "The server does not provide the inventory read API; upgrade Artisan Server",
 		HTTPStatus: statusPointer(http.StatusNotFound),
 	}
 }
@@ -226,6 +251,12 @@ func ValidateLotListOptions(options LotListOptions) *output.Error {
 	return failure
 }
 
+// ValidateInventoryTotalsOptions validates local totals filters without making a request.
+func ValidateInventoryTotalsOptions(options InventoryTotalsOptions) *output.Error {
+	_, failure := inventoryTotalsQuery(options)
+	return failure
+}
+
 // ValidatePageOptions validates local pagination flags without making a request.
 func ValidatePageOptions(options PageOptions) *output.Error {
 	_, failure := pageQuery(options)
@@ -237,40 +268,56 @@ func NormalizeInventoryUUID(raw string) (string, *output.Error) {
 	return normalizeInventoryUUID(raw)
 }
 
+func lotFilterQuery(queryText, state, availability, conflict, roastUUID string) (url.Values, *output.Error) {
+	query := make(url.Values)
+	if queryText != "" {
+		query.Set("q", queryText)
+	}
+	if state != "" {
+		if !oneOf(state, "active", "archived") {
+			return nil, inventoryUsageFailure("invalid_state", "State must be active or archived")
+		}
+		query.Set("state", state)
+	}
+	if availability != "" {
+		if !oneOf(availability, "positive", "zero", "negative") {
+			return nil, inventoryUsageFailure("invalid_availability", "Availability must be positive, zero, or negative")
+		}
+		query.Set("availability", availability)
+	}
+	if conflict != "" {
+		if !oneOf(conflict, "open", "none") {
+			return nil, inventoryUsageFailure("invalid_conflict_filter", "Conflict must be open or none")
+		}
+		query.Set("conflict", conflict)
+	}
+	if roastUUID != "" {
+		normalized, uuidFailure := normalizeInventoryUUID(roastUUID)
+		if uuidFailure != nil {
+			return nil, uuidFailure
+		}
+		query.Set("roast_uuid", normalized)
+	}
+	return query, nil
+}
+
 func lotListQuery(options LotListOptions) (url.Values, *output.Error) {
 	query, failure := pageQuery(PageOptions{Limit: options.Limit, Cursor: options.Cursor})
 	if failure != nil {
 		return nil, failure
 	}
-	if options.Query != "" {
-		query.Set("q", options.Query)
+	filters, failure := lotFilterQuery(options.Query, options.State, options.Availability, options.Conflict, options.RoastUUID)
+	if failure != nil {
+		return nil, failure
 	}
-	if options.State != "" {
-		if !oneOf(options.State, "active", "archived") {
-			return nil, inventoryUsageFailure("invalid_state", "State must be active or archived")
-		}
-		query.Set("state", options.State)
-	}
-	if options.Availability != "" {
-		if !oneOf(options.Availability, "positive", "zero", "negative") {
-			return nil, inventoryUsageFailure("invalid_availability", "Availability must be positive, zero, or negative")
-		}
-		query.Set("availability", options.Availability)
-	}
-	if options.Conflict != "" {
-		if !oneOf(options.Conflict, "open", "none") {
-			return nil, inventoryUsageFailure("invalid_conflict_filter", "Conflict must be open or none")
-		}
-		query.Set("conflict", options.Conflict)
-	}
-	if options.RoastUUID != "" {
-		roastUUID, uuidFailure := normalizeInventoryUUID(options.RoastUUID)
-		if uuidFailure != nil {
-			return nil, uuidFailure
-		}
-		query.Set("roast_uuid", roastUUID)
+	for key, values := range filters {
+		query[key] = values
 	}
 	return query, nil
+}
+
+func inventoryTotalsQuery(options InventoryTotalsOptions) (url.Values, *output.Error) {
+	return lotFilterQuery(options.Query, options.State, options.Availability, options.Conflict, options.RoastUUID)
 }
 
 func pageQuery(options PageOptions) (url.Values, *output.Error) {

@@ -348,7 +348,7 @@ func TestDownloadInventoryImageStreamsPrivateWebPAtomically(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "download.webp")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/api/v1/inventory/admin/bean-lots/"+mutationLotID+"/images/"+commandAPIImageID+"/thumbnail" || r.Header.Get("Authorization") != "Bearer secret" {
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots/"+mutationLotID+"/images/"+commandAPIImageID+"/thumbnail" || r.Header.Get("Authorization") != "Bearer secret" {
 			t.Errorf("request = %s %q", r.URL.Path, r.Header.Get("Authorization"))
 		}
 		temps, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*"))
@@ -817,6 +817,30 @@ func TestDownloadInventoryImageRejectsInvalidResponsesAndCleansTemps(t *testing.
 			assertNoDownloadTemps(t, destination)
 		})
 	}
+}
+
+func TestDownloadInventoryImageReadRoot404RequiresUpgradeAndCleansTemp(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "missing.webp")
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"detail":"Not Found"}`)
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "image-404-secret", time.Second)
+	_, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false)
+	if gotPath != "/api/v1/inventory/read/bean-lots/"+mutationLotID+"/images/"+commandAPIImageID+"/display" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if failure == nil || failure.ExitCode != 9 || failure.Code != "server_upgrade_required" || failure.Message != "The server does not provide the inventory read API; upgrade Artisan Server" {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("destination exists: %v", err)
+	}
+	assertNoDownloadTemps(t, destination)
 }
 
 func TestDownloadInventoryImageRefusesRedirectWithoutForwardingBearer(t *testing.T) {
