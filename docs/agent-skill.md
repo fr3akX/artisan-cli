@@ -45,6 +45,30 @@ location changes. Replacement is atomic; a durability-uncertain error requires
 manual inspection before retrying. `--force` does not weaken those path checks
 and does not modify files outside `ROOT/artisan-inventory/SKILL.md`.
 
+## Pricing, totals, and role boundary
+
+Members may perform every safe read but no admin mutation. This includes lot
+prices, reservation costs, linked history/images, and filtered totals. A price
+mutation requires a verified admin identity, fresh operation-specific approval,
+one idempotency key for the logical change, and an authoritative lot reread.
+The agent must stop rather than attempting an administrator operation as a
+member.
+
+The initial read/re-read gate includes:
+
+```sh
+artisan --json --server <EXPECTED_SERVER_URL> inventory totals --state active --availability positive
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
+```
+
+JSON prices use `price_per_kg_eur_cents` as integer cents or null. Human flags
+use exact decimal syntax such as `--price-per-kg-eur 12.34`. Partial valuation
+requires reporting `priced_lot_count` and `unpriced_lot_count`. Agents must not compute totals or costs locally.
+They must never sum paginated list output as an authoritative aggregate.
+
+Production smoke is read-only. The skill does not authorize an agent to invent
+or perform production mutations for testing.
+
 ## Agent security boundary
 
 The skill instructs an agent to use global `--json` and an exact human-supplied

@@ -286,13 +286,15 @@ func TestReleaseArchives(t *testing.T) {
 
 func TestDocumentationContract(t *testing.T) {
 	root := repositoryRoot(t)
+	serverRef := pinnedServerRef(t, root)
 	required := map[string][]string{
+		"README.md":                   {"inventory totals --state active --availability positive", "--price-per-kg-eur 12.34", "PRICE/KG", "ROAST COST", "priced and unpriced lot counts"},
 		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
-		"RELEASE_NOTES.md":            {"Minimum compatible Artisan Server commit", "4c0136fe98f6728f4bb94e416c5abe570e7f4831", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0"},
-		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres"},
-		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1"},
+		"RELEASE_NOTES.md":            {"Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "inventory totals", "price_per_kg_eur_cents", "Production smoke is read-only"},
+		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage"},
+		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1", "price_per_kg_eur_cents", "integer cents or `null`", "priced_lot_count", "unpriced_lot_count", "must not be summed from paginated list output", "server upgrade"},
 		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox"},
-		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens"},
+		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens", "Members may perform every safe read but no admin mutation", "admin identity", "idempotency", "authoritative lot reread", "must not compute totals or costs locally", "Production smoke is read-only"},
 	}
 	for path, snippets := range required {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
@@ -306,12 +308,28 @@ func TestDocumentationContract(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range append([]string{"README.md"}, keys(required)...) {
+	for _, path := range []string{"README.md", "RELEASE_NOTES.md"} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
-		if err == nil && !strings.Contains(string(contents), "4c0136fe98f6728f4bb94e416c5abe570e7f4831") {
-			t.Errorf("%s missing minimum compatible server ref", path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+		} else if !strings.Contains(string(contents), serverRef) {
+			t.Errorf("%s missing minimum compatible server ref %s", path, serverRef)
 		}
 	}
+}
+
+func pinnedServerRef(t *testing.T, root string) string {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(root, "integration", "artisan-server.ref"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverRef := strings.TrimSpace(string(contents))
+	matched, err := regexp.MatchString(`^[0-9a-f]{40}$`, serverRef)
+	if err != nil || !matched {
+		t.Fatalf("integration/artisan-server.ref is not a lowercase 40-character SHA: %q", serverRef)
+	}
+	return serverRef
 }
 
 func runReleaseBuilder(t *testing.T, root, leaf, umask string) {
@@ -1019,12 +1037,4 @@ func goCommand(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-func keys(values map[string][]string) []string {
-	result := make([]string, 0, len(values))
-	for key := range values {
-		result = append(result, key)
-	}
-	return result
 }

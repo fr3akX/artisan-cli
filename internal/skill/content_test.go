@@ -113,6 +113,35 @@ func TestSkillContentContract(t *testing.T) {
 	}
 }
 
+func TestPricingTotalsSkillSourceAndGeneratedContract(t *testing.T) {
+	sourcePath := filepath.Join("..", "..", "skills", "artisan-inventory", "SKILL.md")
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string][]byte{"source": source, "generated": Content} {
+		text := string(contents)
+		for _, required := range []string{
+			"inventory totals --state active --availability positive",
+			"--price-per-kg-eur 12.34",
+			"`price_per_kg_eur_cents`",
+			"integer cents or `null`",
+			"`priced_lot_count`",
+			"`unpriced_lot_count`",
+			"Never sum totals or costs locally from paginated lot list output",
+			"admin identity",
+			"idempotency key",
+			"authoritative lot reread",
+			"Members may perform every safe read but no admin mutation",
+			"Production smoke is read-only",
+		} {
+			if !strings.Contains(text, required) {
+				t.Errorf("%s skill is missing %q", name, required)
+			}
+		}
+	}
+}
+
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

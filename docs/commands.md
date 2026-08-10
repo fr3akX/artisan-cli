@@ -72,14 +72,24 @@ artisan [GLOBAL FLAGS] inventory lot show LOT_ID
 artisan [GLOBAL FLAGS] inventory lot ledger LOT_ID [--limit N] [--cursor CURSOR] [--all]
 artisan [GLOBAL FLAGS] inventory lot reservations LOT_ID [--limit N] [--cursor CURSOR] [--all]
 artisan [GLOBAL FLAGS] inventory lot conflicts LOT_ID [--limit N] [--cursor CURSOR] [--all]
+artisan [GLOBAL FLAGS] inventory totals [--q TEXT] [--state STATE]
+    [--availability FILTER] [--conflict FILTER] [--roast-uuid UUID]
 ```
 
-With an administrator credential, list filters are `state=active|archived`,
-`availability=positive|zero|negative`, and `conflict=open|none`, and the full
-admin projection is returned. With a member credential, lot list uses the
-active-only desktop projection and accepts only `--limit`, `--cursor`, and
-`--all`; admin-only filters fail locally after the live identity check. IDs
-accept compact or dashed UUID syntax and are normalized by the client.
+Both active member and administrator credentials may perform every safe read
+through the full inventory read API. List and totals filters are
+`state=active|archived`, `availability=positive|zero|negative`, and
+`conflict=open|none`, plus `--q` and `--roast-uuid`. The totals command has
+exactly those five filters and no pagination flags: it asks the server to
+aggregate every matching lot. Authoritative totals must not be reconstructed
+by summing paginated list output. IDs accept compact or dashed UUID syntax and
+are normalized by the client.
+
+For example:
+
+```sh
+artisan inventory totals --state active --availability positive
+```
 
 ```text
 artisan [GLOBAL FLAGS] inventory lot create LOT-FLAGS
@@ -94,7 +104,8 @@ Create lot flags are:
 --name TEXT                         --origin TEXT
 --producer TEXT                     --supplier TEXT
 --external-reference TEXT           --received-date YYYY-MM-DD
---crop-year YEAR                    --varietal TEXT              (repeatable)
+--crop-year YEAR                    --price-per-kg-eur DECIMAL
+--varietal TEXT                     (repeatable)
 --sca-score SCORE                   --processing-method TEXT
 --processing-detail TEXT            --altitude-min-metres METRES
 --altitude-max-metres METRES        --notes TEXT
@@ -112,6 +123,20 @@ and cannot be combined with lot-field or image-metadata flags; repeated
 `--image` files are still supplied separately and must match the JSON image
 metadata count. `artisan inventory lot create --help` prints the built-in
 create/image syntax.
+
+Human price input such as `--price-per-kg-eur 12.34` accepts only canonical
+unsigned decimal EUR with zero, one, or two fractional digits: `0`, `0.0`,
+`0.00`, `12.3`, `12.34`, through the maximum `21474836.47`. Signs, leading or
+trailing whitespace, separators, exponent notation, an empty value, a trailing
+decimal point, more than two fractional digits, and larger values are rejected.
+Parsing is decimal-to-integer and never uses floating point. On create, omitted
+price is null/unpriced; on update, omission leaves it unchanged. A price of zero
+is a real priced value, not null.
+
+Strict JSON uses `price_per_kg_eur_cents`: an integer from 0 through
+2147483647, or `null` where allowed. Create requires the complete field and
+accepts null as unpriced; patch null clears it. Floats, booleans, numeric
+strings, negative values, and overflow are rejected.
 
 Update accepts the same lot field flags (not opening/image flags), repeatable
 `--clear FIELD`, `--from-json FILE|-`, and `--idempotency-key KEY`. At least one
@@ -131,6 +156,8 @@ received-date
 received_date
 crop-year
 crop_year
+price-per-kg-eur
+price_per_kg_eur
 sca-score
 sca_score
 processing-method
@@ -142,6 +169,18 @@ altitude_min_metres
 altitude-max-metres
 altitude_max_metres
 ```
+
+Setting `--price-per-kg-eur` and clearing either price alias in one update is a
+local usage error. Price mutation is administrator-only and retains the normal
+idempotency, ambiguity-reconciliation, and authoritative lot reread
+requirements.
+
+Human lot-list output includes `PRICE/KG` (`€12.34/kg`, `€0.00/kg`, or `-`),
+lot detail includes `Price per kg`, and reservation history includes
+`ROAST COST` (`€6.17` or `-`). Totals print server-provided value plus priced and
+unpriced counts; those counts are the valuation coverage and must be reported
+when coverage is partial. Null renders as `-`; zero renders as an exact zero EUR
+value.
 
 ## Manual adjustment
 
@@ -231,6 +270,11 @@ make the shell program unusable. Generation and completion are static and
 local: they do not load environment or stored configuration, inspect a
 terminal, read credentials, enumerate server-backed IDs, or contact Artisan
 Server. See [installation](installation.md#shell-completion) for setup examples.
+
+If the compatible read or administration API is absent, the CLI returns the
+stable `server_upgrade_required` error and instructs the operator to upgrade
+Artisan Server. An entity-specific not-found response remains an ordinary
+not-found error.
 
 SIGINT, and SIGTERM on platforms that support it, cancel active work and run
 normal cleanup before the process exits with status 130. See [JSON, pagination,

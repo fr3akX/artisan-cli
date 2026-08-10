@@ -237,6 +237,7 @@ func TestCobraPublicCommandManifestAndGeneratedHelp(t *testing.T) {
 		"artisan inventory reservation create",
 		"artisan inventory reservation finalize",
 		"artisan inventory reservation release",
+		"artisan inventory totals",
 		"artisan skill",
 		"artisan skill install",
 		"artisan skill show",
@@ -280,6 +281,7 @@ func TestRepresentativeGeneratedHelpUsesOneJSONEnvelope(t *testing.T) {
 		{"--help"},
 		{"auth", "login", "--help"},
 		{"inventory", "lot", "list", "--help"},
+		{"inventory", "totals", "--help"},
 		{"skill", "show", "--help"},
 	} {
 		args = append(args, "--json")

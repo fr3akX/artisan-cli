@@ -2,11 +2,15 @@ package command
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func commandPathSet(root *cobra.Command) map[string]bool {
@@ -32,6 +36,7 @@ func TestCobraInventoryReadCommandPaths(t *testing.T) {
 		"artisan inventory lot reservations",
 		"artisan inventory lot conflicts",
 		"artisan inventory adjust",
+		"artisan inventory totals",
 		"artisan inventory reservation create",
 		"artisan inventory reservation finalize",
 		"artisan inventory reservation release",
@@ -129,6 +134,179 @@ func TestCobraInventoryStaticEnumCompletion(t *testing.T) {
 			t.Errorf("completion --%s = %q, %v; want %q, no-file", name, got, directive, want)
 		}
 	}
+}
+
+func TestInventoryTotalsCobraHelpHasExactFilterSurface(t *testing.T) {
+	result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "totals", "--help")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("help result = %#v", result)
+	}
+	for _, want := range []string{"artisan inventory totals", "--q", "--state", "--availability", "--conflict", "--roast-uuid"} {
+		if !strings.Contains(result.stdout, want) {
+			t.Errorf("help missing %q:\n%s", want, result.stdout)
+		}
+	}
+	for _, forbidden := range []string{"--limit", "--cursor", "--all"} {
+		if strings.Contains(result.stdout, forbidden) {
+			t.Errorf("totals help contains pagination flag %q:\n%s", forbidden, result.stdout)
+		}
+	}
+	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{}), nil)
+	cmd, _, err := root.Find([]string{"inventory", "totals"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var localFlags []string
+	cmd.LocalNonPersistentFlags().VisitAll(func(flag *pflag.Flag) {
+		if flag.Name != "help" {
+			localFlags = append(localFlags, flag.Name)
+		}
+	})
+	wantFlags := []string{"availability", "conflict", "q", "roast-uuid", "state"}
+	if !reflect.DeepEqual(localFlags, wantFlags) {
+		t.Errorf("totals local flags = %q, want exactly %q", localFlags, wantFlags)
+	}
+}
+
+func TestInventoryTotalsCobraCompletionMatchesLotList(t *testing.T) {
+	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{Getenv: func(string) string {
+		t.Fatal("completion loaded configuration")
+		return ""
+	}}), nil)
+	list, _, err := root.Find([]string{"inventory", "lot", "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	totals, _, err := root.Find([]string{"inventory", "totals"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state", "availability", "conflict"} {
+		listCompletion, listExists := list.GetFlagCompletionFunc(name)
+		totalsCompletion, totalsExists := totals.GetFlagCompletionFunc(name)
+		if !listExists || !totalsExists {
+			t.Fatalf("completion registration for --%s: list=%v totals=%v", name, listExists, totalsExists)
+		}
+		listValues, listDirective := listCompletion(list, nil, "")
+		totalsValues, totalsDirective := totalsCompletion(totals, nil, "")
+		if !reflect.DeepEqual(totalsValues, listValues) || totalsDirective != listDirective || totalsDirective != cobra.ShellCompDirectiveNoFileComp {
+			t.Errorf("totals --%s completion = %q, %v; list = %q, %v", name, totalsValues, totalsDirective, listValues, listDirective)
+		}
+	}
+}
+
+func TestInventoryPriceCobraHelpCompletionAndDecimalPreservation(t *testing.T) {
+	for _, leaf := range []string{"create", "update"} {
+		result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "inventory", "lot", leaf, "--help")
+		if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, "--price-per-kg-eur") {
+			t.Errorf("%s help = %#v", leaf, result)
+		}
+	}
+
+	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{}), nil)
+	update, _, err := root.Find([]string{"inventory", "lot", "update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, exists := update.GetFlagCompletionFunc("clear")
+	if !exists {
+		t.Fatal("completion for --clear is not registered")
+	}
+	values, directive := completion(update, nil, "price")
+	for _, alias := range []string{"price-per-kg-eur", "price_per_kg_eur"} {
+		if !containsString(values, alias) {
+			t.Errorf("--clear completion missing %q: %q", alias, values)
+		}
+	}
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("--clear completion directive = %v", directive)
+	}
+
+	create, _, err := root.Find([]string{"inventory", "lot", "create"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []*cobra.Command{create, update} {
+		priceCompletion, exists := cmd.GetFlagCompletionFunc("price-per-kg-eur")
+		if !exists {
+			t.Errorf("%s price completion is not registered", cmd.CommandPath())
+			continue
+		}
+		values, directive := priceCompletion(cmd, nil, "")
+		if len(values) != 0 || directive != cobra.ShellCompDirectiveNoFileComp {
+			t.Errorf("%s price completion = %q, %v", cmd.CommandPath(), values, directive)
+		}
+	}
+	if err := create.Flags().Parse([]string{"--price-per-kg-eur", "12.30"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalLegacyArgs(create, nil); !reflect.DeepEqual(got, []string{"--price-per-kg-eur=12.30"}) {
+		t.Fatalf("canonical price args = %q", got)
+	}
+}
+
+func TestInventoryTotalsCobraPathParseFailureAndGlobalFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"inventory", "totals", "--bad"},
+		{"--json", "inventory", "totals", "--bad"},
+		{"inventory", "totals", "--bad", "--json"},
+	} {
+		wantPath := "inventory totals"
+		if got := knownInventoryCommandPath(args); got != wantPath {
+			t.Errorf("knownInventoryCommandPath(%q) = %q, want %q", args, got, wantPath)
+		}
+		result := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, args...)
+		if result.code != usageExitCode || !strings.Contains(result.stdout+result.stderr, "Invalid inventory totals option") {
+			t.Errorf("parse result for %q = %#v", args, result)
+		}
+	}
+	if got := inventoryCobraParseFailureMessage("inventory totals"); got != "Invalid inventory totals option" {
+		t.Fatalf("parse failure message = %q", got)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lot_count":0,"on_hand_grams":0,"reserved_grams":0,"available_grams":0,"on_hand_value_eur_cents":null,"priced_lot_count":0,"unpriced_lot_count":0}`))
+	}))
+	defer server.Close()
+	for _, args := range [][]string{
+		{"--json", "--server", server.URL, "--timeout", "2s", "inventory", "totals"},
+		{"inventory", "totals", "--json", "--server", server.URL, "--timeout", "2s"},
+	} {
+		result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
+		if result.code != 0 || result.stderr != "" || !strings.HasPrefix(result.stdout, `{"ok":true,"data":`) {
+			t.Errorf("global flags for %q = %#v", args, result)
+		}
+	}
+}
+
+func TestInventoryTotalsCobraMatchesLegacyRequestAndOutput(t *testing.T) {
+	var queries []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lot_count":2,"on_hand_grams":1500,"reserved_grams":250,"available_grams":1250,"on_hand_value_eur_cents":1234,"priced_lot_count":1,"unpriced_lot_count":1}`))
+	}))
+	defer server.Close()
+	runtime := inventoryRuntime(t, server.URL)
+	leafArgs := []string{"--q", "12.30", "--state", "active", "--availability", "positive", "--conflict", "none", "--roast-uuid", commandRoastID}
+	legacy := runLegacyInventoryCommand(t, runtime, true, append([]string{"totals"}, leafArgs...)...)
+	cobraResult := runAuthCommand(t, runtime, append([]string{"--json", "inventory", "totals"}, leafArgs...)...)
+	if legacy != cobraResult {
+		t.Fatalf("legacy = %#v, Cobra = %#v", legacy, cobraResult)
+	}
+	if len(queries) != 2 || !reflect.DeepEqual(queries[0], queries[1]) {
+		t.Fatalf("queries = %#v", queries)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCobraInventoryLegacySingleDashFlagsAreNormalized(t *testing.T) {

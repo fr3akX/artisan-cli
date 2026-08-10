@@ -97,6 +97,7 @@ func TestExhaustiveRepresentativeUsageFailuresAreStableAndRedacted(t *testing.T)
 		{name: "too few positionals", args: []string{"inventory", "lot", "show"}, want: "inventory lot show requires one LOT_ID\n"},
 		{name: "too many positionals", args: []string{"auth", "status", secret}, want: "auth status does not accept arguments\n"},
 		{name: "malformed integer", args: []string{"inventory", "lot", "list", "--limit=" + secret}, want: "Invalid inventory lot list option\n"},
+		{name: "unknown totals option", args: []string{"inventory", "totals", "--unknown=" + secret}, want: "Invalid inventory totals option\n"},
 		{name: "malformed duration", args: []string{"version", "--timeout=" + secret}, want: "Invalid global option\n"},
 		{name: "invalid URL", args: []string{"version", "--server=" + secret}, want: "Server URL is invalid\n"},
 	}

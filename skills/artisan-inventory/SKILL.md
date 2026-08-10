@@ -1,6 +1,6 @@
 ---
 name: artisan-inventory
-description: Use when an agent is asked to inspect or change bean lots, inventory images, reservations, ledger entries, or inventory conflicts with the Artisan CLI.
+description: Use when an agent is asked to inspect or change bean lots, prices, totals, inventory images, reservations, ledger entries, or inventory conflicts with the Artisan CLI.
 ---
 
 # Artisan Inventory
@@ -21,7 +21,7 @@ artisan --json --server "$TRUSTED_SERVER" auth status
 
 Require the exact expected user, organization, and role plus that exact server URL before mutation. Match user, organization, and role from the auth-status JSON; server assurance comes from the explicit global `--server` binding on this check and every later command.
 
-3. Organization assurance comes from the bound auth identity plus server-side tenant scoping, not inventory response fields. Stop on identity/organization/server/role mismatch, nonzero exit, `ok:false`, malformed or incomplete JSON, timeout or ambiguous result, missing/repeated cursor, pagination limit, permission failure, or server upgrade requirement.
+3. Organization assurance comes from the bound auth identity plus server-side tenant scoping, not inventory response fields. Stop on identity/organization/server/role mismatch, nonzero exit, `ok:false`, malformed or incomplete JSON, timeout or ambiguous result, missing/repeated cursor, pagination limit, permission failure, or server upgrade requirement. Members may perform every safe read but no admin mutation. Require a verified admin identity before any price or other administrator mutation.
 4. Use JSON for automation; validate fields, IDs, states, and integer values. Never parse human tables.
 5. The CLI accepts dashed or compact UUID input and normalizes it; inventory response IDs are compact lowercase UUIDs. Normalize supplied IDs to compact lowercase before matching. Compare normalized IDs, never their dashed/compact spelling.
 6. The agent must never request, read, print, persist, or pass a token and must never run `artisan auth login`. The human authenticates outside the agent session.
@@ -43,23 +43,30 @@ Use an explicit page/item/time budget. Follow only returned opaque cursors and r
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot list --state active --availability positive --limit 100
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot list --state active --availability positive --limit 100 --cursor <NEXT_CURSOR>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot list --state active --availability positive --limit 100 --all
+artisan --json --server <EXPECTED_SERVER_URL> inventory totals --state active --availability positive
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --limit 100
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot reservations <LOT_ID> --limit 100
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot conflicts <LOT_ID> --limit 100
 ```
 
-Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, and conflicts.
+Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, price, and conflicts. Use `inventory totals` for the same initial filter set and again after relevant mutations. Never sum totals or costs locally from paginated lot list output; the server response is authoritative. When valuation coverage is partial, report both `priced_lot_count` and `unpriced_lot_count`.
+
+JSON `price_per_kg_eur_cents` is integer cents or `null`; zero is priced and `null` is unpriced. Human price input uses unsigned decimal EUR with at most two fractional digits, for example `--price-per-kg-eur 12.34`, and must never be converted through floating point.
 
 ```sh
-artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --idempotency-key <KEY>
-artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --name <NAME> --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --price-per-kg-eur 12.34 --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --price-per-kg-eur 12.34 --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --clear price-per-kg-eur --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot archive <LOT_ID> --idempotency-key <KEY> --yes
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot restore <LOT_ID> --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory adjust <LOT_ID> --grams <SIGNED_INTEGER_GRAMS> --reason <REASON> --idempotency-key <KEY> --yes
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --limit 100
+artisan --json --server <EXPECTED_SERVER_URL> inventory totals --state active --availability positive
 ```
+
+A price mutation requires verified admin identity, fresh explicit approval, one idempotency key per logical mutation, and an authoritative lot reread. Reconcile ambiguous results before retrying with the same key. Never derive reservation cost locally; use the server's nullable `roast_cost_eur_cents`.
 
 Before adjustment, show current `on_hand_grams`, `reserved_grams`, `available_grams`, signed delta (never target stock), reason, and expected post-adjustment gram fields; then apply the Mutation Gate.
 
@@ -125,6 +132,7 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --li
 | Authority | Command |
 |---|---|
 | Identity | `artisan --json --server <EXPECTED_SERVER_URL> auth status` |
+| Totals | `artisan --json --server <EXPECTED_SERVER_URL> inventory totals --state active --availability positive` |
 | Lot/image | `artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>` |
 | Ledger | `artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --limit 100` |
 | Reservation | `artisan --json --server <EXPECTED_SERVER_URL> inventory lot reservations <LOT_ID> --limit 100` |
@@ -142,4 +150,8 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --li
 | Retry with a new key | Reconcile; reuse the same key. |
 | Traverse cursors without bounds | Enforce budgets and reject repeats. |
 | Trust mutation output | Re-read lot and history. |
+| Sum paginated lots for totals/costs | Use authoritative server totals and projected costs. |
+| Mutate a price as a member | Stop; verify admin identity and obtain fresh approval. |
 | Adjust after 409 | Stop, read, and escalate. |
+
+Production smoke is read-only. Never invent a production inventory mutation for validation.

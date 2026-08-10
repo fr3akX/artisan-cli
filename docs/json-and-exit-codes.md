@@ -89,4 +89,28 @@ nor `inventory conflict resolve` automatically adjusts stock. Do not transform
 a 409 or conflict into an adjustment. Ambiguous IDs or multiple matching
 records must be resolved by an explicit authoritative ID rather than guessed.
 
+## Financial JSON and totals invariants
+
+Financial fields are machine values, never presentation strings.
+`price_per_kg_eur_cents` is integer cents or `null`: zero is a priced value and
+null means unpriced. `roast_cost_eur_cents` is a nonnegative safe integer or
+null. Human-only `€` and `/kg` formatting never appears in JSON.
+
+`inventory totals` returns the server object with `lot_count`,
+`on_hand_grams`, `reserved_grams`, `available_grams`,
+`on_hand_value_eur_cents`, `priced_lot_count`, and `unpriced_lot_count`.
+Validated invariants require nonnegative safe counts,
+`priced_lot_count + unpriced_lot_count == lot_count`, and
+`available_grams == on_hand_grams - reserved_grams`. Valuation is null exactly
+when `priced_lot_count` is zero; otherwise it is a signed safe integer. Partial
+valuation is valid and consumers must report both coverage counts.
+
+Totals are authoritative across all matching lots; they must not be summed from paginated list output.
+Reservation costs are likewise server-authoritative;
+clients must not compute either value locally.
+
+A missing compatible inventory namespace is the stable
+`server_upgrade_required` server upgrade error with exit 9. It is distinct from
+an entity-specific 404, which remains exit 6.
+
 See [commands](commands.md) and [security](security.md).

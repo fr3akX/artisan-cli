@@ -33,6 +33,23 @@ currently unsigned and macOS binaries are not notarized; verify checksums and
 GitHub build provenance, while recognizing that neither substitutes for OS code
 signing.
 
+## Inventory pricing and totals
+
+Active members and administrators can perform every safe inventory read,
+including server-authoritative filtered totals and financial projections.
+Administrators can set a price with `--price-per-kg-eur 12.34`; members cannot
+perform administrator mutations.
+
+```sh
+artisan inventory totals --state active --availability positive
+artisan inventory lot update LOT_ID --price-per-kg-eur 12.34
+```
+
+Human lot and reservation tables show `PRICE/KG` and `ROAST COST`. Totals report
+priced and unpriced lot counts so partial valuation coverage is explicit. JSON
+uses nullable integer-cent fields such as `price_per_kg_eur_cents`; do not sum
+paginated list output to reconstruct totals or costs.
+
 ## Agent skill
 
 Inspect or explicitly install the embedded `artisan-inventory` skill:

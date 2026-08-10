@@ -44,7 +44,7 @@ func newInventoryCommand(ctx context.Context, state *cobraState) *cobra.Command 
 		newInventoryConflictShowCommand(ctx, state),
 		newInventoryConflictResolveCommand(ctx, state),
 	)
-	inventory.AddCommand(lot, newInventoryAdjustCommand(ctx, state), reservation, conflict, newInventoryImageCommand(ctx, state))
+	inventory.AddCommand(lot, newInventoryAdjustCommand(ctx, state), newInventoryTotalsCommand(ctx, state), reservation, conflict, newInventoryImageCommand(ctx, state))
 	return inventory
 }
 
@@ -83,6 +83,29 @@ func newInventoryLotListCommand(ctx context.Context, state *cobraState) *cobra.C
 	registerStaticFlagCompletion(cmd, "availability", "positive", "zero", "negative")
 	registerStaticFlagCompletion(cmd, "conflict", "open", "none")
 	disableFlagFileCompletion(cmd, "limit", "cursor", "all", "q", "roast-uuid")
+	return cmd
+}
+
+func newInventoryTotalsCommand(ctx context.Context, state *cobraState) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "totals",
+		Short: "Show authoritative inventory totals",
+		Args:  inventoryExactArgs(0, "Invalid inventory totals option", "Invalid inventory totals option"),
+		Run: func(cmd *cobra.Command, args []string) {
+			runLegacyLeaf(cmd, args, state, func(canonical []string) int {
+				return runInventoryTotals(ctx, canonical, state.runtime, state.jsonMode, state.serverOverride, state.timeout)
+			})
+		},
+	}
+	cmd.Flags().String("q", "", "Search lot text")
+	cmd.Flags().String("state", "", "Filter by lot state")
+	cmd.Flags().String("availability", "", "Filter by availability")
+	cmd.Flags().String("conflict", "", "Filter by conflict state")
+	cmd.Flags().String("roast-uuid", "", "Filter by roast UUID")
+	registerStaticFlagCompletion(cmd, "state", "active", "archived")
+	registerStaticFlagCompletion(cmd, "availability", "positive", "zero", "negative")
+	registerStaticFlagCompletion(cmd, "conflict", "open", "none")
+	disableFlagFileCompletion(cmd, "q", "roast-uuid")
 	return cmd
 }
 
@@ -258,7 +281,7 @@ func knownInventoryCommandPath(args []string) string {
 		return "inventory"
 	}
 	switch group {
-	case "adjust":
+	case "adjust", "totals":
 		return "inventory " + group
 	case "lot", "reservation", "conflict", "image":
 		leaf, _, ok := nextCommandToken(args, groupIndex+1)
@@ -313,6 +336,8 @@ func inventoryCobraParseFailureMessage(path string) string {
 		return "Invalid " + path + " option"
 	case "inventory adjust":
 		return "Invalid inventory adjust option"
+	case "inventory totals":
+		return "Invalid inventory totals option"
 	case "inventory reservation":
 		return "Unknown inventory reservation command"
 	case "inventory reservation create", "inventory reservation finalize", "inventory reservation release":
