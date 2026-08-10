@@ -23,6 +23,7 @@
 - Existing desktop/public response models remain unchanged; do not add price to `DesktopBeanLotView`.
 - Release builds remain `CGO_ENABLED=0`, dependency-free, unsigned, and unnotarized for the six existing platform targets.
 - No production inventory mutation is permitted during validation or release smoke testing.
+- Companion ordering: complete Tasks 1–6 of this plan, then execute `docs/superpowers/plans/2026-08-10-bean-lot-public-description-cli.md`, then return for Tasks 7–8. Do not review, package, deploy, tag, or publish v0.3.0 before the companion plan passes.
 
 ---
 
@@ -789,7 +790,7 @@ curl --fail --silent --show-error http://127.0.0.1/api/v1/health/live
 curl --fail --silent --show-error http://127.0.0.1/api/v1/health/ready
 RUNNING_API_CID=$(docker-compose -p archive-api ps -q api)
 test "$(docker inspect "$RUNNING_API_CID" --format '{{.Image}}')" = "$NEW_API_IMAGE"
-test "$(docker-compose -p archive-api exec -T postgres psql -U artisan -d artisan -Atc 'SELECT version_num FROM alembic_version')" = '0010_inventory_price_constraint'
+test "$(docker-compose -p archive-api exec -T postgres psql -U artisan -d artisan -Atc 'SELECT version_num FROM alembic_version')" = '0011_bean_lot_public_description'
 HTTP_STATUS=$(curl --silent --show-error --output /tmp/inventory-read-unauth.json --write-out '%{http_code}' \
   http://127.0.0.1/api/v1/inventory/read/bean-lots)
 test "$HTTP_STATUS" = '401'
