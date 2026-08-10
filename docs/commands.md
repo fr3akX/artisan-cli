@@ -108,9 +108,10 @@ Create lot flags are:
 --varietal TEXT                     (repeatable)
 --sca-score SCORE                   --processing-method TEXT
 --processing-detail TEXT            --altitude-min-metres METRES
---altitude-max-metres METRES        --notes TEXT
---opening-grams GRAMS               --opening-reason TEXT
---opening-reference TEXT            --idempotency-key KEY
+--altitude-max-metres METRES        --description TEXT
+--notes TEXT                         --opening-grams GRAMS
+--opening-reason TEXT                --opening-reference TEXT
+--idempotency-key KEY
 --image FILE                        (repeatable, maximum eight)
 --image-caption INDEX=TEXT          (repeatable, zero-based)
 --image-alt-text INDEX=TEXT         (repeatable, zero-based)
@@ -138,9 +139,54 @@ leaves it unchanged. A price of zero is a real priced value, not null.
 Strict JSON uses `price_per_kg_eur_cents`: an integer from 0 through
 2147483647, or `null` where allowed. Create requires the complete field and
 accepts null as unpriced; patch null clears it. Floats, booleans, numeric
-strings, negative values, and overflow are rejected.
+strings, negative values, and overflow are rejected. A complete strict create
+manifest and sparse description patches look like:
 
-Update accepts the same lot field flags (not opening/image flags), repeatable
+```json
+{
+  "fields": {
+    "name": "Launch Lot",
+    "origin": null,
+    "producer": null,
+    "supplier": null,
+    "external_reference": null,
+    "received_date": null,
+    "crop_year": null,
+    "price_per_kg_eur_cents": null,
+    "varietals": [],
+    "sca_score": null,
+    "processing_method": null,
+    "processing_detail": null,
+    "altitude_min_metres": null,
+    "altitude_max_metres": null,
+    "description": "Customer-facing story\nSecond paragraph",
+    "notes": null
+  },
+  "opening_grams": 0,
+  "opening_reason": null,
+  "opening_reference": null,
+  "images": []
+}
+```
+
+```json
+{"description":"Updated customer-facing story"}
+{"description":null}
+```
+
+`description` is an optional multiline plain-text field. After line endings are
+normalized to LF, text is normalized to NFC and trimmed; it may contain at most
+2,000 Unicode code points and 8,000 UTF-8 bytes. Blank optional input becomes
+JSON null. Invalid UTF-8 and forbidden control characters are rejected.
+Descriptions must be public-safe customer-facing copy because they appear on
+public roast pages linked to the lot. Supplier-only, purchasing, and
+operational information belongs in private `notes`; private notes remain private
+and are never shown publicly. `inventory lot show` returns and displays the
+`description` as `Public description`; `inventory lot list` does not return it
+or add a description column.
+
+Update accepts the same lot field flags, including `--description TEXT` (but not
+opening/image flags), repeatable
 `--clear FIELD`, `--from-json FILE|-`, and `--idempotency-key KEY`. At least one
 field must change. Use archive/restore rather than setting `state`. Clearable
 fields accept exactly these `--clear` tokens (repeat the flag for multiple
@@ -150,6 +196,7 @@ fields):
 origin
 producer
 supplier
+description
 notes
 varietals
 external-reference
@@ -172,10 +219,11 @@ altitude-max-metres
 altitude_max_metres
 ```
 
-Setting `--price-per-kg-eur` and clearing either price alias in one update is a
-local usage error. Price mutation is administrator-only and retains the normal
-idempotency, ambiguity-reconciliation, and authoritative lot reread
-requirements.
+Setting `--description` and `--clear description` in one update is a local usage
+error. Setting `--price-per-kg-eur` and clearing either price alias in one update
+is also a local usage error. Description and price mutations are
+administrator-only and retain the normal idempotency,
+ambiguity-reconciliation, and authoritative lot reread requirements.
 
 Human lot-list output includes `PRICE/KG` (`€12.34/kg`, `€0.00/kg`, or `-`),
 lot detail includes `Price per kg`, and reservation history includes

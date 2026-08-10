@@ -50,14 +50,19 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot reservations <LOT_ID
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot conflicts <LOT_ID> --limit 100
 ```
 
-Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, price, and conflicts. Use `inventory totals` for the same initial filter set and again after relevant mutations. Never sum totals or costs locally from paginated lot list output; the server response is authoritative. When valuation coverage is partial, report both `priced_lot_count` and `unpriced_lot_count`.
+Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, description, price, and conflicts. Use `inventory totals` for the same initial filter set and again after relevant mutations. Never sum totals or costs locally from paginated lot list output; the server response is authoritative. When valuation coverage is partial, report both `priced_lot_count` and `unpriced_lot_count`. Lot-list summaries do not return description; use `lot show` for that field.
 
 JSON `price_per_kg_eur_cents` is integer cents or `null`; zero is priced and `null` is unpriced. Human price input uses unsigned decimal EUR with zero, one, or two fractional digits, for example `--price-per-kg-eur 12.34`. Only the single whole part `0` may start with zero; whole parts such as `00` and `01` are rejected. Never convert a price through floating point.
+
+Treat description as public-safe customer-facing copy: it appears on public roast pages linked to the lot. Keep supplier-only, purchasing, or operational information in private notes; never copy private notes into description. Private notes remain private.
 
 ```sh
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --price-per-kg-eur 12.34 --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --price-per-kg-eur 12.34 --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --clear price-per-kg-eur --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --description <PUBLIC_DESCRIPTION> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --description <PUBLIC_DESCRIPTION> --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --clear description --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot archive <LOT_ID> --idempotency-key <KEY> --yes
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot restore <LOT_ID> --idempotency-key <KEY>
 artisan --json --server <EXPECTED_SERVER_URL> inventory adjust <LOT_ID> --grams <SIGNED_INTEGER_GRAMS> --reason <REASON> --idempotency-key <KEY> --yes
@@ -66,7 +71,7 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot ledger <LOT_ID> --li
 artisan --json --server <EXPECTED_SERVER_URL> inventory totals --state active --availability positive
 ```
 
-A price mutation requires verified admin identity, fresh explicit approval, one idempotency key per logical mutation, and an authoritative lot reread. Reconcile ambiguous results before retrying with the same key. Never derive reservation cost locally; use the server's nullable `roast_cost_eur_cents`.
+A description or price mutation requires verified admin identity, fresh explicit approval, one idempotency key per logical mutation, and an authoritative lot reread. Reconcile ambiguous results before retrying with the same key. Never derive reservation cost locally; use the server's nullable `roast_cost_eur_cents`.
 
 Before adjustment, show current `on_hand_grams`, `reserved_grams`, `available_grams`, signed delta (never target stock), reason, and expected post-adjustment gram fields; then apply the Mutation Gate.
 

@@ -45,12 +45,26 @@ location changes. Replacement is atomic; a durability-uncertain error requires
 manual inspection before retrying. `--force` does not weaken those path checks
 and does not modify files outside `ROOT/artisan-inventory/SKILL.md`.
 
-## Pricing, totals, and role boundary
+## Public descriptions, pricing, totals, and role boundary
+
+The skill supports creating, updating, clearing, and showing a lot description:
+
+```sh
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --description <PUBLIC_DESCRIPTION> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --description <PUBLIC_DESCRIPTION> --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot update <LOT_ID> --clear description --idempotency-key <KEY>
+artisan --json --server <EXPECTED_SERVER_URL> inventory lot show <LOT_ID>
+```
+
+Treat descriptions as public-safe customer-facing copy because they appear on
+public roast pages linked to the lot. Supplier-only, purchasing, and operational
+information belongs in private notes and must never be copied to a description.
 
 Members may perform every safe read but no admin mutation. This includes lot
-prices, reservation costs, linked history/images, and filtered totals. A price
-mutation requires a verified admin identity, fresh operation-specific approval,
-one idempotency key for the logical change, and an authoritative lot reread.
+descriptions, prices, reservation costs, linked history/images, and filtered
+totals. Description and price mutations require a verified admin identity,
+fresh operation-specific approval, one idempotency key for the logical change,
+and an authoritative lot reread.
 The agent must stop rather than attempting an administrator operation as a
 member.
 

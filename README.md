@@ -33,7 +33,20 @@ currently unsigned and macOS binaries are not notarized; verify checksums and
 GitHub build provenance, while recognizing that neither substitutes for OS code
 signing.
 
-## Inventory pricing and totals
+## Inventory public descriptions, pricing, and totals
+
+Administrators can create, update, and clear a lot's public-safe customer-facing
+copy with `--description`; `inventory lot show` displays it as `Public
+description`. Descriptions appear on public roast pages linked to the lot, so
+keep supplier-only, purchasing, and operational information in private `notes`.
+Lot-list summaries remain description-free.
+
+```sh
+artisan inventory lot create --name "Launch Lot" --description "Customer-facing story"
+artisan inventory lot update LOT_ID --description "Updated customer-facing story"
+artisan inventory lot update LOT_ID --clear description
+artisan inventory lot show LOT_ID
+```
 
 Active members and administrators can perform every safe inventory read,
 including server-authoritative filtered totals and financial projections.

@@ -89,6 +89,86 @@ nor `inventory conflict resolve` automatically adjusts stock. Do not transform
 a 409 or conflict into an adjustment. Ambiguous IDs or multiple matching
 records must be resolved by an explicit authoritative ID rather than guessed.
 
+## Bean lot description JSON
+
+`inventory lot show` full detail requires `description` as a nullable string.
+For example, a full detail object can be:
+
+```json
+{
+  "lot_id": "11111111111111111111111111111111",
+  "name": "Launch Lot",
+  "origin": null,
+  "processing_method": null,
+  "crop_year": null,
+  "state": "active",
+  "price_per_kg_eur_cents": null,
+  "on_hand_grams": 0,
+  "reserved_grams": 0,
+  "available_grams": 0,
+  "unresolved_conflict_count": 0,
+  "cover_image": null,
+  "updated_at": "2026-08-10T12:00:00.000000Z",
+  "producer": null,
+  "supplier": null,
+  "external_reference": null,
+  "received_date": null,
+  "varietals": [],
+  "sca_score": null,
+  "processing_detail": null,
+  "altitude_min_metres": null,
+  "altitude_max_metres": null,
+  "description": "Customer-facing story\nSecond paragraph",
+  "notes": null,
+  "images": [],
+  "created_at": "2026-08-10T12:00:00.000000Z",
+  "archived_at": null,
+  "links": {
+    "self": "/api/v1/inventory/read/bean-lots/11111111111111111111111111111111",
+    "ledger": "/api/v1/inventory/read/bean-lots/11111111111111111111111111111111/ledger",
+    "reservations": "/api/v1/inventory/read/bean-lots/11111111111111111111111111111111/reservations"
+  }
+}
+```
+
+Lot-list summary objects remain unchanged and do not contain `description`.
+Strict create JSON includes the nullable `description` key inside `fields`; a
+representative complete field object uses:
+
+```json
+{
+  "fields": {
+    "name": "Launch Lot",
+    "origin": null,
+    "producer": null,
+    "supplier": null,
+    "external_reference": null,
+    "received_date": null,
+    "crop_year": null,
+    "price_per_kg_eur_cents": null,
+    "varietals": [],
+    "sca_score": null,
+    "processing_method": null,
+    "processing_detail": null,
+    "altitude_min_metres": null,
+    "altitude_max_metres": null,
+    "description": null,
+    "notes": null
+  },
+  "opening_grams": 0,
+  "opening_reason": null,
+  "opening_reference": null,
+  "images": []
+}
+```
+
+Strict sparse updates set or clear the same key:
+
+```json
+{"description":"Updated customer-facing story"}
+{"description":null}
+```
+
 ## Financial JSON and totals invariants
 
 Financial fields are machine values, never presentation strings.

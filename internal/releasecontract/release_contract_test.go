@@ -291,7 +291,7 @@ func TestDocumentationContract(t *testing.T) {
 		"README.md":                   {"inventory totals --state active --availability positive", "--price-per-kg-eur 12.34", "PRICE/KG", "ROAST COST", "priced and unpriced lot counts"},
 		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
 		"RELEASE_NOTES.md":            {"Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "inventory totals", "price_per_kg_eur_cents", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "Production smoke is read-only"},
-		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage"},
+		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage", "--description", "description", "Public description", "notes remain private"},
 		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1", "price_per_kg_eur_cents", "integer cents or `null`", "priced_lot_count", "unpriced_lot_count", "must not be summed from paginated list output", "server upgrade"},
 		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox"},
 		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens", "Members may perform every safe read but no admin mutation", "admin identity", "idempotency", "authoritative lot reread", "must not compute totals or costs locally", "Production smoke is read-only"},
@@ -305,6 +305,27 @@ func TestDocumentationContract(t *testing.T) {
 		for _, snippet := range snippets {
 			if !strings.Contains(string(contents), snippet) {
 				t.Errorf("%s missing %q", path, snippet)
+			}
+		}
+	}
+	commands, err := os.ReadFile(filepath.Join(root, "docs", "commands.md"))
+	if err != nil {
+		t.Errorf("docs/commands.md: %v", err)
+	} else {
+		inLotListExample := false
+		for _, line := range strings.Split(string(commands), "\n") {
+			lower := strings.ToLower(strings.TrimSpace(line))
+			if strings.HasPrefix(lower, "artisan ") {
+				inLotListExample = strings.Contains(lower, "inventory lot list")
+			}
+			if inLotListExample && strings.Contains(lower, "description") {
+				t.Errorf("lot-list command/example claims description support: %q", line)
+			}
+			if inLotListExample && (lower == "" || strings.HasPrefix(lower, "```")) {
+				inLotListExample = false
+			}
+			if strings.Contains(lower, "lot-list output includes") && strings.Contains(lower, "description") {
+				t.Errorf("lot-list columns claim descriptions are returned: %q", line)
 			}
 		}
 	}

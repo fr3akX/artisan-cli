@@ -4,9 +4,15 @@ Minimum compatible Artisan Server commit:
 `436ffff581fd01e3b356a8fda188593cbf1cf60b`. Upgrade to that commit or later
 before installing or using this CLI release.
 
-This release adds exact EUR lot pricing and the server-authoritative
-`inventory totals` read. Active members and administrators can perform every
-safe financial read; only administrators can create, update, or clear prices.
+This release adds bean lot public descriptions, exact EUR lot pricing, and the
+server-authoritative `inventory totals` read. Administrators can create, update,
+or clear `description`; `inventory lot show` returns it and human output labels
+it `Public description`, while lot-list summaries remain unchanged. Description
+copy appears on public roast pages linked to the lot, so supplier-only,
+purchasing, and operational information must remain in private `notes`.
+
+Active members and administrators can perform every safe financial read; only
+administrators can create, update, or clear prices.
 Human output adds `PRICE/KG` and `ROAST COST`, while JSON preserves nullable
 integer cents in `price_per_kg_eur_cents` and `roast_cost_eur_cents`. Totals
 report priced and unpriced lot counts so partial valuation coverage remains
