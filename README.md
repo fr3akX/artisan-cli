@@ -5,7 +5,7 @@ release focuses on green-coffee inventory management and ships as a static
 single executable for Linux, macOS, and Windows on amd64 and arm64.
 
 Artisan CLI requires Artisan Server commit
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later. Deploy the compatible
+`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy the compatible
 server before releasing the CLI.
 
 ## Get started

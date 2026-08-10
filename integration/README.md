@@ -1,6 +1,6 @@
 # Pinned Artisan Server integration
 
-`inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
+`inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test covers administrator/member price reads, identical filtered totals, administrator-only price mutation, authoritative reservation costs, member ledger/conflict/image reads, and omission of financial fields from the reduced desktop lot projection. The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
 
 The harness resolves a trusted locally built CLI binary before execution and rejects a symlink in its final path component. Parent-directory symlink resolution and replacement races remain within the trusted local build/workspace premise; the harness is not a sandbox for an attacker-controlled binary. Every command runs from a separate temporary working directory with isolated home, config, state, and temp directories. Each invocation has a context deadline, bounded child-pipe wait, and bounded stdout/stderr capture. Unix commands run in a new process group that is terminated and checked before return; Windows commands start suspended and are assigned to a kill-on-close Job Object before they resume. This containment completes before deferred token scans begin.
 
@@ -30,6 +30,9 @@ export ARTISAN_SERVER_E2E_MAILPIT_HTTP_PORT=18025
 export ARTISAN_INTEGRATION_BASE_URL=http://127.0.0.1:18080
 export ARTISAN_INTEGRATION_ADMIN_EMAIL=owner@example.com
 export ARTISAN_INTEGRATION_ADMIN_NICKNAME=Owner
+export ARTISAN_INTEGRATION_MEMBER_EMAIL=member@example.com
+export ARTISAN_INTEGRATION_MEMBER_NICKNAME=Member
+export ARTISAN_INTEGRATION_MEMBER_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
 export ARTISAN_INTEGRATION_ADMIN_ORGANIZATION='My Roastery'
 export ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG=my-roastery
 export ARTISAN_INTEGRATION_ADMIN_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
@@ -91,11 +94,42 @@ compose_guard run --rm api python -m app.cli bootstrap-admin \
   --slug "$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
   --password-file /run/secrets/admin_password
 
+workspace_input="$CLI_ROOT"
+[[ -d "$workspace_input" && ! -L "$workspace_input" ]]
+workspace="$(realpath -e -- "$workspace_input")"
+[[ "$workspace" == "$workspace_input" ]]
+script_input="$workspace/integration/provision_member.py"
+[[ -f "$script_input" && ! -L "$script_input" ]]
+script="$(realpath -e -- "$script_input")"
+[[ "$script" == "$script_input" && "$script" == "$workspace/"* ]]
+issued_file="$(mktemp)"
+if ! compose_guard run --rm \
+  -e "ARTISAN_E2E_MEMBER_EMAIL=$ARTISAN_INTEGRATION_MEMBER_EMAIL" \
+  -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
+  -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
+  -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+  -v "$script:/tmp/provision_member.py:ro" \
+  api python /tmp/provision_member.py > "$issued_file"; then
+  rm -f "$issued_file"
+  unset issued_file
+  false
+fi
+if ! IFS=$'\t' read -r ARTISAN_INTEGRATION_MEMBER_TOKEN ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID < <(tail -n 1 "$issued_file") ||
+  [[ ! "$ARTISAN_INTEGRATION_MEMBER_TOKEN" =~ ^[^[:space:]]+$ ]] ||
+  [[ ! "$ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+  rm -f "$issued_file"
+  unset issued_file
+  false
+fi
+export ARTISAN_INTEGRATION_MEMBER_TOKEN ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID
+rm -f "$issued_file"
+unset issued_file
+
 cd "$CLI_ROOT"
 mkdir -p dist
-CGO_ENABLED=0 go build -trimpath -o "$PWD/dist/artisan-integration" ./cmd/artisan
+GOTOOLCHAIN=go1.23.12 CGO_ENABLED=0 go build -trimpath -o "$PWD/dist/artisan-integration" ./cmd/artisan
 export ARTISAN_CLI_BINARY="$PWD/dist/artisan-integration"
-go test ./integration -count=1 -v
+GOTOOLCHAIN=go1.23.12 go test ./integration -count=1 -v
 ```
 
 The `EXIT` trap always removes containers, volumes, and orphans through the guarded wrapper. On success, unset the exported integration/bootstrap values and remove the disposable server checkout's generated `secrets` directory.

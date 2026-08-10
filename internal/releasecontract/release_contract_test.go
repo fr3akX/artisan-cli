@@ -308,7 +308,10 @@ func TestDocumentationContract(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{"README.md", "RELEASE_NOTES.md"} {
+	for _, path := range []string{
+		"README.md", "RELEASE_NOTES.md", "docs/installation.md", "docs/commands.md",
+		"docs/json-and-exit-codes.md", "docs/security.md", "docs/agent-skill.md",
+	} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
 			t.Errorf("%s: %v", path, err)
@@ -324,12 +327,11 @@ func pinnedServerRef(t *testing.T, root string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverRef := strings.TrimSpace(string(contents))
-	matched, err := regexp.MatchString(`^[0-9a-f]{40}$`, serverRef)
+	matched, err := regexp.MatchString(`^[0-9a-f]{40}\n$`, string(contents))
 	if err != nil || !matched {
-		t.Fatalf("integration/artisan-server.ref is not a lowercase 40-character SHA: %q", serverRef)
+		t.Fatalf("integration/artisan-server.ref must be exactly one lowercase 40-character SHA plus newline: %q", contents)
 	}
-	return serverRef
+	return strings.TrimSuffix(string(contents), "\n")
 }
 
 func runReleaseBuilder(t *testing.T, root, leaf, umask string) {

@@ -1,7 +1,7 @@
 # Commands and configuration
 
 Artisan CLI requires Artisan Server commit
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later. Deploy that server before
+`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy that server before
 the CLI release.
 
 ## Global syntax

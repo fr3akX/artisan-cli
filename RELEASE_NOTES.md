@@ -1,7 +1,7 @@
 # Artisan CLI inventory release
 
 Minimum compatible Artisan Server commit:
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831`. Upgrade to that commit or later
+`436ffff581fd01e3b356a8fda188593cbf1cf60b`. Upgrade to that commit or later
 before installing or using this CLI release.
 
 This release adds exact EUR lot pricing and the server-authoritative

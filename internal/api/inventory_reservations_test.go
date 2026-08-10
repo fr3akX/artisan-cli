@@ -30,7 +30,7 @@ func reservationMutationJSON(state string, replay bool) string {
 		completed = `"` + inventoryTimestamp + `"`
 		reserved = 0
 	}
-	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"roast_cost_eur_cents":null,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":"%s"},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":1},"conflict":{"conflict_id":"%s","lot_id":"%s","source_ledger_entry_id":"%s","roast_uuid":"%s","reservation_id":"%s","trigger_operation":"reservation","available_grams_snapshot":-25,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"%s"},"idempotent_replay":%t}`,
+	return fmt.Sprintf(`{"reservation":{"reservation_id":"%s","client_reservation_uuid":"%s","lot_id":"%s","roast_uuid":"%s","client_instance_uuid":"%s","state":"%s","planned_grams":1250,"actual_grams":%s,"reserved_at":"%s","completed_at":%s,"created_at":"%s","updated_at":"%s","open_conflict_id":"%s"},"balance":{"lot_id":"%s","on_hand_grams":%d,"reserved_grams":%d,"available_grams":%d,"unresolved_conflict_count":1},"conflict":{"conflict_id":"%s","lot_id":"%s","source_ledger_entry_id":"%s","roast_uuid":"%s","reservation_id":"%s","trigger_operation":"reservation","available_grams_snapshot":-25,"state":"open","resolution_note":null,"resolved_by_user_id":null,"resolved_at":null,"created_at":"%s"},"idempotent_replay":%t}`,
 		inventoryReservationID, inventoryEntryID, inventoryLotID, reservationRoastID, reservationClientInstanceID, state, actual, inventoryTimestamp, completed, inventoryTimestamp, inventoryTimestamp, inventoryConflictID,
 		inventoryLotID, onHand, reserved, onHand-reserved, inventoryConflictID, inventoryLotID, inventoryEntryID, reservationRoastID, inventoryReservationID, inventoryTimestamp, replay)
 }
@@ -107,14 +107,29 @@ func TestReservationFinalizePreservesOmittedActualWeightAsNull(t *testing.T) {
 	}
 }
 
-func TestReservationMutationProjectionRequiresAndValidatesEveryConsumedField(t *testing.T) {
+func TestReservationMutationProjectionUsesReducedDesktopReservationWithoutRoastCost(t *testing.T) {
 	var response ReservationMutationResponse
-	if err := decodeOneJSON([]byte(reservationMutationJSON("reserved", true)), &response); err != nil {
+	payload := reservationMutationJSON("reserved", true)
+	if strings.Contains(payload, "roast_cost_eur_cents") {
+		t.Fatal("desktop reservation mutation fixture unexpectedly contains a financial field")
+	}
+	if err := decodeOneJSON([]byte(payload), &response); err != nil {
 		t.Fatal(err)
 	}
 	if !response.IdempotentReplay || response.Reservation.PlannedGrams != 1250 || response.Balance.AvailableGrams != 3750 || response.Conflict == nil || response.Conflict.ConflictID != inventoryConflictID {
 		t.Fatalf("response = %#v", response)
 	}
+	reservationStart := strings.Index(payload, `"reservation":`) + len(`"reservation":`)
+	balanceStart := strings.Index(payload, `,"balance":`)
+	if reservationStart < len(`"reservation":`) || balanceStart <= reservationStart {
+		t.Fatal("could not isolate desktop reservation fixture")
+	}
+	if err := decodeOneJSON([]byte(payload[reservationStart:balanceStart]), &InventoryReservation{}); err == nil {
+		t.Fatal("strict read reservation accepted a desktop mutation projection without roast cost")
+	}
+}
+
+func TestReservationMutationProjectionRequiresAndValidatesEveryConsumedField(t *testing.T) {
 	for _, replacement := range []struct{ old, new string }{
 		{`"balance":{`, `"other":{`},
 		{`"idempotent_replay":true`, `"other_replay":true`},

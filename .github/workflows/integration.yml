@@ -34,13 +34,13 @@ jobs:
           set -euo pipefail
           grep -Eq '^[0-9a-f]{40}$' integration/artisan-server.ref
           test "$(wc -l < integration/artisan-server.ref)" -eq 1
-          test "$(cat integration/artisan-server.ref)" = "4c0136fe98f6728f4bb94e416c5abe570e7f4831"
+          test "$(cat integration/artisan-server.ref)" = "436ffff581fd01e3b356a8fda188593cbf1cf60b"
 
       - name: Check out pinned Artisan Server
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: fr3akX/artisan-server
-          ref: 4c0136fe98f6728f4bb94e416c5abe570e7f4831
+          ref: 436ffff581fd01e3b356a8fda188593cbf1cf60b
           path: artisan-server
           token: ${{ secrets.ARTISAN_SERVER_REPOSITORY_TOKEN }}
 

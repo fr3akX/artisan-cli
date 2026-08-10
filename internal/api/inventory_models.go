@@ -119,7 +119,26 @@ type InventoryLedgerEntry struct {
 	CreatedAt               string  `json:"created_at"`
 }
 
-// InventoryReservation is a lot reservation read projection.
+// DesktopInventoryReservation is the unchanged reduced projection returned by
+// reservation mutations. Financial fields are available only from the read namespace.
+type DesktopInventoryReservation struct {
+	ReservationID         string  `json:"reservation_id"`
+	ClientReservationUUID string  `json:"client_reservation_uuid"`
+	LotID                 string  `json:"lot_id"`
+	RoastUUID             string  `json:"roast_uuid"`
+	ClientInstanceUUID    string  `json:"client_instance_uuid"`
+	State                 string  `json:"state"`
+	PlannedGrams          int64   `json:"planned_grams"`
+	ActualGrams           *int64  `json:"actual_grams"`
+	ReservedAt            string  `json:"reserved_at"`
+	CompletedAt           *string `json:"completed_at"`
+	CreatedAt             string  `json:"created_at"`
+	UpdatedAt             string  `json:"updated_at"`
+	OpenConflictID        *string `json:"open_conflict_id"`
+}
+
+// InventoryReservation is the financial lot reservation projection returned
+// by the inventory read namespace.
 type InventoryReservation struct {
 	ReservationID         string  `json:"reservation_id"`
 	ClientReservationUUID string  `json:"client_reservation_uuid"`
@@ -281,6 +300,16 @@ func (value *InventoryLedgerEntry) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*value = InventoryLedgerEntry(decoded)
+	return value.validate()
+}
+
+func (value *DesktopInventoryReservation) UnmarshalJSON(data []byte) error {
+	type wire DesktopInventoryReservation
+	var decoded wire
+	if err := decodeRequiredObject(data, &decoded, []string{"actual_grams", "completed_at", "open_conflict_id"}, "reservation_id", "client_reservation_uuid", "lot_id", "roast_uuid", "client_instance_uuid", "state", "planned_grams", "actual_grams", "reserved_at", "completed_at", "created_at", "updated_at", "open_conflict_id"); err != nil {
+		return err
+	}
+	*value = DesktopInventoryReservation(decoded)
 	return value.validate()
 }
 
@@ -608,6 +637,16 @@ func (value InventoryLedgerEntry) validate() error {
 		}
 	}
 	return nil
+}
+
+func (value DesktopInventoryReservation) validate() error {
+	return InventoryReservation{
+		ReservationID: value.ReservationID, ClientReservationUUID: value.ClientReservationUUID,
+		LotID: value.LotID, RoastUUID: value.RoastUUID, ClientInstanceUUID: value.ClientInstanceUUID,
+		State: value.State, PlannedGrams: value.PlannedGrams, ActualGrams: value.ActualGrams,
+		ReservedAt: value.ReservedAt, CompletedAt: value.CompletedAt, CreatedAt: value.CreatedAt,
+		UpdatedAt: value.UpdatedAt, OpenConflictID: value.OpenConflictID,
+	}.validate()
 }
 
 func (value InventoryReservation) validate() error {

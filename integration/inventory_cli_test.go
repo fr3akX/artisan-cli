@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	pinnedServerRef     = "4c0136fe98f6728f4bb94e416c5abe570e7f4831"
+	pinnedServerRef     = "436ffff581fd01e3b356a8fda188593cbf1cf60b"
 	maxCLIOutputBytes   = 2 << 20
 	maxBrowserJSONBytes = 1 << 20
 	cliCommandTimeout   = 45 * time.Second
@@ -118,12 +118,13 @@ type authIdentity struct {
 }
 
 type lot struct {
-	LotID          string            `json:"lot_id"`
-	Name           string            `json:"name"`
-	OnHandGrams    int64             `json:"on_hand_grams"`
-	ReservedGrams  int64             `json:"reserved_grams"`
-	AvailableGrams int64             `json:"available_grams"`
-	Images         []imageProjection `json:"images"`
+	LotID              string            `json:"lot_id"`
+	Name               string            `json:"name"`
+	PricePerKgEURCents *int64            `json:"price_per_kg_eur_cents"`
+	OnHandGrams        int64             `json:"on_hand_grams"`
+	ReservedGrams      int64             `json:"reserved_grams"`
+	AvailableGrams     int64             `json:"available_grams"`
+	Images             []imageProjection `json:"images"`
 }
 
 type imageProjection struct {
@@ -136,6 +137,16 @@ type imageProjection struct {
 
 type lotPage struct {
 	Items []lot `json:"items"`
+}
+
+type inventoryTotals struct {
+	LotCount            int64  `json:"lot_count"`
+	OnHandGrams         int64  `json:"on_hand_grams"`
+	ReservedGrams       int64  `json:"reserved_grams"`
+	AvailableGrams      int64  `json:"available_grams"`
+	OnHandValueEURCents *int64 `json:"on_hand_value_eur_cents"`
+	PricedLotCount      int64  `json:"priced_lot_count"`
+	UnpricedLotCount    int64  `json:"unpriced_lot_count"`
 }
 
 type ledgerPage struct {
@@ -154,8 +165,24 @@ type reservationPage struct {
 		ClientReservationUUID string `json:"client_reservation_uuid"`
 		State                 string `json:"state"`
 		PlannedGrams          int64  `json:"planned_grams"`
+		ActualGrams           *int64 `json:"actual_grams"`
+		RoastCostEURCents     *int64 `json:"roast_cost_eur_cents"`
 		LotID                 string `json:"lot_id"`
 	} `json:"items"`
+}
+
+type conflictPage struct {
+	Items []struct {
+		ConflictID string `json:"conflict_id"`
+		LotID      string `json:"lot_id"`
+		State      string `json:"state"`
+	} `json:"items"`
+}
+
+type conflictDetail struct {
+	ConflictID string `json:"conflict_id"`
+	LotID      string `json:"lot_id"`
+	State      string `json:"state"`
 }
 
 type reservationMutation struct {
@@ -1096,6 +1123,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 		"--opening-reference", "opening-"+runID, "--idempotency-key", "cli-"+runID+"-create",
 	)
 	assertLotBalance(t, created, 5000, 0, 5000)
+	assertLotPrice(t, created, nil)
 	if !fullSHA.MatchString(pinnedServerRef) || len(created.LotID) != 32 {
 		t.Fatalf("created invalid lot ID %q", created.LotID)
 	}
@@ -1103,11 +1131,13 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	var shown lot
 	runner.runJSON(t, "", &shown, "inventory", "lot", "show", created.LotID)
 	assertLotBalance(t, shown, 5000, 0, 5000)
+	assertLotPrice(t, shown, nil)
 	var listed lotPage
 	runner.runJSON(t, "", &listed, "inventory", "lot", "list", "--q", lotName, "--all")
 	if len(listed.Items) != 1 || listed.Items[0].LotID != created.LotID {
 		t.Fatalf("admin lot list did not resolve the unique created lot: %+v", listed.Items)
 	}
+	assertLotPrice(t, listed.Items[0], nil)
 
 	memberRoot := filepath.Join(root, "member")
 	memberPaths := make(map[string]string)
@@ -1147,11 +1177,51 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	for _, item := range memberListed.Items {
 		if item.LotID == created.LotID && item.Name == lotName {
 			foundMemberLot = true
+			assertLotPrice(t, item, nil)
 		}
 	}
 	if !foundMemberLot {
-		t.Fatalf("member reduced lot list did not include created active lot: %+v", memberListed.Items)
+		t.Fatalf("member full lot list did not include created active lot: %+v", memberListed.Items)
 	}
+	var memberShown lot
+	memberRunner.runJSON(t, "", &memberShown, "inventory", "lot", "show", created.LotID)
+	assertLotPrice(t, memberShown, nil)
+
+	var priced lot
+	runner.runJSON(t, "", &priced,
+		"inventory", "lot", "update", created.LotID, "--price-per-kg-eur", "12.34",
+		"--idempotency-key", "cli-"+runID+"-price-set",
+	)
+	assertLotPrice(t, priced, int64Pointer(1234))
+	var adminPricedRead, memberPricedRead lot
+	runner.runJSON(t, "", &adminPricedRead, "inventory", "lot", "show", created.LotID)
+	memberRunner.runJSON(t, "", &memberPricedRead, "inventory", "lot", "show", created.LotID)
+	assertLotPrice(t, adminPricedRead, int64Pointer(1234))
+	assertLotPrice(t, memberPricedRead, int64Pointer(1234))
+
+	totalsArgs := []string{"inventory", "totals", "--q", lotName, "--state", "active", "--availability", "positive"}
+	var adminPricedTotals, memberPricedTotals inventoryTotals
+	runner.runJSON(t, "", &adminPricedTotals, totalsArgs...)
+	memberRunner.runJSON(t, "", &memberPricedTotals, totalsArgs...)
+	assertTotals(t, adminPricedTotals, inventoryTotals{
+		LotCount: 1, OnHandGrams: 5000, AvailableGrams: 5000,
+		OnHandValueEURCents: int64Pointer(6170), PricedLotCount: 1,
+	})
+	if !reflect.DeepEqual(adminPricedTotals, memberPricedTotals) {
+		t.Fatalf("admin/member filtered priced totals differ: admin=%+v member=%+v", adminPricedTotals, memberPricedTotals)
+	}
+
+	memberRunner.runJSONError(t, 5, "administrator_required",
+		"inventory", "lot", "update", created.LotID, "--price-per-kg-eur", "99.99",
+		"--idempotency-key", "cli-"+runID+"-deny-price-update",
+	)
+	runner.runJSON(t, "", &adminPricedRead, "inventory", "lot", "show", created.LotID)
+	memberRunner.runJSON(t, "", &memberPricedRead, "inventory", "lot", "show", created.LotID)
+	assertLotPrice(t, adminPricedRead, int64Pointer(1234))
+	assertLotPrice(t, memberPricedRead, int64Pointer(1234))
+
+	desktopItems := readDesktopBeanLots(t, httpClient, config.baseURL, memberToken)
+	assertDesktopLotOmitsFinancialFields(t, desktopItems, created.LotID)
 
 	occurredAt := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
 	var adjusted lot
@@ -1171,13 +1241,13 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if len(withImage.Images) != 1 || !withImage.Images[0].IsCover {
 		t.Fatalf("image add result = %+v, want one cover image", withImage.Images)
 	}
-	downloadPath := filepath.Join(paths["run"], "download.webp")
+	downloadPath := filepath.Join(memberPaths["run"], "download.webp")
 	var downloaded struct {
 		Path    string `json:"path"`
 		Variant string `json:"variant"`
 		Bytes   int64  `json:"bytes"`
 	}
-	runner.runJSON(t, "", &downloaded,
+	memberRunner.runJSON(t, "", &downloaded,
 		"inventory", "image", "download", "--variant", "display", created.LotID, withImage.Images[0].ImageID, downloadPath,
 	)
 	downloadBytes, err := os.ReadFile(downloadPath)
@@ -1189,15 +1259,11 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	}
 
 	for _, denied := range [][]string{
-		{"inventory", "lot", "show", created.LotID},
 		{"inventory", "lot", "create", "--name", "Denied member create", "--idempotency-key", "cli-" + runID + "-deny-create"},
 		{"inventory", "lot", "update", created.LotID, "--name", "Denied member update", "--idempotency-key", "cli-" + runID + "-deny-update"},
 		{"inventory", "lot", "archive", created.LotID, "--yes", "--idempotency-key", "cli-" + runID + "-deny-archive"},
 		{"inventory", "lot", "restore", created.LotID, "--idempotency-key", "cli-" + runID + "-deny-restore"},
-		{"inventory", "lot", "ledger", created.LotID},
-		{"inventory", "lot", "reservations", created.LotID},
 		{"inventory", "adjust", created.LotID, "--grams", "1", "--reason", "Denied member adjustment", "--yes", "--idempotency-key", "cli-" + runID + "-deny-adjust"},
-		{"inventory", "conflict", "list", "--lot", created.LotID},
 		{"inventory", "image", "add", "--idempotency-key", "cli-" + runID + "-deny-image", created.LotID, imagePath},
 	} {
 		memberRunner.runJSONError(t, 5, "administrator_required", denied...)
@@ -1219,6 +1285,10 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if reservation.Balance.OnHandGrams != 5750 || reservation.Balance.ReservedGrams != 1000 || reservation.Balance.AvailableGrams != 4750 {
 		t.Fatalf("reservation balance = %+v", reservation.Balance)
 	}
+	var reservedCosts reservationPage
+	memberRunner.runJSON(t, "", &reservedCosts, "inventory", "lot", "reservations", created.LotID, "--all")
+	assertReservationCost(t, reservedCosts, reservationUUID, "reserved", 1000, nil, int64Pointer(1234))
+
 	var finalized reservationMutation
 	memberRunner.runJSON(t, "", &finalized,
 		"inventory", "reservation", "finalize", reservationUUID, "--actual-grams", "900",
@@ -1227,6 +1297,10 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if finalized.Reservation.State != "finalized" || finalized.Balance.OnHandGrams != 4850 || finalized.Balance.ReservedGrams != 0 || finalized.Balance.AvailableGrams != 4850 {
 		t.Fatalf("member finalize result = %+v", finalized)
 	}
+	var finalizedCosts reservationPage
+	runner.runJSON(t, "", &finalizedCosts, "inventory", "lot", "reservations", created.LotID, "--all")
+	assertReservationCost(t, finalizedCosts, reservationUUID, "finalized", 1000, int64Pointer(900), int64Pointer(1111))
+
 	secondReservationUUID := randomHex(t, 16)
 	secondRoastUUID := randomHex(t, 16)
 	var secondReservation reservationMutation
@@ -1243,10 +1317,15 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if released.Reservation.State != "released" || released.Balance.OnHandGrams != 4850 || released.Balance.ReservedGrams != 0 || released.Balance.AvailableGrams != 4850 {
 		t.Fatalf("member release result = %+v", released)
 	}
+	var releasedCosts reservationPage
+	memberRunner.runJSON(t, "", &releasedCosts, "inventory", "lot", "reservations", created.LotID, "--all")
+	assertReservationCost(t, releasedCosts, reservationUUID, "finalized", 1000, int64Pointer(900), int64Pointer(1111))
+	assertReservationCost(t, releasedCosts, secondReservationUUID, "released", 250, nil, nil)
 
 	var authoritative lot
 	runner.runJSON(t, "", &authoritative, "inventory", "lot", "show", created.LotID)
 	assertLotBalance(t, authoritative, 4850, 0, 4850)
+	assertLotPrice(t, authoritative, int64Pointer(1234))
 	if authoritative.Name != lotName || len(authoritative.Images) != 1 {
 		t.Fatalf("authoritative lot content = name %q images %+v", authoritative.Name, authoritative.Images)
 	}
@@ -1254,9 +1333,14 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	if authoritativeImage.ImageID != withImage.Images[0].ImageID || !authoritativeImage.IsCover || authoritativeImage.Position != 0 || authoritativeImage.Caption == nil || *authoritativeImage.Caption != "Disposable integration image" || authoritativeImage.AltText == nil || *authoritativeImage.AltText != "Coffee sample" {
 		t.Fatalf("authoritative image metadata = %+v", authoritativeImage)
 	}
-	var ledger ledgerPage
+	var ledger, memberLedger ledgerPage
 	runner.runJSON(t, "", &ledger, "inventory", "lot", "ledger", created.LotID, "--all")
+	memberRunner.runJSON(t, "", &memberLedger, "inventory", "lot", "ledger", created.LotID, "--all")
 	assertLedger(t, ledger)
+	assertLedger(t, memberLedger)
+	if !reflect.DeepEqual(ledger, memberLedger) {
+		t.Fatalf("admin/member ledger reads differ: admin=%+v member=%+v", ledger, memberLedger)
+	}
 	var reservations reservationPage
 	runner.runJSON(t, "", &reservations, "inventory", "lot", "reservations", created.LotID, "--all")
 	if len(reservations.Items) != 2 {
@@ -1268,6 +1352,56 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	}
 	if states[reservationUUID] != "finalized" || states[secondReservationUUID] != "released" {
 		t.Fatalf("authoritative reservation states = %+v", states)
+	}
+	assertReservationCost(t, reservations, reservationUUID, "finalized", 1000, int64Pointer(900), int64Pointer(1111))
+	assertReservationCost(t, reservations, secondReservationUUID, "released", 250, nil, nil)
+
+	var cleared lot
+	runner.runJSON(t, "", &cleared,
+		"inventory", "lot", "update", created.LotID, "--clear", "price-per-kg-eur",
+		"--idempotency-key", "cli-"+runID+"-price-clear",
+	)
+	assertLotPrice(t, cleared, nil)
+	var adminClearedRead, memberClearedRead lot
+	runner.runJSON(t, "", &adminClearedRead, "inventory", "lot", "show", created.LotID)
+	memberRunner.runJSON(t, "", &memberClearedRead, "inventory", "lot", "show", created.LotID)
+	assertLotPrice(t, adminClearedRead, nil)
+	assertLotPrice(t, memberClearedRead, nil)
+
+	var adminClearedTotals, memberClearedTotals inventoryTotals
+	runner.runJSON(t, "", &adminClearedTotals, totalsArgs...)
+	memberRunner.runJSON(t, "", &memberClearedTotals, totalsArgs...)
+	assertTotals(t, adminClearedTotals, inventoryTotals{
+		LotCount: 1, OnHandGrams: 4850, AvailableGrams: 4850, UnpricedLotCount: 1,
+	})
+	if !reflect.DeepEqual(adminClearedTotals, memberClearedTotals) {
+		t.Fatalf("admin/member filtered unpriced totals differ: admin=%+v member=%+v", adminClearedTotals, memberClearedTotals)
+	}
+
+	var adminUnpricedReservations, memberUnpricedReservations reservationPage
+	runner.runJSON(t, "", &adminUnpricedReservations, "inventory", "lot", "reservations", created.LotID, "--all")
+	memberRunner.runJSON(t, "", &memberUnpricedReservations, "inventory", "lot", "reservations", created.LotID, "--all")
+	for _, page := range []reservationPage{adminUnpricedReservations, memberUnpricedReservations} {
+		assertReservationCost(t, page, reservationUUID, "finalized", 1000, int64Pointer(900), nil)
+		assertReservationCost(t, page, secondReservationUUID, "released", 250, nil, nil)
+	}
+
+	var conflicted lot
+	runner.runJSON(t, "", &conflicted,
+		"inventory", "adjust", created.LotID, "--grams", "-5000",
+		"--reason", "Disposable CLI integration conflict", "--reference", "conflict-"+runID,
+		"--idempotency-key", "cli-"+runID+"-conflict", "--yes",
+	)
+	assertLotBalance(t, conflicted, -150, 0, -150)
+	var memberConflicts conflictPage
+	memberRunner.runJSON(t, "", &memberConflicts, "inventory", "conflict", "list", "--lot", created.LotID, "--all")
+	if len(memberConflicts.Items) != 1 || memberConflicts.Items[0].LotID != created.LotID || memberConflicts.Items[0].State != "open" {
+		t.Fatalf("member conflict read = %+v, want one open disposable conflict", memberConflicts.Items)
+	}
+	var memberConflict conflictDetail
+	memberRunner.runJSON(t, "", &memberConflict, "inventory", "conflict", "show", memberConflicts.Items[0].ConflictID)
+	if memberConflict.ConflictID != memberConflicts.Items[0].ConflictID || memberConflict.LotID != created.LotID || memberConflict.State != "open" {
+		t.Fatalf("member conflict detail = %+v", memberConflict)
 	}
 
 	var memberLogout struct {
@@ -1791,6 +1925,77 @@ func assertLotBalance(t *testing.T, value lot, onHand, reserved, available int64
 	if value.OnHandGrams != onHand || value.ReservedGrams != reserved || value.AvailableGrams != available {
 		t.Fatalf("lot balance = (%d, %d, %d), want (%d, %d, %d)", value.OnHandGrams, value.ReservedGrams, value.AvailableGrams, onHand, reserved, available)
 	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func assertLotPrice(t *testing.T, value lot, want *int64) {
+	t.Helper()
+	if !reflect.DeepEqual(value.PricePerKgEURCents, want) {
+		t.Fatalf("lot %s price = %v, want %v", value.LotID, value.PricePerKgEURCents, want)
+	}
+}
+
+func assertTotals(t *testing.T, got, want inventoryTotals) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inventory totals = %+v, want %+v", got, want)
+	}
+}
+
+func assertReservationCost(t *testing.T, page reservationPage, clientUUID, state string, planned int64, actual, cost *int64) {
+	t.Helper()
+	for _, item := range page.Items {
+		if item.ClientReservationUUID != clientUUID {
+			continue
+		}
+		if item.State != state || item.PlannedGrams != planned || !reflect.DeepEqual(item.ActualGrams, actual) || !reflect.DeepEqual(item.RoastCostEURCents, cost) {
+			t.Fatalf("reservation %s projection = %+v, want state=%s planned=%d actual=%v cost=%v", clientUUID, item, state, planned, actual, cost)
+		}
+		return
+	}
+	t.Fatalf("reservation %s was absent from projection: %+v", clientUUID, page.Items)
+}
+
+func readDesktopBeanLots(t *testing.T, client *http.Client, baseURL, token string) []map[string]json.RawMessage {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/inventory/bean-lots?limit=100", nil)
+	if err != nil {
+		t.Fatal("could not construct reduced desktop read request")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("reduced desktop read request failed")
+	}
+	defer response.Body.Close()
+	var page struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := readBoundedJSON(response.Body, maxBrowserJSONBytes, token, &page); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("reduced desktop read returned HTTP %d with cache control %q", response.StatusCode, response.Header.Get("Cache-Control"))
+	}
+	return page.Items
+}
+
+func assertDesktopLotOmitsFinancialFields(t *testing.T, items []map[string]json.RawMessage, lotID string) {
+	t.Helper()
+	for _, item := range items {
+		var candidate string
+		if err := json.Unmarshal(item["lot_id"], &candidate); err != nil || candidate != lotID {
+			continue
+		}
+		for _, field := range []string{"price_per_kg_eur_cents", "roast_cost_eur_cents", "on_hand_value_eur_cents"} {
+			if _, exists := item[field]; exists {
+				t.Fatalf("reduced desktop lot unexpectedly exposed %s: %+v", field, item)
+			}
+		}
+		return
+	}
+	t.Fatalf("reduced desktop projection did not contain disposable lot %s", lotID)
 }
 
 func assertLedger(t *testing.T, page ledgerPage) {

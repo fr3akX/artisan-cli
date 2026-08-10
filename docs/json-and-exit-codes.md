@@ -1,7 +1,7 @@
 # JSON, output, pagination, and exit codes
 
 This contract applies with Artisan Server commit
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later. The compatible server
+`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. The compatible server
 must be deployed before the CLI is released.
 
 ## Output streams and envelopes

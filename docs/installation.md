@@ -1,7 +1,7 @@
 # Installing Artisan CLI
 
 Artisan CLI requires Artisan Server at commit
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later. Deploy the compatible
+`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy the compatible
 server before releasing or installing this CLI.
 
 ## Release downloads

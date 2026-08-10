@@ -44,10 +44,10 @@ type InventoryBalance struct {
 
 // ReservationMutationResponse is the exact desktop reservation mutation projection.
 type ReservationMutationResponse struct {
-	Reservation      InventoryReservation `json:"reservation"`
-	Balance          InventoryBalance     `json:"balance"`
-	Conflict         *InventoryConflict   `json:"conflict"`
-	IdempotentReplay bool                 `json:"idempotent_replay"`
+	Reservation      DesktopInventoryReservation `json:"reservation"`
+	Balance          InventoryBalance            `json:"balance"`
+	Conflict         *InventoryConflict          `json:"conflict"`
+	IdempotentReplay bool                        `json:"idempotent_replay"`
 }
 
 // InventoryConflictResolutionWrite is the strict admin conflict resolution request.

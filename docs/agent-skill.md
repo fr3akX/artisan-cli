@@ -3,7 +3,7 @@
 Artisan CLI embeds the canonical
 [`artisan-inventory` skill](../skills/artisan-inventory/SKILL.md) at build time.
 The skill and this CLI require Artisan Server commit
-`4c0136fe98f6728f4bb94e416c5abe570e7f4831` or later; deploy that server before
+`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later; deploy that server before
 the CLI release.
 
 ## Inspect or install
