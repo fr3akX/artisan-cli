@@ -36,10 +36,28 @@ func validDetailJSON() string {
 	return summary + `,
 		"producer":null,"supplier":"Supplier","external_reference":null,"received_date":"2026-08-01",
 		"varietals":["Heirloom"],"sca_score":"87.50","processing_detail":null,
-		"altitude_min_metres":1900,"altitude_max_metres":2100,"notes":null,"images":[` + validImageJSON() + `],
+		"altitude_min_metres":1900,"altitude_max_metres":2100,"description":"Public story\nSecond paragraph","notes":null,"images":[` + validImageJSON() + `],
 		"created_at":"` + inventoryTimestamp + `","archived_at":null,
 		"links":{"self":"/api/v1/inventory/admin/bean-lots/` + inventoryLotID + `","ledger":"/api/v1/inventory/admin/bean-lots/` + inventoryLotID + `/ledger","reservations":"/api/v1/inventory/admin/bean-lots/` + inventoryLotID + `/reservations"}
 	}`
+}
+
+func TestBeanLotDescriptionFullDetailContract(t *testing.T) {
+	var detail BeanLotDetail
+	if err := decodeOneJSON([]byte(validDetailJSON()), &detail); err != nil {
+		t.Fatalf("decodeOneJSON() error = %v", err)
+	}
+	if detail.Description == nil || *detail.Description != "Public story\nSecond paragraph" {
+		t.Fatalf("description = %#v", detail.Description)
+	}
+
+	nullDescription := strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, `"description":null`, 1)
+	if err := decodeOneJSON([]byte(nullDescription), &detail); err != nil {
+		t.Fatalf("null description rejected: %v", err)
+	}
+	if detail.Description != nil {
+		t.Fatalf("null description = %#v", detail.Description)
+	}
 }
 
 func TestBeanLotDetailAcceptsCoherentAdminOrReadProjectionRoot(t *testing.T) {
@@ -364,7 +382,7 @@ func TestInventoryModelsRejectNullForEveryRequiredNonNullField(t *testing.T) {
 			}
 		})
 	}
-	for _, field := range []string{"producer", "varietals"} {
+	for _, field := range []string{"producer", "description", "varietals"} {
 		t.Run("detail missing distinct/"+field, func(t *testing.T) {
 			payload := mutateInventoryJSONField(t, validDetailJSON(), field, nil, true)
 			if err := json.Unmarshal(payload, &BeanLotDetail{}); err == nil || !strings.Contains(err.Error(), "missing required field") {

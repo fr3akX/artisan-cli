@@ -190,6 +190,27 @@ func TestInventoryReadRoutesNormalizeDashedAndCompactUUIDsAndUseReadRoot(t *test
 	}
 }
 
+func TestBeanLotDescriptionRejectsMalformedFullDetailResponses(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing", body: strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph",`, "", 1)},
+		{name: "wrong type", body: strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, `"description":123`, 1)},
+		{name: "noncanonical line ending", body: strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, "\"description\":\"line\rbreak\"", 1)},
+		{name: "too many code points", body: strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, `"description":"`+strings.Repeat("x", 2001)+`"`, 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := inventoryAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeInventoryJSON(w, test.body)
+			})
+			if _, failure := client.BeanLot(context.Background(), inventoryLotID); failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %#v", failure)
+			}
+		})
+	}
+}
+
 func TestInventoryReadRejectsInvalidLocalUUIDWithoutRequest(t *testing.T) {
 	requests := 0
 	client := inventoryAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {

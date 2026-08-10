@@ -641,7 +641,7 @@ func inventoryExpectedLotDetail() map[string]any {
 	for key, item := range map[string]any{
 		"producer": "Producer", "supplier": nil, "external_reference": "EXT-1", "received_date": "2026-08-01",
 		"varietals": []any{"Heirloom", "74110"}, "sca_score": "87.50", "processing_detail": "Raised beds",
-		"altitude_min_metres": json.Number("1900"), "altitude_max_metres": nil, "notes": "seasonal",
+		"altitude_min_metres": json.Number("1900"), "altitude_max_metres": nil, "description": nil, "notes": "seasonal",
 		"images": []any{inventoryExpectedImage()}, "created_at": commandTimestamp, "archived_at": nil,
 		"links": map[string]any{
 			"self":         "/api/v1/inventory/read/bean-lots/" + commandLotID,
@@ -776,11 +776,11 @@ func commandConflictJSON() string {
 }
 
 func commandLotDetailFullJSON() string {
-	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
+	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"description":null,"notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
 }
 
 func commandLotDetailJSON() string {
-	return strings.TrimSuffix(commandInventorySummary(commandLotID, "Lot", 5000), "}") + `,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
+	return strings.TrimSuffix(commandInventorySummary(commandLotID, "Lot", 5000), "}") + `,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"description":null,"notes":null,"images":[],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
 }
 func TestRouteScopedHostileProjectionIsNeverPrinted(t *testing.T) {
 	const hostileName = "hostile-valid-projection"

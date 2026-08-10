@@ -93,6 +93,7 @@ type BeanLotDetail struct {
 	ProcessingDetail  *string          `json:"processing_detail"`
 	AltitudeMinMetres *int64           `json:"altitude_min_metres"`
 	AltitudeMaxMetres *int64           `json:"altitude_max_metres"`
+	Description       *string          `json:"description"`
 	Notes             *string          `json:"notes"`
 	Images            []InventoryImage `json:"images"`
 	CreatedAt         string           `json:"created_at"`
@@ -267,6 +268,7 @@ func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
 		ProcessingDetail  *string          `json:"processing_detail"`
 		AltitudeMinMetres *int64           `json:"altitude_min_metres"`
 		AltitudeMaxMetres *int64           `json:"altitude_max_metres"`
+		Description       *string          `json:"description"`
 		Notes             *string          `json:"notes"`
 		Images            []InventoryImage `json:"images"`
 		CreatedAt         string           `json:"created_at"`
@@ -275,8 +277,8 @@ func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
 	}
 	var decoded detailFields
 	if err := decodeRequiredObject(data, &decoded,
-		[]string{"producer", "supplier", "external_reference", "received_date", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "notes", "archived_at"},
-		"producer", "supplier", "external_reference", "received_date", "varietals", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "notes", "images", "created_at", "archived_at", "links"); err != nil {
+		[]string{"producer", "supplier", "external_reference", "received_date", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "description", "notes", "archived_at"},
+		"producer", "supplier", "external_reference", "received_date", "varietals", "sca_score", "processing_detail", "altitude_min_metres", "altitude_max_metres", "description", "notes", "images", "created_at", "archived_at", "links"); err != nil {
 		return err
 	}
 	if err := rejectNullArrayElements(data, "varietals", "images"); err != nil {
@@ -287,7 +289,7 @@ func (value *BeanLotDetail) UnmarshalJSON(data []byte) error {
 		ExternalReference: decoded.ExternalReference, ReceivedDate: decoded.ReceivedDate,
 		Varietals: decoded.Varietals, SCAScore: decoded.SCAScore, ProcessingDetail: decoded.ProcessingDetail,
 		AltitudeMinMetres: decoded.AltitudeMinMetres, AltitudeMaxMetres: decoded.AltitudeMaxMetres,
-		Notes: decoded.Notes, Images: decoded.Images, CreatedAt: decoded.CreatedAt,
+		Description: decoded.Description, Notes: decoded.Notes, Images: decoded.Images, CreatedAt: decoded.CreatedAt,
 		ArchivedAt: decoded.ArchivedAt, Links: decoded.Links,
 	}
 	return value.validate()
@@ -532,7 +534,7 @@ func (value BeanLotDetail) validate() error {
 	if err := value.BeanLotSummary.validate(); err != nil {
 		return err
 	}
-	if !validResponseOptionalText(value.Producer, 200, 800, false) || !validResponseOptionalText(value.Supplier, 200, 800, false) || !validResponseOptionalText(value.ExternalReference, 200, 800, false) || !validResponseOptionalText(value.ProcessingDetail, 200, 800, false) || !validResponseOptionalText(value.Notes, 10000, 40000, true) {
+	if !validResponseOptionalText(value.Producer, 200, 800, false) || !validResponseOptionalText(value.Supplier, 200, 800, false) || !validResponseOptionalText(value.ExternalReference, 200, 800, false) || !validResponseOptionalText(value.ProcessingDetail, 200, 800, false) || !validResponseOptionalText(value.Description, 2000, 8000, true) || !validResponseOptionalText(value.Notes, 10000, 40000, true) {
 		return errors.New("invalid bean lot text")
 	}
 	if value.ReceivedDate != nil && !validDate(*value.ReceivedDate) {

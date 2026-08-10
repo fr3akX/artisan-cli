@@ -31,6 +31,7 @@ type BeanLotFields struct {
 	ProcessingDetail   *string  `json:"processing_detail"`
 	AltitudeMinMetres  *int64   `json:"altitude_min_metres"`
 	AltitudeMaxMetres  *int64   `json:"altitude_max_metres"`
+	Description        *string  `json:"description"`
 	Notes              *string  `json:"notes"`
 }
 
@@ -97,6 +98,7 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 		ProcessingDetail   *string         `json:"processing_detail"`
 		AltitudeMinMetres  *int64          `json:"altitude_min_metres"`
 		AltitudeMaxMetres  *int64          `json:"altitude_max_metres"`
+		Description        *string         `json:"description"`
 		Notes              *string         `json:"notes"`
 	}
 	var decoded wire
@@ -120,7 +122,7 @@ func (fields *BeanLotFields) UnmarshalJSON(data []byte) error {
 		ExternalReference: decoded.ExternalReference, ReceivedDate: decoded.ReceivedDate, CropYear: decoded.CropYear,
 		PricePerKgEURCents: decoded.PricePerKgEURCents, Varietals: varietals, SCAScore: score, ProcessingMethod: decoded.ProcessingMethod,
 		ProcessingDetail: decoded.ProcessingDetail, AltitudeMinMetres: decoded.AltitudeMinMetres,
-		AltitudeMaxMetres: decoded.AltitudeMaxMetres, Notes: decoded.Notes,
+		AltitudeMaxMetres: decoded.AltitudeMaxMetres, Description: decoded.Description, Notes: decoded.Notes,
 	}
 	return nil
 }
@@ -150,7 +152,7 @@ func NewBeanLotPatch(fields map[string]any) (BeanLotPatch, *output.Error) {
 		"name": "string", "origin": "nullable-string", "producer": "nullable-string", "supplier": "nullable-string",
 		"external_reference": "nullable-string", "received_date": "date", "crop_year": "integer", "price_per_kg_eur_cents": "price", "varietals": "varietals",
 		"sca_score": "score", "processing_method": "processing", "processing_detail": "nullable-string",
-		"altitude_min_metres": "altitude", "altitude_max_metres": "altitude", "notes": "nullable-string", "state": "state",
+		"altitude_min_metres": "altitude", "altitude_max_metres": "altitude", "description": "nullable-string", "notes": "nullable-string", "state": "state",
 	}
 	canonical := make(map[string]any, len(fields))
 	for name, value := range fields {
@@ -206,6 +208,7 @@ func normalizeBeanLotCreateManifest(manifest BeanLotCreateManifest) (BeanLotCrea
 		{&manifest.Fields.Supplier, 200, 800, false},
 		{&manifest.Fields.ExternalReference, 200, 800, false},
 		{&manifest.Fields.ProcessingDetail, 200, 800, false},
+		{&manifest.Fields.Description, 2000, 8000, true},
 		{&manifest.Fields.Notes, 10000, 40000, true},
 		{&manifest.OpeningReason, 2000, 8000, true},
 		{&manifest.OpeningReference, 200, 800, false},
@@ -384,6 +387,9 @@ func DecodeBeanLotCreateManifest(data []byte) (BeanLotCreateManifest, *output.Er
 
 // DecodeBeanLotPatch strictly decodes one sparse JSON object.
 func DecodeBeanLotPatch(data []byte) (BeanLotPatch, *output.Error) {
+	if !utf8.Valid(data) {
+		return BeanLotPatch{}, mutationUsage("invalid_json", "Bean lot update JSON must use valid UTF-8")
+	}
 	var fields map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -408,6 +414,9 @@ func newJSONBody(value any) (func() (io.ReadCloser, string, error), error) {
 }
 
 func decodeStrictMutationJSON(data []byte, destination any) error {
+	if !utf8.Valid(data) {
+		return errors.New("invalid UTF-8 in mutation JSON")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
@@ -590,6 +599,8 @@ func patchTextLimits(name string) (int, int, bool) {
 	switch name {
 	case "origin":
 		return 100, 400, false
+	case "description":
+		return 2000, 8000, true
 	case "notes":
 		return 10000, 40000, true
 	default:

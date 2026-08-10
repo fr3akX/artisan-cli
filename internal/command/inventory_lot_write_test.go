@@ -96,8 +96,8 @@ func TestInventoryLotPricePerKgCreateUpdateAndClearBodies(t *testing.T) {
 		}
 	}
 
-	const omitted = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
-	const priced = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":1234,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
+	const omitted = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"description":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
+	const priced = `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":1234,"varietals":[],"sca_score":null,"processing_method":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"description":null,"notes":null},"opening_grams":0,"opening_reason":null,"opening_reference":null,"images":[]}`
 	want := []string{omitted, priced, `{"notes":"note"}`, `{"price_per_kg_eur_cents":0}`, `{"price_per_kg_eur_cents":null}`, `{"price_per_kg_eur_cents":null}`}
 	if fmt.Sprint(bodies) != fmt.Sprint(want) {
 		t.Fatalf("bodies = %q, want %q", bodies, want)

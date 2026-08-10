@@ -23,7 +23,7 @@ const mutationLotID = "11111111111141118111111111111111"
 const mutationStamp = "2026-08-07T12:34:56.000000Z"
 
 func mutationLotJSON(onHand int64) string {
-	return fmt.Sprintf(`{"lot_id":"%s","name":"Lot","origin":null,"processing_method":null,"crop_year":null,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":"%s","producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"%s","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/%s","ledger":"/api/v1/inventory/admin/bean-lots/%s/ledger","reservations":"/api/v1/inventory/admin/bean-lots/%s/reservations"}}`, mutationLotID, onHand, onHand, mutationStamp, mutationStamp, mutationLotID, mutationLotID, mutationLotID)
+	return fmt.Sprintf(`{"lot_id":"%s","name":"Lot","origin":null,"processing_method":null,"crop_year":null,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":"%s","producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"description":null,"notes":null,"images":[],"created_at":"%s","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/%s","ledger":"/api/v1/inventory/admin/bean-lots/%s/ledger","reservations":"/api/v1/inventory/admin/bean-lots/%s/reservations"}}`, mutationLotID, onHand, onHand, mutationStamp, mutationStamp, mutationLotID, mutationLotID, mutationLotID)
 }
 
 func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
@@ -75,7 +75,7 @@ func TestMutationMethodsUseExactRoutesBodiesAndKey(t *testing.T) {
 		t.Fatalf("content types = %v", types)
 	}
 	gotManifest := rawMutationManifest(t, bodies[0], types[0])
-	wantManifest := `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":["SL28","Ruiru 11"],"sca_score":null,"processing_method":"washed","processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null},"opening_grams":25,"opening_reason":"count\nline","opening_reference":null,"images":[]}`
+	wantManifest := `{"fields":{"name":"Lot","origin":null,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"crop_year":null,"price_per_kg_eur_cents":null,"varietals":["SL28","Ruiru 11"],"sca_score":null,"processing_method":"washed","processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"description":null,"notes":null},"opening_grams":25,"opening_reason":"count\nline","opening_reference":null,"images":[]}`
 	if gotManifest != wantManifest {
 		t.Fatalf("manifest body = %q, want %q", gotManifest, wantManifest)
 	}
@@ -257,26 +257,119 @@ func TestBeanLotPriceCreateAndPatchContracts(t *testing.T) {
 }
 
 func TestMutationNormalizationAndRelatedProcessingRules(t *testing.T) {
-	manifest, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"  Lot  ","origin":"  Kenya  ","varietals":["  SL28  "],"processing_method":"washed","processing_detail":"  \t "},"opening_reason":" first\r\nsecond ","opening_reference":"  ","images":[]}`))
+	description := "  Cafe\u0301 story\r\nSecond paragraph  "
+	manifest := BeanLotCreateManifest{
+		Fields: BeanLotFields{
+			Name:        "Lot",
+			Description: &description,
+			Varietals:   []string{},
+		},
+		Images: []ImageUploadManifest{},
+	}
+	normalized, failure := normalizeBeanLotCreateManifest(manifest)
+	if failure != nil {
+		t.Fatalf("normalizeBeanLotCreateManifest() failure = %#v", failure)
+	}
+	if normalized.Fields.Description == nil || *normalized.Fields.Description != "Café story\nSecond paragraph" {
+		t.Fatalf("description = %#v", normalized.Fields.Description)
+	}
+
+	manifest, failure = DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"  Lot  ","origin":"  Kenya  ","description":" first\rsecond ","varietals":["  SL28  "],"processing_method":"washed","processing_detail":"  \t "},"opening_reason":" first\r\nsecond ","opening_reference":"  ","images":[]}`))
 	if failure != nil {
 		t.Fatal(failure)
 	}
-	if manifest.Fields.Name != "Lot" || *manifest.Fields.Origin != "Kenya" || manifest.Fields.Varietals[0] != "SL28" || manifest.Fields.ProcessingDetail != nil || manifest.OpeningReason == nil || *manifest.OpeningReason != "first\nsecond" || manifest.OpeningReference != nil {
+	if manifest.Fields.Name != "Lot" || *manifest.Fields.Origin != "Kenya" || manifest.Fields.Description == nil || *manifest.Fields.Description != "first\nsecond" || manifest.Fields.Varietals[0] != "SL28" || manifest.Fields.ProcessingDetail != nil || manifest.OpeningReason == nil || *manifest.OpeningReason != "first\nsecond" || manifest.OpeningReference != nil {
 		t.Fatalf("normalized manifest = %#v", manifest)
 	}
 	if _, failure = DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","varietals":[],"processing_method":"other","processing_detail":"  "},"images":[]}`)); failure == nil {
 		t.Fatal("blank detail authorized other processing")
 	}
-	patch, failure := DecodeBeanLotPatch([]byte(`{"origin":" Kenya ","notes":" first\rsecond ","processing_method":"washed","processing_detail":"  "}`))
+	blank, failure := DecodeBeanLotCreateManifest([]byte(`{"fields":{"name":"Lot","description":" \t ","varietals":[]},"images":[]}`))
+	if failure != nil || blank.Fields.Description != nil {
+		t.Fatalf("blank description = %#v, %#v", blank.Fields.Description, failure)
+	}
+
+	patch, failure := DecodeBeanLotPatch([]byte(`{"description":" first\r\nsecond "}`))
+	if failure != nil || !patch.HasField("description") {
+		t.Fatalf("DecodeBeanLotPatch() = %#v, %#v", patch, failure)
+	}
+	encoded, _ := json.Marshal(patch)
+	if string(encoded) != `{"description":"first\nsecond"}` {
+		t.Fatalf("patch JSON = %s", encoded)
+	}
+	clear, failure := DecodeBeanLotPatch([]byte(`{"description":null}`))
+	if failure != nil || !clear.HasField("description") {
+		t.Fatalf("clear patch = %#v, %#v", clear, failure)
+	}
+	encoded, _ = json.Marshal(clear)
+	if string(encoded) != `{"description":null}` {
+		t.Fatalf("clear JSON = %s", encoded)
+	}
+	blankPatch, failure := DecodeBeanLotPatch([]byte(`{"description":" \t "}`))
+	if failure != nil {
+		t.Fatalf("blank patch failure = %#v", failure)
+	}
+	encoded, _ = json.Marshal(blankPatch)
+	if string(encoded) != `{"description":null}` {
+		t.Fatalf("blank patch JSON = %s", encoded)
+	}
+	omitted, failure := DecodeBeanLotPatch([]byte(`{"origin":null}`))
+	if failure != nil || omitted.HasField("description") {
+		t.Fatalf("omitted description patch = %#v, %#v", omitted, failure)
+	}
+
+	patch, failure = DecodeBeanLotPatch([]byte(`{"origin":" Kenya ","notes":" first\rsecond ","processing_method":"washed","processing_detail":"  "}`))
 	if failure != nil {
 		t.Fatal(failure)
 	}
-	encoded, _ := json.Marshal(patch)
+	encoded, _ = json.Marshal(patch)
 	if string(encoded) != `{"notes":"first\nsecond","origin":"Kenya","processing_detail":null,"processing_method":"washed"}` {
 		t.Fatalf("normalized patch = %s", encoded)
 	}
 	if _, failure = DecodeBeanLotPatch([]byte(`{"processing_method":"other","processing_detail":" \t "}`)); failure == nil {
 		t.Fatal("blank patch detail authorized other processing")
+	}
+}
+
+func TestBeanLotDescriptionMutationBoundariesAndInvalidText(t *testing.T) {
+	accepted := strings.Repeat("😀", 2000)
+	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Description: &accepted, Varietals: []string{}}, Images: []ImageUploadManifest{}}
+	if failure := ValidateBeanLotCreateManifest(manifest); failure != nil {
+		t.Fatalf("exact description boundary rejected: %#v", failure)
+	}
+	patch, failure := NewBeanLotPatch(map[string]any{"description": accepted})
+	if failure != nil || !patch.HasField("description") {
+		t.Fatalf("exact patch boundary rejected: %#v, %#v", patch, failure)
+	}
+
+	for name, invalid := range map[string]string{
+		"2001 code points": strings.Repeat("😀", 2001),
+		"invalid UTF-8":    string([]byte{0xff}),
+		"NUL":              "line\x00break",
+		"C1 control":       "line\u0085break",
+	} {
+		t.Run(name+" create", func(t *testing.T) {
+			manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Description: &invalid, Varietals: []string{}}, Images: []ImageUploadManifest{}}
+			if failure := ValidateBeanLotCreateManifest(manifest); failure == nil {
+				t.Fatalf("accepted description %q", name)
+			}
+		})
+		t.Run(name+" patch", func(t *testing.T) {
+			if _, failure := NewBeanLotPatch(map[string]any{"description": invalid}); failure == nil {
+				t.Fatalf("accepted patch description %q", name)
+			}
+		})
+	}
+
+	invalidCreateJSON := append([]byte(`{"fields":{"name":"Lot","description":"`), 0xff)
+	invalidCreateJSON = append(invalidCreateJSON, []byte(`","varietals":[]},"images":[]}`)...)
+	if _, failure := DecodeBeanLotCreateManifest(invalidCreateJSON); failure == nil {
+		t.Fatal("accepted invalid UTF-8 create JSON")
+	}
+	invalidPatchJSON := append([]byte(`{"description":"`), 0xff)
+	invalidPatchJSON = append(invalidPatchJSON, []byte(`"}`)...)
+	if _, failure := DecodeBeanLotPatch(invalidPatchJSON); failure == nil {
+		t.Fatal("accepted invalid UTF-8 patch JSON")
 	}
 }
 
