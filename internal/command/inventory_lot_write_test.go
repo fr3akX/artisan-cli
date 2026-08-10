@@ -132,12 +132,13 @@ func TestInventoryLotDescriptionUpdateClearAndConflictAreLocal(t *testing.T) {
 		t.Fatalf("bodies = %q, want %q", bodies, wantBodies)
 	}
 
-	conflict := runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "--json", "inventory", "lot", "update", commandLotID, "--description", "story", "--clear", "description")
+	requestsBeforeConflict := requests.Load()
+	conflict := runAuthCommand(t, runtime, "--json", "inventory", "lot", "update", commandLotID, "--description", "story", "--clear", "description")
 	if conflict.code != 2 || !strings.Contains(conflict.stdout, `"code":"conflicting_field"`) {
-		t.Fatalf("conflict before configuration = %#v", conflict)
+		t.Fatalf("conflict with configured runtime = %#v", conflict)
 	}
-	if requests.Load() != 2 {
-		t.Fatalf("conflict sent request; requests = %d", requests.Load())
+	if conflictRequests := requests.Load() - requestsBeforeConflict; conflictRequests != 0 {
+		t.Fatalf("configured conflict sent %d requests", conflictRequests)
 	}
 }
 

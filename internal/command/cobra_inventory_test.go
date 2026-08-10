@@ -201,8 +201,16 @@ func TestInventoryPriceAndDescriptionCobraHelpCompletionAndPreservation(t *testi
 		if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, "--price-per-kg-eur") {
 			t.Errorf("%s help = %#v", leaf, result)
 		}
-		if !strings.Contains(result.stdout, "--description string") || !strings.Contains(result.stdout, "Public description shown on linked public roast pages") {
-			t.Errorf("%s help missing description flag:\n%s", leaf, result.stdout)
+		const wantDescriptionEntry = "--description string Public description shown on linked public roast pages"
+		descriptionEntryFound := false
+		for _, line := range strings.Split(result.stdout, "\n") {
+			if strings.Join(strings.Fields(line), " ") == wantDescriptionEntry {
+				descriptionEntryFound = true
+				break
+			}
+		}
+		if !descriptionEntryFound {
+			t.Errorf("%s help missing description flag entry %q:\n%s", leaf, wantDescriptionEntry, result.stdout)
 		}
 	}
 
