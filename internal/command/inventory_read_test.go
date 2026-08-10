@@ -1,6 +1,8 @@
 package command
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 const commandLotID = "11111111111141118111111111111111"
@@ -188,6 +191,186 @@ func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 			t.Fatalf("stdout %q does not contain %q", result.stdout, exact)
 		}
 	}
+}
+
+func TestInventoryLotListHumanShowsPricePerKg(t *testing.T) {
+	zeroPrice := strings.Replace(commandInventorySummary(commandImageID, "Zero", 20), `"price_per_kg_eur_cents":null`, `"price_per_kg_eur_cents":0`, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"items":[%s,%s,%s],"next_cursor":null}`, commandInventorySummaryFull(), zeroPrice, commandInventorySummary(commandEntryID, "Unpriced", 30))
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "lot", "list")
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, want := range []string{"PRICE/KG", "€12.34/kg", "€0.00/kg", "Unpriced"} {
+		if !strings.Contains(result.stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, result.stdout)
+		}
+	}
+	unpricedRow := "33333333333343338333333333333333"
+	for _, line := range strings.Split(result.stdout, "\n") {
+		if strings.Contains(line, unpricedRow) && !strings.Contains(line, "  -  ") {
+			t.Errorf("unpriced row does not contain null marker: %q", line)
+		}
+	}
+}
+
+func TestInventoryLotPriceHumanDetailUsesExactEUR(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, commandLotDetailFullJSON())
+	}))
+	defer server.Close()
+
+	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "lot", "show", commandLotID)
+	if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, "Price per kg: €12.34/kg\n") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestInventoryReservationHumanTableShowsAuthoritativeRoastCost(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		wireCost string
+		want     string
+	}{
+		{name: "priced", wireCost: "617", want: "€6.17"},
+		{name: "unpriced", wireCost: "null", want: "-"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := strings.Replace(commandReservationJSON(), `"roast_cost_eur_cents":5678`, `"roast_cost_eur_cents":`+test.wireCost, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":null}`, response)
+			}))
+			defer server.Close()
+
+			result := runAuthCommand(t, inventoryRuntime(t, server.URL), "inventory", "lot", "reservations", commandLotID)
+			if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, "ROAST COST") || !strings.Contains(result.stdout, test.want) {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestInventoryTotalsHumanUsesServerValuesAndExactMoney(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{
+			name:     "positive",
+			response: `{"lot_count":3,"on_hand_grams":1000,"reserved_grams":250,"available_grams":750,"on_hand_value_eur_cents":1234,"priced_lot_count":2,"unpriced_lot_count":1}`,
+			want: "Matching lots: 3\nOn-hand grams: 1000\nReserved grams: 250\nAvailable grams: 750\n" +
+				"On-hand EUR value: €12.34\nPriced lots: 2\nUnpriced lots: 1\n",
+		},
+		{
+			name:     "null",
+			response: `{"lot_count":1,"on_hand_grams":1000,"reserved_grams":0,"available_grams":1000,"on_hand_value_eur_cents":null,"priced_lot_count":0,"unpriced_lot_count":1}`,
+			want: "Matching lots: 1\nOn-hand grams: 1000\nReserved grams: 0\nAvailable grams: 1000\n" +
+				"On-hand EUR value: -\nPriced lots: 0\nUnpriced lots: 1\n",
+		},
+		{
+			name:     "negative",
+			response: `{"lot_count":1,"on_hand_grams":-1000,"reserved_grams":0,"available_grams":-1000,"on_hand_value_eur_cents":-1234,"priced_lot_count":1,"unpriced_lot_count":0}`,
+			want: "Matching lots: 1\nOn-hand grams: -1000\nReserved grams: 0\nAvailable grams: -1000\n" +
+				"On-hand EUR value: -€12.34\nPriced lots: 1\nUnpriced lots: 0\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path != "/api/v1/inventory/read/bean-lots/totals" {
+					t.Errorf("path = %q", r.URL.Path)
+				}
+				_, _ = fmt.Fprint(w, test.response)
+			}))
+			defer server.Close()
+
+			result := runLegacyInventoryCommand(t, inventoryRuntime(t, server.URL), false, "totals")
+			if result.code != 0 || result.stderr != "" || result.stdout != test.want || requests != 1 {
+				t.Fatalf("result = %#v; requests = %d", result, requests)
+			}
+		})
+	}
+}
+
+func TestInventoryTotalsJSONPreservesExactIntegerAndNullContracts(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response string
+		want     map[string]any
+	}{
+		{
+			name:     "integer cents",
+			response: `{"lot_count":3,"on_hand_grams":1000,"reserved_grams":250,"available_grams":750,"on_hand_value_eur_cents":1234,"priced_lot_count":2,"unpriced_lot_count":1}`,
+			want:     map[string]any{"lot_count": json.Number("3"), "on_hand_grams": json.Number("1000"), "reserved_grams": json.Number("250"), "available_grams": json.Number("750"), "on_hand_value_eur_cents": json.Number("1234"), "priced_lot_count": json.Number("2"), "unpriced_lot_count": json.Number("1")},
+		},
+		{
+			name:     "null cents",
+			response: `{"lot_count":1,"on_hand_grams":0,"reserved_grams":0,"available_grams":0,"on_hand_value_eur_cents":null,"priced_lot_count":0,"unpriced_lot_count":1}`,
+			want:     map[string]any{"lot_count": json.Number("1"), "on_hand_grams": json.Number("0"), "reserved_grams": json.Number("0"), "available_grams": json.Number("0"), "on_hand_value_eur_cents": nil, "priced_lot_count": json.Number("0"), "unpriced_lot_count": json.Number("1")},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, test.response)
+			}))
+			defer server.Close()
+
+			result := runLegacyInventoryCommand(t, inventoryRuntime(t, server.URL), true, "totals")
+			if result.code != 0 || result.stderr != "" || strings.Contains(result.stdout, "€") {
+				t.Fatalf("result = %#v", result)
+			}
+			assertInventoryJSONSuccess(t, result.stdout, test.want)
+		})
+	}
+}
+
+func TestInventoryTotalsReadAcceptsOnlyFiltersAndRejectsPaginationLocally(t *testing.T) {
+	var gotQuery url.Values
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"lot_count":0,"on_hand_grams":0,"reserved_grams":0,"available_grams":0,"on_hand_value_eur_cents":null,"priced_lot_count":0,"unpriced_lot_count":0}`)
+	}))
+	defer server.Close()
+	runtime := inventoryRuntime(t, server.URL)
+
+	result := runLegacyInventoryCommand(t, runtime, true, "totals", "--q", "guji", "--state", "active", "--availability", "negative", "--conflict", "open", "--roast-uuid", commandRoastID)
+	wantQuery := url.Values{"q": {"guji"}, "state": {"active"}, "availability": {"negative"}, "conflict": {"open"}, "roast_uuid": {commandRoastID}}
+	if result.code != 0 || !reflect.DeepEqual(gotQuery, wantQuery) || requests != 1 {
+		t.Fatalf("result=%#v query=%#v requests=%d", result, gotQuery, requests)
+	}
+	for _, args := range [][]string{{"totals", "extra"}, {"totals", "--limit", "1"}, {"totals", "--cursor", "next"}, {"totals", "--all"}} {
+		result = runLegacyInventoryCommand(t, runtime, false, args...)
+		if result.code != usageExitCode {
+			t.Errorf("args=%q result=%#v", args, result)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("invalid options made requests: %d", requests)
+	}
+}
+
+func runLegacyInventoryCommand(t *testing.T, runtime Runtime, jsonMode bool, args ...string) commandResult {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	runtime = normalizeRuntime(runtime)
+	runtime.Out = &stdout
+	runtime.Err = &stderr
+	code := runInventory(context.Background(), args, runtime, jsonMode, "", time.Second)
+	return commandResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
 func TestInventoryBearerReflectionIsRefusedInHumanAndJSONModes(t *testing.T) {

@@ -124,6 +124,32 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeLotTable(w, page) })
 }
 
+func runInventoryTotals(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
+	flags := flag.NewFlagSet("artisan inventory totals", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	options := api.InventoryTotalsOptions{}
+	flags.StringVar(&options.Query, "q", "", "search text")
+	flags.StringVar(&options.State, "state", "", "lot state")
+	flags.StringVar(&options.Availability, "availability", "", "availability filter")
+	flags.StringVar(&options.Conflict, "conflict", "", "conflict filter")
+	flags.StringVar(&options.RoastUUID, "roast-uuid", "", "roast UUID")
+	if err := flags.Parse(args); err != nil || len(flags.Args()) != 0 {
+		return inventoryUsageFailure(runtime, jsonMode, "Invalid inventory totals option")
+	}
+	if failure := api.ValidateInventoryTotalsOptions(options); failure != nil {
+		return writeFailure(runtime, jsonMode, *failure)
+	}
+	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	if client == nil {
+		return code
+	}
+	totals, failure := client.InventoryTotals(ctx, options)
+	if failure != nil {
+		return writeFailure(runtime, jsonMode, *failure)
+	}
+	return writeInventorySuccess(runtime, jsonMode, totals, func(w io.Writer) error { return writeInventoryTotals(w, totals) })
+}
+
 func runInventoryLotShow(ctx context.Context, lotID string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
 	if _, failure := api.NormalizeInventoryUUID(lotID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
@@ -261,9 +287,9 @@ func writeDesktopLotTable(w io.Writer, page api.DesktopBeanLotPage) error {
 func writeLotTable(w io.Writer, page api.BeanLotPage) error {
 	rows := make([][]string, 0, len(page.Items))
 	for _, lot := range page.Items {
-		rows = append(rows, []string{lot.LotID, lot.Name, lot.State, strconv.FormatInt(lot.OnHandGrams, 10), strconv.FormatInt(lot.ReservedGrams, 10), strconv.FormatInt(lot.AvailableGrams, 10), strconv.FormatInt(lot.UnresolvedConflictCount, 10)})
+		rows = append(rows, []string{lot.LotID, lot.Name, lot.State, optionalEURPerKg(lot.PricePerKgEURCents), strconv.FormatInt(lot.OnHandGrams, 10), strconv.FormatInt(lot.ReservedGrams, 10), strconv.FormatInt(lot.AvailableGrams, 10), strconv.FormatInt(lot.UnresolvedConflictCount, 10)})
 	}
-	if err := output.WriteTable(w, []string{"LOT ID", "NAME", "STATE", "ON HAND GRAMS", "RESERVED GRAMS", "AVAILABLE GRAMS", "CONFLICTS"}, rows); err != nil {
+	if err := output.WriteTable(w, []string{"LOT ID", "NAME", "STATE", "PRICE/KG", "ON HAND GRAMS", "RESERVED GRAMS", "AVAILABLE GRAMS", "CONFLICTS"}, rows); err != nil {
 		return err
 	}
 	return writeNextCursor(w, page.NextCursor)
@@ -283,9 +309,9 @@ func writeLedgerTable(w io.Writer, page api.InventoryLedgerEntryPage) error {
 func writeReservationTable(w io.Writer, page api.InventoryReservationPage) error {
 	rows := make([][]string, 0, len(page.Items))
 	for _, reservation := range page.Items {
-		rows = append(rows, []string{reservation.ReservationID, reservation.ClientReservationUUID, reservation.LotID, reservation.RoastUUID, reservation.ClientInstanceUUID, reservation.State, strconv.FormatInt(reservation.PlannedGrams, 10), optionalInt(reservation.ActualGrams), optionalString(reservation.OpenConflictID), reservation.ReservedAt, optionalString(reservation.CompletedAt), reservation.UpdatedAt})
+		rows = append(rows, []string{reservation.ReservationID, reservation.ClientReservationUUID, reservation.LotID, reservation.RoastUUID, reservation.ClientInstanceUUID, reservation.State, strconv.FormatInt(reservation.PlannedGrams, 10), optionalInt(reservation.ActualGrams), optionalEURCents(reservation.RoastCostEURCents), optionalString(reservation.OpenConflictID), reservation.ReservedAt, optionalString(reservation.CompletedAt), reservation.UpdatedAt})
 	}
-	if err := output.WriteTable(w, []string{"RESERVATION ID", "CLIENT RESERVATION UUID", "LOT ID", "ROAST UUID", "CLIENT INSTANCE UUID", "STATE", "PLANNED GRAMS", "ACTUAL GRAMS", "OPEN CONFLICT ID", "RESERVED AT", "COMPLETED AT", "UPDATED AT"}, rows); err != nil {
+	if err := output.WriteTable(w, []string{"RESERVATION ID", "CLIENT RESERVATION UUID", "LOT ID", "ROAST UUID", "CLIENT INSTANCE UUID", "STATE", "PLANNED GRAMS", "ACTUAL GRAMS", "ROAST COST", "OPEN CONFLICT ID", "RESERVED AT", "COMPLETED AT", "UPDATED AT"}, rows); err != nil {
 		return err
 	}
 	return writeNextCursor(w, page.NextCursor)
@@ -317,7 +343,7 @@ func writeLotDetail(w io.Writer, lot api.BeanLotDetail) error {
 		{Label: "Received date", Value: optionalString(lot.ReceivedDate)}, {Label: "Crop year", Value: optionalInt(lot.CropYear)}, {Label: "Varietals", Value: strings.Join(lot.Varietals, ", ")},
 		{Label: "SCA score", Value: optionalString(lot.SCAScore)}, {Label: "Processing method", Value: optionalString(lot.ProcessingMethod)}, {Label: "Processing detail", Value: optionalString(lot.ProcessingDetail)},
 		{Label: "Altitude minimum metres", Value: optionalInt(lot.AltitudeMinMetres)}, {Label: "Altitude maximum metres", Value: optionalInt(lot.AltitudeMaxMetres)}, {Label: "Notes", Value: optionalString(lot.Notes)},
-		{Label: "State", Value: lot.State}, {Label: "On hand grams", Value: strconv.FormatInt(lot.OnHandGrams, 10)}, {Label: "Reserved grams", Value: strconv.FormatInt(lot.ReservedGrams, 10)},
+		{Label: "State", Value: lot.State}, {Label: "Price per kg", Value: optionalEURPerKg(lot.PricePerKgEURCents)}, {Label: "On hand grams", Value: strconv.FormatInt(lot.OnHandGrams, 10)}, {Label: "Reserved grams", Value: strconv.FormatInt(lot.ReservedGrams, 10)},
 		{Label: "Available grams", Value: strconv.FormatInt(lot.AvailableGrams, 10)}, {Label: "Unresolved conflicts", Value: strconv.FormatInt(lot.UnresolvedConflictCount, 10)},
 		{Label: "Created at", Value: lot.CreatedAt}, {Label: "Updated at", Value: lot.UpdatedAt}, {Label: "Archived at", Value: optionalString(lot.ArchivedAt)},
 		{Label: "Images", Value: strconv.Itoa(len(lot.Images))}, {Label: "Cover image ID", Value: coverImageID(lot.CoverImage)}, {Label: "Self link", Value: lot.Links.Self}, {Label: "Ledger link", Value: lot.Links.Ledger}, {Label: "Reservations link", Value: lot.Links.Reservations},
@@ -342,6 +368,29 @@ func writeConflictDetail(w io.Writer, conflict api.InventoryConflict) error {
 		{Label: "Available grams snapshot", Value: strconv.FormatInt(conflict.AvailableGramsSnapshot, 10)}, {Label: "State", Value: conflict.State}, {Label: "Resolution note", Value: optionalString(conflict.ResolutionNote)},
 		{Label: "Resolved by user ID", Value: optionalString(conflict.ResolvedByUserID)}, {Label: "Resolved at", Value: optionalString(conflict.ResolvedAt)}, {Label: "Created at", Value: conflict.CreatedAt},
 	})
+}
+
+func writeInventoryTotals(w io.Writer, totals api.InventoryTotals) error {
+	value := "-"
+	if totals.OnHandValueEURCents != nil {
+		value = formatSignedEURCents(*totals.OnHandValueEURCents)
+	}
+	return output.WriteDetails(w, []output.DetailField{
+		{Label: "Matching lots", Value: strconv.FormatInt(totals.LotCount, 10)},
+		{Label: "On-hand grams", Value: strconv.FormatInt(totals.OnHandGrams, 10)},
+		{Label: "Reserved grams", Value: strconv.FormatInt(totals.ReservedGrams, 10)},
+		{Label: "Available grams", Value: strconv.FormatInt(totals.AvailableGrams, 10)},
+		{Label: "On-hand EUR value", Value: value},
+		{Label: "Priced lots", Value: strconv.FormatInt(totals.PricedLotCount, 10)},
+		{Label: "Unpriced lots", Value: strconv.FormatInt(totals.UnpricedLotCount, 10)},
+	})
+}
+
+func optionalEURPerKg(cents *int64) string {
+	if cents == nil {
+		return "-"
+	}
+	return formatEURCents(*cents) + "/kg"
 }
 
 func coverImageID(value *api.InventoryImage) string {

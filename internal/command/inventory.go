@@ -20,6 +20,8 @@ func runInventory(ctx context.Context, args []string, runtime Runtime, jsonMode 
 		return runInventoryImage(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
 	case "adjust":
 		return runInventoryAdjust(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
+	case "totals":
+		return runInventoryTotals(ctx, args[1:], runtime, jsonMode, serverOverride, timeout)
 	default:
 		return inventoryUsageFailure(runtime, jsonMode, "Unknown inventory command")
 	}
