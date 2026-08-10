@@ -121,6 +121,7 @@ type lot struct {
 	LotID              string            `json:"lot_id"`
 	Name               string            `json:"name"`
 	PricePerKgEURCents *int64            `json:"price_per_kg_eur_cents"`
+	Description        *string           `json:"description"`
 	OnHandGrams        int64             `json:"on_hand_grams"`
 	ReservedGrams      int64             `json:"reserved_grams"`
 	AvailableGrams     int64             `json:"available_grams"`
@@ -1114,16 +1115,19 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 
 	runID := randomHex(t, 12)
 	lotName := "CLI integration " + runID
+	initialDescription := "Initial public description for " + runID
+	updatedDescription := "Updated public description for " + runID
 	var created lot
 	runner.runJSON(t, "", &created,
 		"inventory", "lot", "create",
 		"--name", lotName, "--origin", "Ethiopia", "--varietal", "Heirloom",
-		"--processing-method", "washed", "--opening-grams", "5000",
+		"--processing-method", "washed", "--description", initialDescription, "--opening-grams", "5000",
 		"--opening-reason", "Disposable CLI integration opening balance",
 		"--opening-reference", "opening-"+runID, "--idempotency-key", "cli-"+runID+"-create",
 	)
 	assertLotBalance(t, created, 5000, 0, 5000)
 	assertLotPrice(t, created, nil)
+	assertLotDescription(t, created, stringPointer(initialDescription))
 	if !fullSHA.MatchString(pinnedServerRef) || len(created.LotID) != 32 {
 		t.Fatalf("created invalid lot ID %q", created.LotID)
 	}
@@ -1132,12 +1136,18 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	runner.runJSON(t, "", &shown, "inventory", "lot", "show", created.LotID)
 	assertLotBalance(t, shown, 5000, 0, 5000)
 	assertLotPrice(t, shown, nil)
+	assertLotDescription(t, shown, stringPointer(initialDescription))
 	var listed lotPage
 	runner.runJSON(t, "", &listed, "inventory", "lot", "list", "--q", lotName, "--all")
 	if len(listed.Items) != 1 || listed.Items[0].LotID != created.LotID {
 		t.Fatalf("admin lot list did not resolve the unique created lot: %+v", listed.Items)
 	}
 	assertLotPrice(t, listed.Items[0], nil)
+	var rawListed struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	runner.runJSON(t, "", &rawListed, "inventory", "lot", "list", "--q", lotName, "--all")
+	assertLotProjectionOmitsFields(t, rawListed.Items, created.LotID, "description")
 
 	memberRoot := filepath.Join(root, "member")
 	memberPaths := make(map[string]string)
@@ -1186,6 +1196,22 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	var memberShown lot
 	memberRunner.runJSON(t, "", &memberShown, "inventory", "lot", "show", created.LotID)
 	assertLotPrice(t, memberShown, nil)
+	assertLotDescription(t, memberShown, stringPointer(initialDescription))
+
+	var described lot
+	runner.runJSON(t, "", &described,
+		"inventory", "lot", "update", created.LotID, "--description", updatedDescription,
+		"--idempotency-key", "cli-"+runID+"-description-update",
+	)
+	assertLotPrice(t, described, nil)
+	assertLotDescription(t, described, stringPointer(updatedDescription))
+	var adminDescribedRead, memberDescribedRead lot
+	runner.runJSON(t, "", &adminDescribedRead, "inventory", "lot", "show", created.LotID)
+	memberRunner.runJSON(t, "", &memberDescribedRead, "inventory", "lot", "show", created.LotID)
+	for _, value := range []lot{adminDescribedRead, memberDescribedRead} {
+		assertLotPrice(t, value, nil)
+		assertLotDescription(t, value, stringPointer(updatedDescription))
+	}
 
 	var priced lot
 	runner.runJSON(t, "", &priced,
@@ -1193,11 +1219,14 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 		"--idempotency-key", "cli-"+runID+"-price-set",
 	)
 	assertLotPrice(t, priced, int64Pointer(1234))
+	assertLotDescription(t, priced, stringPointer(updatedDescription))
 	var adminPricedRead, memberPricedRead lot
 	runner.runJSON(t, "", &adminPricedRead, "inventory", "lot", "show", created.LotID)
 	memberRunner.runJSON(t, "", &memberPricedRead, "inventory", "lot", "show", created.LotID)
-	assertLotPrice(t, adminPricedRead, int64Pointer(1234))
-	assertLotPrice(t, memberPricedRead, int64Pointer(1234))
+	for _, value := range []lot{adminPricedRead, memberPricedRead} {
+		assertLotPrice(t, value, int64Pointer(1234))
+		assertLotDescription(t, value, stringPointer(updatedDescription))
+	}
 
 	totalsArgs := []string{"inventory", "totals", "--q", lotName, "--state", "active", "--availability", "positive"}
 	var adminPricedTotals, memberPricedTotals inventoryTotals
@@ -1221,7 +1250,7 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	assertLotPrice(t, memberPricedRead, int64Pointer(1234))
 
 	desktopItems := readDesktopBeanLots(t, httpClient, config.baseURL, memberToken)
-	assertDesktopLotOmitsFinancialFields(t, desktopItems, created.LotID)
+	assertLotProjectionOmitsFields(t, desktopItems, created.LotID, "description", "price_per_kg_eur_cents", "roast_cost_eur_cents", "on_hand_value_eur_cents")
 
 	occurredAt := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
 	var adjusted lot
@@ -1355,6 +1384,21 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	}
 	assertReservationCost(t, reservations, reservationUUID, "finalized", 1000, int64Pointer(900), int64Pointer(1111))
 	assertReservationCost(t, reservations, secondReservationUUID, "released", 250, nil, nil)
+
+	var descriptionCleared lot
+	runner.runJSON(t, "", &descriptionCleared,
+		"inventory", "lot", "update", created.LotID, "--clear", "description",
+		"--idempotency-key", "cli-"+runID+"-description-clear",
+	)
+	assertLotPrice(t, descriptionCleared, int64Pointer(1234))
+	assertLotDescription(t, descriptionCleared, nil)
+	var adminDescriptionClearedRead, memberDescriptionClearedRead lot
+	runner.runJSON(t, "", &adminDescriptionClearedRead, "inventory", "lot", "show", created.LotID)
+	memberRunner.runJSON(t, "", &memberDescriptionClearedRead, "inventory", "lot", "show", created.LotID)
+	for _, value := range []lot{adminDescriptionClearedRead, memberDescriptionClearedRead} {
+		assertLotPrice(t, value, int64Pointer(1234))
+		assertLotDescription(t, value, nil)
+	}
 
 	var cleared lot
 	runner.runJSON(t, "", &cleared,
@@ -1927,12 +1971,20 @@ func assertLotBalance(t *testing.T, value lot, onHand, reserved, available int64
 	}
 }
 
-func int64Pointer(value int64) *int64 { return &value }
+func int64Pointer(value int64) *int64    { return &value }
+func stringPointer(value string) *string { return &value }
 
 func assertLotPrice(t *testing.T, value lot, want *int64) {
 	t.Helper()
 	if !reflect.DeepEqual(value.PricePerKgEURCents, want) {
 		t.Fatalf("lot %s price = %v, want %v", value.LotID, value.PricePerKgEURCents, want)
+	}
+}
+
+func assertLotDescription(t *testing.T, value lot, want *string) {
+	t.Helper()
+	if !reflect.DeepEqual(value.Description, want) {
+		t.Fatalf("lot %s description = %v, want %v", value.LotID, value.Description, want)
 	}
 }
 
@@ -1981,21 +2033,21 @@ func readDesktopBeanLots(t *testing.T, client *http.Client, baseURL, token strin
 	return page.Items
 }
 
-func assertDesktopLotOmitsFinancialFields(t *testing.T, items []map[string]json.RawMessage, lotID string) {
+func assertLotProjectionOmitsFields(t *testing.T, items []map[string]json.RawMessage, lotID string, fields ...string) {
 	t.Helper()
 	for _, item := range items {
 		var candidate string
 		if err := json.Unmarshal(item["lot_id"], &candidate); err != nil || candidate != lotID {
 			continue
 		}
-		for _, field := range []string{"price_per_kg_eur_cents", "roast_cost_eur_cents", "on_hand_value_eur_cents"} {
+		for _, field := range fields {
 			if _, exists := item[field]; exists {
-				t.Fatalf("reduced desktop lot unexpectedly exposed %s: %+v", field, item)
+				t.Fatalf("lot projection unexpectedly exposed %s: %+v", field, item)
 			}
 		}
 		return
 	}
-	t.Fatalf("reduced desktop projection did not contain disposable lot %s", lotID)
+	t.Fatalf("lot projection did not contain disposable lot %s", lotID)
 }
 
 func assertLedger(t *testing.T, page ledgerPage) {
