@@ -690,7 +690,7 @@ Apply only technically verified findings through focused RED/GREEN tests. Commit
 - [ ] **Step 6: Final repository audit**
 
 ```bash
-git diff --check
+git diff --check origin/main..HEAD
 git status --short
 git log --oneline --decorate origin/main..HEAD
 find . -maxdepth 2 -type f -name '*token*' -o -name '*.tmp'

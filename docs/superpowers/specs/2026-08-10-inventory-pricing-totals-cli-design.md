@@ -1,8 +1,8 @@
 # Artisan CLI Inventory Pricing and Totals Design
 
-**Date:** 2026-08-10  
-**Status:** Approved design  
-**Primary repository:** [`fr3akX/artisan-cli`](https://github.com/fr3akX/artisan-cli)  
+**Date:** 2026-08-10
+**Status:** Approved design
+**Primary repository:** [`fr3akX/artisan-cli`](https://github.com/fr3akX/artisan-cli)
 **Server repository:** [`fr3akX/artisan-server`](https://github.com/fr3akX/artisan-server)
 
 ## Summary

@@ -414,6 +414,9 @@ func decodeRequiredObject(data []byte, destination any, nullable []string, requi
 	if !utf8.Valid(data) {
 		return errors.New("invalid UTF-8 in inventory object")
 	}
+	if err := validateJSONStringSurrogateEscapes(data); err != nil {
+		return err
+	}
 	var fields map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&fields); err != nil || fields == nil {

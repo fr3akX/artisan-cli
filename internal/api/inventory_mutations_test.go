@@ -331,6 +331,68 @@ func TestMutationNormalizationAndRelatedProcessingRules(t *testing.T) {
 	}
 }
 
+func TestBeanLotJSONDescriptionSurrogateEscapeContract(t *testing.T) {
+	invalidEscapes := []struct {
+		name string
+		raw  string
+	}{
+		{name: "lone high", raw: `"\uD800"`},
+		{name: "lone low", raw: `"\uDC00"`},
+		{name: "high followed by non-low", raw: `"\uD800\u0041"`},
+	}
+	for _, test := range invalidEscapes {
+		t.Run("create "+test.name, func(t *testing.T) {
+			payload := `{"fields":{"name":"Lot","description":` + test.raw + `,"varietals":[]},"images":[]}`
+			if _, failure := DecodeBeanLotCreateManifest([]byte(payload)); failure == nil {
+				t.Fatalf("create accepted malformed surrogate escape %s", test.raw)
+			}
+		})
+		t.Run("sparse patch "+test.name, func(t *testing.T) {
+			if _, failure := DecodeBeanLotPatch([]byte(`{"description":` + test.raw + `}`)); failure == nil {
+				t.Fatalf("patch accepted malformed surrogate escape %s", test.raw)
+			}
+		})
+		t.Run("full detail response "+test.name, func(t *testing.T) {
+			payload := strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, `"description":`+test.raw, 1)
+			if err := json.Unmarshal([]byte(payload), &BeanLotDetail{}); err == nil {
+				t.Fatalf("response accepted malformed surrogate escape %s", test.raw)
+			}
+		})
+	}
+
+	acceptedEscapes := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "valid pair", raw: `"\uD83D\uDE00"`, want: "😀"},
+		{name: "escaped backslash text", raw: `"\\uD800"`, want: `\uD800`},
+		{name: "literal replacement character", raw: `"�"`, want: "�"},
+	}
+	for _, test := range acceptedEscapes {
+		t.Run("create accepts "+test.name, func(t *testing.T) {
+			payload := `{"fields":{"name":"Lot","description":` + test.raw + `,"varietals":[]},"images":[]}`
+			manifest, failure := DecodeBeanLotCreateManifest([]byte(payload))
+			if failure != nil || manifest.Fields.Description == nil || *manifest.Fields.Description != test.want {
+				t.Fatalf("create description = %#v, failure = %#v; want %q", manifest.Fields.Description, failure, test.want)
+			}
+		})
+		t.Run("sparse patch accepts "+test.name, func(t *testing.T) {
+			patch, failure := DecodeBeanLotPatch([]byte(`{"description":` + test.raw + `}`))
+			if failure != nil || patch.fields["description"] != test.want {
+				t.Fatalf("patch description = %#v, failure = %#v; want %q", patch.fields["description"], failure, test.want)
+			}
+		})
+		t.Run("full detail response accepts "+test.name, func(t *testing.T) {
+			payload := strings.Replace(validDetailJSON(), `"description":"Public story\nSecond paragraph"`, `"description":`+test.raw, 1)
+			var detail BeanLotDetail
+			if err := json.Unmarshal([]byte(payload), &detail); err != nil || detail.Description == nil || *detail.Description != test.want {
+				t.Fatalf("response description = %#v, error = %v; want %q", detail.Description, err, test.want)
+			}
+		})
+	}
+}
+
 func TestBeanLotDescriptionMutationBoundariesAndInvalidText(t *testing.T) {
 	accepted := strings.Repeat("😀", 2000)
 	manifest := BeanLotCreateManifest{Fields: BeanLotFields{Name: "Lot", Description: &accepted, Varietals: []string{}}, Images: []ImageUploadManifest{}}

@@ -39,7 +39,11 @@ const (
 	cliCommandWaitDelay = 2 * time.Second
 )
 
-var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var (
+	fullSHA               = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	disposableProjectName = regexp.MustCompile(`^artisan-server-e2e-[a-z0-9]{12}$`)
+	dockerContainerID     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 type liveConfig struct {
 	binary           string
@@ -54,6 +58,26 @@ type liveConfig struct {
 	memberCredential string
 	organization     string
 	organizationSlug string
+	projectName      string
+}
+
+type dockerMetadataCommand func(args ...string) ([]byte, error)
+
+type dockerInspectDocument struct {
+	ID    string `json:"Id"`
+	State struct {
+		Running bool `json:"Running"`
+	} `json:"State"`
+	Config struct {
+		Environment []string          `json:"Env"`
+		Labels      map[string]string `json:"Labels"`
+	} `json:"Config"`
+	NetworkSettings struct {
+		Ports map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string `json:"HostPort"`
+		} `json:"Ports"`
+	} `json:"NetworkSettings"`
 }
 
 type commandRecord struct {
@@ -261,6 +285,85 @@ func TestValidateLoopbackBaseURL(t *testing.T) {
 			}
 			if !test.valid && err == nil {
 				t.Fatalf("validateLoopbackBaseURL(%q) unexpectedly succeeded as %q", test.raw, got)
+			}
+		})
+	}
+}
+
+func TestDisposableTargetGuardRequiresExactLocalComposeMetadata(t *testing.T) {
+	const (
+		project = "artisan-server-e2e-a1b2c3d4e5f6"
+		apiID   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		webID   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	validInspect := `[
+		{"Id":"` + apiID + `","State":{"Running":true},"Config":{"Env":["PATH=/usr/local/bin:/usr/bin","ARTISAN_SERVER_E2E_DISPOSABLE=artisan-server-e2e-compose-v1"],"Labels":{"com.docker.compose.project":"` + project + `","com.docker.compose.service":"api","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1","io.artisan-server.e2e.disposable":"artisan-server-e2e-compose-v1"}},"NetworkSettings":{"Ports":{}}},
+		{"Id":"` + webID + `","State":{"Running":true},"Config":{"Env":["PATH=/usr/local/bin:/usr/bin"],"Labels":{"com.docker.compose.project":"` + project + `","com.docker.compose.service":"web","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1"}},"NetworkSettings":{"Ports":{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"18080"}]}}}
+	]`
+	config := liveConfig{baseURL: "http://127.0.0.1:18080", projectName: project}
+
+	runner := func(overrides map[string]string, failures map[string]error) dockerMetadataCommand {
+		return func(args ...string) ([]byte, error) {
+			key := strings.Join(args, " ")
+			if err := failures[key]; err != nil {
+				return nil, err
+			}
+			if output, ok := overrides[key]; ok {
+				return []byte(output), nil
+			}
+			switch key {
+			case "context show":
+				return []byte("default\n"), nil
+			case `context inspect default --format {{ (index .Endpoints "docker").Host }}`:
+				return []byte("unix:///var/run/docker.sock\n"), nil
+			case "container ls --no-trunc --filter label=com.docker.compose.project=" + project + " --filter label=com.docker.compose.service=api --filter status=running --format {{.ID}}":
+				return []byte(apiID + "\n"), nil
+			case "container ls --no-trunc --filter label=com.docker.compose.project=" + project + " --filter label=com.docker.compose.service=web --filter status=running --format {{.ID}}":
+				return []byte(webID + "\n"), nil
+			case "inspect " + apiID + " " + webID:
+				return []byte(validInspect), nil
+			default:
+				return nil, fmt.Errorf("unexpected Docker metadata command %q", key)
+			}
+		}
+	}
+	noEnvironment := func(string) string { return "" }
+	if err := validateDisposableTarget(config, noEnvironment, runner(nil, nil)); err != nil {
+		t.Fatalf("valid disposable target rejected: %v", err)
+	}
+
+	apiListCommand := "container ls --no-trunc --filter label=com.docker.compose.project=" + project + " --filter label=com.docker.compose.service=api --filter status=running --format {{.ID}}"
+	inspectCommand := "inspect " + apiID + " " + webID
+	tests := []struct {
+		name        string
+		config      liveConfig
+		environment map[string]string
+		overrides   map[string]string
+		failures    map[string]error
+	}{
+		{name: "invalid project name", config: liveConfig{baseURL: config.baseURL, projectName: "archive-api"}},
+		{name: "remote Docker host environment", config: config, environment: map[string]string{"DOCKER_HOST": "tcp://production.invalid:2376"}},
+		{name: "nondefault context", config: config, overrides: map[string]string{"context show": "production\n"}},
+		{name: "remote default endpoint", config: config, overrides: map[string]string{`context inspect default --format {{ (index .Endpoints "docker").Host }}`: "tcp://127.0.0.1:2375\n"}},
+		{name: "Docker unavailable", config: config, failures: map[string]error{"context show": errors.New("executable file not found")}},
+		{name: "ambiguous API", config: config, overrides: map[string]string{apiListCommand: apiID + "\n" + strings.Repeat("c", 64) + "\n"}},
+		{name: "API marker label missing", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"io.artisan-server.e2e.disposable":"artisan-server-e2e-compose-v1"`, `"other":"value"`, 1)}},
+		{name: "API marker environment missing", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `,"ARTISAN_SERVER_E2E_DISPOSABLE=artisan-server-e2e-compose-v1"`, "", 1)}},
+		{name: "wrong API project", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"com.docker.compose.project":"`+project+`"`, `"com.docker.compose.project":"archive-api"`, 1)}},
+		{name: "wrong API service", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"com.docker.compose.service":"api"`, `"com.docker.compose.service":"web"`, 1)}},
+		{name: "API oneoff", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"com.docker.compose.oneoff":"False"`, `"com.docker.compose.oneoff":"True"`, 1)}},
+		{name: "wrong web container number", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"com.docker.compose.service":"web","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1"`, `"com.docker.compose.service":"web","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"2"`, 1)}},
+		{name: "web not running", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"Id":"`+webID+`","State":{"Running":true}`, `"Id":"`+webID+`","State":{"Running":false}`, 1)}},
+		{name: "wrong published host port", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"HostPort":"18080"`, `"HostPort":"18081"`, 1)}},
+		{name: "wrong published host IP", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `"HostIp":"127.0.0.1"`, `"HostIp":"0.0.0.0"`, 1)}},
+		{name: "ambiguous web binding", config: config, overrides: map[string]string{inspectCommand: strings.Replace(validInspect, `{"HostIp":"127.0.0.1","HostPort":"18080"}`, `{"HostIp":"127.0.0.1","HostPort":"18080"},{"HostIp":"::1","HostPort":"18080"}`, 1)}},
+		{name: "malformed inspect JSON", config: config, overrides: map[string]string{inspectCommand: `{"Id":`}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			getenv := func(name string) string { return test.environment[name] }
+			if err := validateDisposableTarget(test.config, getenv, runner(test.overrides, test.failures)); err == nil {
+				t.Fatal("unsafe disposable target metadata accepted")
 			}
 		})
 	}
@@ -636,8 +739,9 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 		"permissions:\n  contents: read", pinnedServerRef, "repository: fr3akX/artisan-server",
 		"token: ${{ secrets.ARTISAN_SERVER_REPOSITORY_TOKEN }}",
 		"integration/artisan-server.ref", "CGO_ENABLED: \"0\"", "go-version: 1.23.x",
-		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080",
+		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080", `ARTISAN_SERVER_HTTP_PORT: "127.0.0.1:18080"`,
 		"ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com", "integration/provision_member.py",
+		"go test ./integration -run '^TestDisposableComposeTargetProof$' -count=1 -v",
 		`if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then`,
 	} {
 		if !strings.Contains(text, required) {
@@ -717,6 +821,7 @@ func TestIntegrationWorkflowContractRejectsMutations(t *testing.T) {
 		"script symlink guard":       {"[[ -f \"$script_input\" && ! -L \"$script_input\" ]]", "[[ -f \"$script_input\" ]]"},
 		"script containment":         {"[[ \"$script\" == \"$script_input\" && \"$script\" == \"$workspace/\"* ]]", "[[ \"$script\" == \"$script_input\" ]]"},
 		"canonical mount":            {`-v "$script:/tmp/provision_member.py:ro"`, `-v "$script_input:/tmp/provision_member.py:ro"`},
+		"web publish all interfaces": {`ARTISAN_SERVER_HTTP_PORT: "127.0.0.1:18080"`, `ARTISAN_SERVER_HTTP_PORT: "18080"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := bytes.Replace(contents, []byte(mutation[0]), []byte(mutation[1]), 1)
@@ -728,6 +833,18 @@ func TestIntegrationWorkflowContractRejectsMutations(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("target proof after credential issuance", func(t *testing.T) {
+		proof := []byte("      - name: Prove disposable Compose target\n        shell: bash\n        run: timeout --signal=TERM --kill-after=10s 60s go test ./integration -run '^TestDisposableComposeTargetProof$' -count=1 -v\n\n")
+		changed := bytes.Replace(contents, proof, nil, 1)
+		changed = bytes.Replace(changed, []byte("      - name: Build compiled CLI\n"), append(proof, []byte("      - name: Build compiled CLI\n")...), 1)
+		if bytes.Equal(changed, contents) || bytes.Count(changed, []byte("name: Prove disposable Compose target")) != 1 {
+			t.Fatal("test mutation did not apply")
+		}
+		if err := validateIntegrationWorkflow(changed); err == nil {
+			t.Fatal("post-credential target proof was accepted")
+		}
+	})
 }
 
 const provisionMemberRunContract = `set -euo pipefail
@@ -798,6 +915,14 @@ func validateIntegrationWorkflow(contents []byte) error {
 	if err != nil {
 		return err
 	}
+	jobEnvironment, err := integrationMappingLookup(job, "env")
+	if err != nil {
+		return errors.New("integration job environment is missing")
+	}
+	webBinding, err := integrationMappingLookup(jobEnvironment, "ARTISAN_SERVER_HTTP_PORT")
+	if err != nil || webBinding.Kind != yaml.ScalarNode || webBinding.Value != "127.0.0.1:18080" {
+		return errors.New("integration web publish target must be exact loopback")
+	}
 	for _, forbidden := range []string{"if", "continue-on-error"} {
 		if _, err := integrationMappingLookup(job, forbidden); err == nil {
 			return fmt.Errorf("integration job %s is forbidden", forbidden)
@@ -811,12 +936,15 @@ func validateIntegrationWorkflow(contents []byte) error {
 		"Check out Artisan CLI": 0, "Validate pinned server ref": 0, "Check out pinned Artisan Server": 0,
 		"Verify server checkout HEAD": 0, "Set up Go": 0, "Prepare disposable stack inputs": 0,
 		"Validate disposable Compose configuration": 0, "Start disposable Artisan Server": 0,
-		"Wait for bounded readiness": 0, "Bootstrap disposable administrator": 0, "Provision disposable member": 0,
+		"Wait for bounded readiness": 0, "Prove disposable Compose target": 0,
+		"Bootstrap disposable administrator": 0, "Provision disposable member": 0,
 		"Build compiled CLI": 0, "Run pinned live integration": 0, "Print bounded server logs on failure": 0,
 		"Tear down disposable stack": 0,
 	}
 	foundProvision := false
-	for _, step := range steps.Content {
+	foundTargetProof := false
+	targetProofIndex, bootstrapIndex, provisionIndex := -1, -1, -1
+	for stepIndex, step := range steps.Content {
 		name, nameErr := integrationMappingLookup(step, "name")
 		if nameErr != nil {
 			return errors.New("integration steps must be named")
@@ -836,7 +964,19 @@ func validateIntegrationWorkflow(contents []byte) error {
 		} else if conditionErr == nil {
 			return fmt.Errorf("required step %q may not be conditional", name.Value)
 		}
+		if name.Value == "Bootstrap disposable administrator" {
+			bootstrapIndex = stepIndex
+		}
+		if name.Value == "Prove disposable Compose target" {
+			run, runErr := integrationMappingLookup(step, "run")
+			if runErr != nil || strings.TrimSpace(run.Value) != "timeout --signal=TERM --kill-after=10s 60s go test ./integration -run '^TestDisposableComposeTargetProof$' -count=1 -v" {
+				return errors.New("disposable Compose target proof command drifted")
+			}
+			foundTargetProof = true
+			targetProofIndex = stepIndex
+		}
 		if name.Value == "Provision disposable member" {
+			provisionIndex = stepIndex
 			run, runErr := integrationMappingLookup(step, "run")
 			if runErr != nil || strings.TrimSpace(strings.ReplaceAll(run.Value, "\r\n", "\n")) != provisionMemberRunContract {
 				return errors.New("member provision canonical bind contract drifted")
@@ -844,8 +984,14 @@ func validateIntegrationWorkflow(contents []byte) error {
 			foundProvision = true
 		}
 	}
+	if !foundTargetProof {
+		return errors.New("disposable Compose target proof step is missing")
+	}
 	if !foundProvision {
 		return errors.New("member provision step is missing")
+	}
+	if targetProofIndex < 0 || bootstrapIndex < 0 || provisionIndex < 0 || targetProofIndex >= bootstrapIndex || targetProofIndex >= provisionIndex {
+		return errors.New("disposable Compose target proof must precede bootstrap and credential issuance")
 	}
 	for name, count := range requiredSteps {
 		if count != 1 {
@@ -1052,6 +1198,21 @@ func composeInvocations(step string) []string {
 	return invocations
 }
 
+func TestDisposableComposeTargetProof(t *testing.T) {
+	project := os.Getenv("ARTISAN_SERVER_E2E_PROJECT_NAME")
+	rawBaseURL := os.Getenv("ARTISAN_INTEGRATION_BASE_URL")
+	if project == "" && rawBaseURL == "" {
+		t.Skip("disposable target proof environment is not configured")
+	}
+	baseURL, err := validateLoopbackBaseURL(rawBaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDisposableTarget(liveConfig{baseURL: baseURL, projectName: project}, os.Getenv, runDockerMetadataCommand); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	config, configured, err := loadLiveConfig(os.Getenv)
 	if err != nil {
@@ -1059,6 +1220,9 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	}
 	if !configured {
 		t.Skip("live integration environment is not configured")
+	}
+	if err := validateDisposableTarget(config, os.Getenv, runDockerMetadataCommand); err != nil {
+		t.Fatal(err)
 	}
 	binary, err := resolveTrustedExecutable(config.binary)
 	if err != nil {
@@ -1470,6 +1634,153 @@ func TestInventoryCLIAgainstArtisanServer(t *testing.T) {
 	}
 }
 
+func runDockerMetadataCommand(args ...string) ([]byte, error) {
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		return nil, errors.New("Docker is required for disposable target proof")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, docker, args...)
+	output, err := command.Output()
+	if err != nil {
+		return nil, errors.New("Docker metadata command failed")
+	}
+	return output, nil
+}
+
+func validateDisposableTarget(config liveConfig, getenv func(string) string, run dockerMetadataCommand) error {
+	const (
+		markerName  = "ARTISAN_SERVER_E2E_DISPOSABLE"
+		markerValue = "artisan-server-e2e-compose-v1"
+		markerLabel = "io.artisan-server.e2e.disposable"
+	)
+	if disposableProjectName.MatchString(config.projectName) == false {
+		return errors.New("ARTISAN_SERVER_E2E_PROJECT_NAME must match the strict disposable project format")
+	}
+	baseURL, err := validateLoopbackBaseURL(config.baseURL)
+	if err != nil || baseURL != config.baseURL {
+		return errors.New("disposable target proof requires a canonical loopback base URL")
+	}
+	for _, name := range []string{"DOCKER_HOST", "DOCKER_CONTEXT"} {
+		if getenv(name) != "" {
+			return fmt.Errorf("%s must be unset for disposable target proof", name)
+		}
+	}
+	if run == nil {
+		return errors.New("Docker is required for disposable target proof")
+	}
+	shown, err := run("context", "show")
+	if err != nil || (string(shown) != "default\n" && string(shown) != "default\r\n") {
+		return errors.New("Docker context must be exactly the local default context")
+	}
+	endpointOutput, err := run("context", "inspect", "default", "--format", `{{ (index .Endpoints "docker").Host }}`)
+	if err != nil {
+		return errors.New("Docker default context endpoint could not be inspected")
+	}
+	endpoint := strings.TrimSuffix(strings.TrimSuffix(string(endpointOutput), "\n"), "\r")
+	parsedEndpoint, parseErr := url.Parse(endpoint)
+	if parseErr != nil || !strings.HasPrefix(endpoint, "unix:///") || parsedEndpoint.Scheme != "unix" || parsedEndpoint.Host != "" || !strings.HasPrefix(parsedEndpoint.Path, "/") || parsedEndpoint.RawQuery != "" || parsedEndpoint.Fragment != "" || strings.ContainsAny(endpoint, "\r\n\x00") {
+		return errors.New("Docker default context must use an absolute local Unix socket")
+	}
+
+	containerID := func(service string) (string, error) {
+		output, commandErr := run(
+			"container", "ls", "--no-trunc",
+			"--filter", "label=com.docker.compose.project="+config.projectName,
+			"--filter", "label=com.docker.compose.service="+service,
+			"--filter", "status=running", "--format", "{{.ID}}",
+		)
+		identifiers := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+		if commandErr != nil || len(identifiers) != 1 || !dockerContainerID.MatchString(identifiers[0]) {
+			return "", fmt.Errorf("exactly one running %s Compose container is required", service)
+		}
+		return identifiers[0], nil
+	}
+	apiID, err := containerID("api")
+	if err != nil {
+		return err
+	}
+	webID, err := containerID("web")
+	if err != nil {
+		return err
+	}
+	if apiID == webID {
+		return errors.New("API and web Compose containers must be distinct")
+	}
+	inspectOutput, err := run("inspect", apiID, webID)
+	if err != nil {
+		return errors.New("Compose container metadata could not be inspected")
+	}
+	var documents []dockerInspectDocument
+	if err := json.Unmarshal(inspectOutput, &documents); err != nil || len(documents) != 2 {
+		return errors.New("Compose container metadata could not be inspected")
+	}
+	byID := make(map[string]dockerInspectDocument, len(documents))
+	for _, document := range documents {
+		if !dockerContainerID.MatchString(document.ID) {
+			return errors.New("inspected Compose container ID is invalid")
+		}
+		if _, duplicate := byID[document.ID]; duplicate {
+			return errors.New("inspected Compose container metadata is ambiguous")
+		}
+		byID[document.ID] = document
+	}
+	api, apiOK := byID[apiID]
+	web, webOK := byID[webID]
+	if !apiOK || !webOK {
+		return errors.New("inspected Compose container IDs do not match selection")
+	}
+	validateComposeContainer := func(document dockerInspectDocument, service string) error {
+		labels := document.Config.Labels
+		if !document.State.Running || labels == nil ||
+			labels["com.docker.compose.project"] != config.projectName ||
+			labels["com.docker.compose.service"] != service ||
+			labels["com.docker.compose.oneoff"] != "False" ||
+			labels["com.docker.compose.container-number"] != "1" {
+			return fmt.Errorf("%s container Compose metadata does not match the disposable target", service)
+		}
+		return nil
+	}
+	if err := validateComposeContainer(api, "api"); err != nil {
+		return err
+	}
+	if err := validateComposeContainer(web, "web"); err != nil {
+		return err
+	}
+	if api.Config.Labels[markerLabel] != markerValue {
+		return errors.New("API container disposable label is missing or invalid")
+	}
+	requiredEnvironment := markerName + "=" + markerValue
+	markerCount := 0
+	for _, value := range api.Config.Environment {
+		if strings.HasPrefix(value, markerName+"=") {
+			markerCount++
+			if value != requiredEnvironment {
+				return errors.New("API container disposable environment marker is invalid")
+			}
+		}
+	}
+	if markerCount != 1 {
+		return errors.New("API container disposable environment marker is missing or ambiguous")
+	}
+
+	parsedBase, _ := url.Parse(baseURL)
+	basePort := parsedBase.Port()
+	if basePort == "" {
+		if parsedBase.Scheme == "https" {
+			basePort = "443"
+		} else {
+			basePort = "80"
+		}
+	}
+	bindings, exists := web.NetworkSettings.Ports["80/tcp"]
+	if !exists || len(bindings) != 1 || bindings[0].HostIP != parsedBase.Hostname() || bindings[0].HostPort != basePort {
+		return errors.New("web container 80/tcp binding does not exactly match ARTISAN_INTEGRATION_BASE_URL")
+	}
+	return nil
+}
+
 func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 	names := []string{
 		"ARTISAN_CLI_BINARY", "ARTISAN_INTEGRATION_BASE_URL", "ARTISAN_INTEGRATION_ADMIN_EMAIL",
@@ -1477,6 +1788,7 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 		"ARTISAN_INTEGRATION_MEMBER_EMAIL", "ARTISAN_INTEGRATION_MEMBER_PASSWORD", "ARTISAN_INTEGRATION_MEMBER_NICKNAME",
 		"ARTISAN_INTEGRATION_MEMBER_TOKEN", "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID",
 		"ARTISAN_INTEGRATION_ADMIN_ORGANIZATION", "ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG",
+		"ARTISAN_SERVER_E2E_PROJECT_NAME",
 	}
 	values := make(map[string]string, len(names))
 	present := 0
@@ -1490,7 +1802,7 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 		return liveConfig{}, false, nil
 	}
 	if present != len(names) {
-		return liveConfig{}, true, errors.New("live integration requires every explicit ARTISAN_CLI_BINARY and ARTISAN_INTEGRATION_* value")
+		return liveConfig{}, true, errors.New("live integration requires ARTISAN_SERVER_E2E_PROJECT_NAME and every explicit ARTISAN_CLI_BINARY and ARTISAN_INTEGRATION_* value")
 	}
 	baseURL, err := validateLoopbackBaseURL(values["ARTISAN_INTEGRATION_BASE_URL"])
 	if err != nil {
@@ -1505,7 +1817,7 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 		binary: values[names[0]], baseURL: baseURL, adminEmail: values[names[2]], adminPassword: values[names[3]],
 		adminNickname: values[names[4]], memberEmail: values[names[5]], memberPassword: values[names[6]],
 		memberNickname: values[names[7]], memberToken: values[names[8]], memberCredential: values[names[9]],
-		organization: values[names[10]], organizationSlug: values[names[11]],
+		organization: values[names[10]], organizationSlug: values[names[11]], projectName: values[names[12]],
 	}, true, nil
 }
 

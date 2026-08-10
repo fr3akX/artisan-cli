@@ -390,6 +390,9 @@ func DecodeBeanLotPatch(data []byte) (BeanLotPatch, *output.Error) {
 	if !utf8.Valid(data) {
 		return BeanLotPatch{}, mutationUsage("invalid_json", "Bean lot update JSON must use valid UTF-8")
 	}
+	if err := validateJSONStringSurrogateEscapes(data); err != nil {
+		return BeanLotPatch{}, mutationUsage("invalid_json", "Bean lot update JSON contains an invalid string escape")
+	}
 	var fields map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -416,6 +419,9 @@ func newJSONBody(value any) (func() (io.ReadCloser, string, error), error) {
 func decodeStrictMutationJSON(data []byte, destination any) error {
 	if !utf8.Valid(data) {
 		return errors.New("invalid UTF-8 in mutation JSON")
+	}
+	if err := validateJSONStringSurrogateEscapes(data); err != nil {
+		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
