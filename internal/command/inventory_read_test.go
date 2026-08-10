@@ -23,25 +23,17 @@ const commandClientID = "77777777777747778777777777777777"
 const commandUserID = "88888888888848888888888888888888"
 const commandTimestamp = "2026-08-04T12:00:00.000000Z"
 
-func commandIdentityForRoleJSON(role string) string {
-	return `{"user":{"id":"11111111-1111-4111-8111-111111111111","email":"owner@example.com","nickname":"Owner"},"organization":{"id":"22222222-2222-4222-8222-222222222222","name":"Roastery","slug":"roastery"},"role":"` + role + `"}`
-}
-
-func commandDesktopLotJSON() string {
-	return `{"lot_id":"` + commandLotID + `","name":"Member lot","origin":"Ethiopia","varietals":["Heirloom"],"processing_method":"washed","crop_year":2026,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2}`
-}
-
 func commandInventorySummary(id, name string, available int) string {
 	return fmt.Sprintf(`{"lot_id":%q,"name":%q,"origin":null,"processing_method":null,"crop_year":null,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":%d,"reserved_grams":0,"available_grams":%d,"unresolved_conflict_count":0,"cover_image":null,"updated_at":%q}`,
 		id, name, available, available, commandTimestamp)
 }
 
 func commandInventoryImageJSON() string {
-	return `{"image_id":"` + commandImageID + `","caption":"front","alt_text":null,"position":0,"is_cover":true,"display_width":1600,"display_height":1200,"thumbnail_width":480,"thumbnail_height":360,"display_url":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/images/` + commandImageID + `/display","thumbnail_url":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/images/` + commandImageID + `/thumbnail"}`
+	return `{"image_id":"` + commandImageID + `","caption":"front","alt_text":null,"position":0,"is_cover":true,"display_width":1600,"display_height":1200,"thumbnail_width":480,"thumbnail_height":360,"display_url":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/images/` + commandImageID + `/display","thumbnail_url":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/images/` + commandImageID + `/thumbnail"}`
 }
 
 func commandInventorySummaryFull() string {
-	return `{"lot_id":"` + commandLotID + `","name":"Lot","origin":"Ethiopia","processing_method":"washed","crop_year":2026,"state":"active","price_per_kg_eur_cents":null,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2,"cover_image":` + commandInventoryImageJSON() + `,"updated_at":"` + commandTimestamp + `"}`
+	return `{"lot_id":"` + commandLotID + `","name":"Lot","origin":"Ethiopia","processing_method":"washed","crop_year":2026,"state":"active","price_per_kg_eur_cents":1234,"on_hand_grams":5000,"reserved_grams":1250,"available_grams":3750,"unresolved_conflict_count":2,"cover_image":` + commandInventoryImageJSON() + `,"updated_at":"` + commandTimestamp + `"}`
 }
 
 func commandLedgerJSON() string {
@@ -49,7 +41,7 @@ func commandLedgerJSON() string {
 }
 
 func commandReservationJSON() string {
-	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"roast_cost_eur_cents":null,"reserved_at":"` + commandTimestamp + `","completed_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
+	return `{"reservation_id":"` + commandReservationID + `","client_reservation_uuid":"` + commandEntryID + `","lot_id":"` + commandLotID + `","roast_uuid":"` + commandRoastID + `","client_instance_uuid":"` + commandClientID + `","state":"finalized","planned_grams":1250,"actual_grams":1200,"roast_cost_eur_cents":5678,"reserved_at":"` + commandTimestamp + `","completed_at":"` + commandTimestamp + `","created_at":"` + commandTimestamp + `","updated_at":"` + commandTimestamp + `","open_conflict_id":"` + commandConflictID + `"}`
 }
 
 func commandResolvedConflictJSON() string { return commandResolvedConflictJSONWithNote("counted") }
@@ -73,69 +65,45 @@ func inventoryRuntime(t *testing.T, serverURL string) Runtime {
 	}}
 }
 
-func TestInventoryLotListDispatchesByFreshCredentialIdentityAndMemberOutputIsReduced(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		role      string
-		wantRoute string
-		wantJSON  string
-	}{
-		{name: "admin", role: "admin", wantRoute: "/api/v1/inventory/admin/bean-lots", wantJSON: commandInventorySummaryFull()},
-		{name: "member", role: "member", wantRoute: "/api/v1/inventory/bean-lots", wantJSON: commandDesktopLotJSON()},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+func TestInventoryLotListUsesFullReadProjectionForMemberAndAdminWithoutIdentityPreflight(t *testing.T) {
+	for _, credential := range []string{"member", "admin"} {
+		t.Run(credential, func(t *testing.T) {
 			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				paths = append(paths, r.URL.Path)
-				switch r.URL.Path {
-				case "/api/v1/auth/me":
-					_, _ = fmt.Fprint(w, commandIdentityForRoleJSON(test.role))
-				case test.wantRoute:
-					if !reflect.DeepEqual(r.URL.Query(), url.Values{"limit": {"17"}, "cursor": {"opaque"}}) {
-						t.Errorf("query = %#v", r.URL.Query())
-					}
-					_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":null}`, test.wantJSON)
-				default:
+				if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
 					t.Errorf("unexpected route %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, `{"detail":"Not Found"}`)
+					return
 				}
+				if !reflect.DeepEqual(r.URL.Query(), url.Values{"limit": {"17"}, "cursor": {"opaque"}}) {
+					t.Errorf("query = %#v", r.URL.Query())
+				}
+				_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":null}`, commandInventorySummaryFull())
 			}))
 			defer server.Close()
 			result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "list", "--limit", "17", "--cursor", "opaque")
-			if result.code != 0 || !reflect.DeepEqual(paths, []string{"/api/v1/auth/me", test.wantRoute}) {
+			if result.code != 0 || !reflect.DeepEqual(paths, []string{"/api/v1/inventory/read/bean-lots"}) {
 				t.Fatalf("result=%#v paths=%#v", result, paths)
 			}
-			if test.role == "member" {
-				for _, forbidden := range []string{"state", "cover_image", "updated_at", "images", "created_at", "archived_at"} {
-					if strings.Contains(result.stdout, `"`+forbidden+`"`) {
-						t.Fatalf("member output fabricated %q: %s", forbidden, result.stdout)
-					}
-				}
-				for _, required := range []string{"Member lot", "Heirloom", "3750"} {
-					if !strings.Contains(result.stdout, required) {
-						t.Fatalf("member output missing %q: %s", required, result.stdout)
-					}
-				}
-			}
+			assertInventoryJSONSuccess(t, result.stdout, inventoryExpectedPage([]any{inventoryExpectedSummaryFull()}, nil))
 		})
 	}
 }
 
-func TestInventoryLotListRechecksRoleForEveryInvocation(t *testing.T) {
-	identityCalls := 0
-	var listPaths []string
+func TestInventoryLotListEveryInvocationUsesFullReadRouteWithoutIdentity(t *testing.T) {
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			identityCalls++
-			role := "member"
-			if identityCalls == 2 {
-				role = "admin"
-			}
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON(role))
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
+			t.Errorf("unexpected route %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"detail":"Not Found"}`)
 			return
 		}
-		listPaths = append(listPaths, r.URL.Path)
 		_, _ = fmt.Fprint(w, `{"items":[],"next_cursor":null}`)
 	}))
 	defer server.Close()
@@ -145,56 +113,49 @@ func TestInventoryLotListRechecksRoleForEveryInvocation(t *testing.T) {
 			t.Fatalf("invocation %d = %#v", index, result)
 		}
 	}
-	want := []string{"/api/v1/inventory/bean-lots", "/api/v1/inventory/admin/bean-lots"}
-	if identityCalls != 2 || !reflect.DeepEqual(listPaths, want) {
-		t.Fatalf("identityCalls=%d listPaths=%#v", identityCalls, listPaths)
+	want := []string{"/api/v1/inventory/read/bean-lots", "/api/v1/inventory/read/bean-lots"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths=%#v", paths)
 	}
 }
 
-func TestInventoryMemberLotListAllPaginatesReducedRoute(t *testing.T) {
+func TestInventoryLotListAllPaginatesFullReadRouteWithoutIdentity(t *testing.T) {
 	var paths, cursors []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		paths = append(paths, r.URL.Path)
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("member"))
-			return
-		}
-		if r.URL.Path != "/api/v1/inventory/bean-lots" {
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		cursor := r.URL.Query().Get("cursor")
 		cursors = append(cursors, cursor)
 		if cursor == "" {
-			_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"opaque +/="}`, commandDesktopLotJSON())
+			_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"opaque +/="}`, commandInventorySummaryFull())
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"items":[],"next_cursor":null}`)
 	}))
 	defer server.Close()
 	result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "inventory", "lot", "list", "--limit", "1", "--all")
-	if result.code != 0 || !reflect.DeepEqual(cursors, []string{"", "opaque +/="}) || len(paths) != 3 {
+	if result.code != 0 || !reflect.DeepEqual(cursors, []string{"", "opaque +/="}) || len(paths) != 2 {
 		t.Fatalf("result=%#v paths=%#v cursors=%#v", result, paths, cursors)
 	}
 }
 
-func TestInventoryMemberLotListRefusesAdminFiltersBeforeReducedRoute(t *testing.T) {
+func TestInventoryLotListAcceptsFullFiltersWithoutIdentity(t *testing.T) {
 	for _, option := range [][]string{{"--q", "lot"}, {"--state", "active"}, {"--availability", "positive"}, {"--conflict", "none"}, {"--roast-uuid", commandRoastID}} {
 		t.Run(strings.TrimPrefix(option[0], "--"), func(t *testing.T) {
-			var reducedRequests int
+			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if r.URL.Path == "/api/v1/auth/me" {
-					_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("member"))
-					return
-				}
-				reducedRequests++
+				paths = append(paths, r.URL.Path)
+				_, _ = fmt.Fprint(w, `{"items":[],"next_cursor":null}`)
 			}))
 			defer server.Close()
 			args := append([]string{"--json", "inventory", "lot", "list"}, option...)
 			result := runAuthCommand(t, inventoryRuntime(t, server.URL), args...)
-			if result.code != 2 || !strings.Contains(result.stdout, `"code":"member_list_filters_unsupported"`) || reducedRequests != 0 {
-				t.Fatalf("result=%#v reducedRequests=%d", result, reducedRequests)
+			if result.code != 0 || !reflect.DeepEqual(paths, []string{"/api/v1/inventory/read/bean-lots"}) {
+				t.Fatalf("result=%#v paths=%#v", result, paths)
 			}
 		})
 	}
@@ -204,11 +165,7 @@ func TestInventoryLotListHumanUsesExactFiltersAndDoesNotTruncate(t *testing.T) {
 	var query url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
-			return
-		}
-		if r.URL.Path != "/api/v1/inventory/admin/bean-lots" {
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		query = r.URL.Query()
@@ -261,9 +218,8 @@ func TestInventoryBearerReflectionIsRefusedInHumanAndJSONModes(t *testing.T) {
 func TestInventoryLotListJSONRetainsPageAndCursor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
-			return
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"next"}`, commandInventorySummaryFull())
 	}))
@@ -279,9 +235,8 @@ func TestInventoryLotListAllFollowsOpaqueCursorsAndReturnsNullCursor(t *testing.
 	var cursors []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
-			return
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
 		cursor := r.URL.Query().Get("cursor")
 		cursors = append(cursors, cursor)
@@ -384,9 +339,8 @@ func TestInventoryLotListAllPaginationFailureEmitsNoPartialData(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
-			return
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
 		requests++
 		_, _ = fmt.Fprintf(w, `{"items":[%s],"next_cursor":"same"}`, commandInventorySummary(commandLotID, "must-not-leak", 5000))
@@ -476,15 +430,15 @@ func inventoryExpectedImage() map[string]any {
 		"position": json.Number("0"), "is_cover": true,
 		"display_width": json.Number("1600"), "display_height": json.Number("1200"),
 		"thumbnail_width": json.Number("480"), "thumbnail_height": json.Number("360"),
-		"display_url":   "/api/v1/inventory/admin/bean-lots/" + commandLotID + "/images/" + commandImageID + "/display",
-		"thumbnail_url": "/api/v1/inventory/admin/bean-lots/" + commandLotID + "/images/" + commandImageID + "/thumbnail",
+		"display_url":   "/api/v1/inventory/read/bean-lots/" + commandLotID + "/images/" + commandImageID + "/display",
+		"thumbnail_url": "/api/v1/inventory/read/bean-lots/" + commandLotID + "/images/" + commandImageID + "/thumbnail",
 	}
 }
 
 func inventoryExpectedSummaryFull() map[string]any {
 	return map[string]any{
 		"lot_id": commandLotID, "name": "Lot", "origin": "Ethiopia", "processing_method": "washed",
-		"crop_year": json.Number("2026"), "state": "active", "price_per_kg_eur_cents": nil, "on_hand_grams": json.Number("5000"),
+		"crop_year": json.Number("2026"), "state": "active", "price_per_kg_eur_cents": json.Number("1234"), "on_hand_grams": json.Number("5000"),
 		"reserved_grams": json.Number("1250"), "available_grams": json.Number("3750"),
 		"unresolved_conflict_count": json.Number("2"), "cover_image": inventoryExpectedImage(), "updated_at": commandTimestamp,
 	}
@@ -507,9 +461,9 @@ func inventoryExpectedLotDetail() map[string]any {
 		"altitude_min_metres": json.Number("1900"), "altitude_max_metres": nil, "notes": "seasonal",
 		"images": []any{inventoryExpectedImage()}, "created_at": commandTimestamp, "archived_at": nil,
 		"links": map[string]any{
-			"self":         "/api/v1/inventory/admin/bean-lots/" + commandLotID,
-			"ledger":       "/api/v1/inventory/admin/bean-lots/" + commandLotID + "/ledger",
-			"reservations": "/api/v1/inventory/admin/bean-lots/" + commandLotID + "/reservations",
+			"self":         "/api/v1/inventory/read/bean-lots/" + commandLotID,
+			"ledger":       "/api/v1/inventory/read/bean-lots/" + commandLotID + "/ledger",
+			"reservations": "/api/v1/inventory/read/bean-lots/" + commandLotID + "/reservations",
 		},
 	} {
 		value[key] = item
@@ -533,7 +487,7 @@ func inventoryExpectedReservation() map[string]any {
 		"reservation_id": commandReservationID, "client_reservation_uuid": commandEntryID,
 		"lot_id": commandLotID, "roast_uuid": commandRoastID, "client_instance_uuid": commandClientID,
 		"state": "finalized", "planned_grams": json.Number("1250"), "actual_grams": json.Number("1200"),
-		"roast_cost_eur_cents": nil, "reserved_at": commandTimestamp, "completed_at": commandTimestamp, "created_at": commandTimestamp,
+		"roast_cost_eur_cents": json.Number("5678"), "reserved_at": commandTimestamp, "completed_at": commandTimestamp, "created_at": commandTimestamp,
 		"updated_at": commandTimestamp, "open_conflict_id": commandConflictID,
 	}
 }
@@ -556,7 +510,7 @@ func inventoryExpectedOpenConflict() map[string]any {
 	}
 }
 
-func TestInventoryReadCommandsUseAdminRoutesAndNormalizeIDs(t *testing.T) {
+func TestInventoryReadCommandsUseReadRoutesAndNormalizeIDs(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -592,12 +546,12 @@ func TestInventoryReadCommandsUseAdminRoutesAndNormalizeIDs(t *testing.T) {
 		}
 	}
 	want := []string{
-		"/api/v1/inventory/admin/bean-lots/" + commandLotID,
-		"/api/v1/inventory/admin/bean-lots/" + commandLotID + "/ledger",
-		"/api/v1/inventory/admin/bean-lots/" + commandLotID + "/reservations",
-		"/api/v1/inventory/admin/bean-lots/" + commandLotID + "/conflicts",
-		"/api/v1/inventory/admin/bean-lots/" + commandLotID + "/conflicts",
-		"/api/v1/inventory/admin/conflicts/" + commandConflictID,
+		"/api/v1/inventory/read/bean-lots/" + commandLotID,
+		"/api/v1/inventory/read/bean-lots/" + commandLotID + "/ledger",
+		"/api/v1/inventory/read/bean-lots/" + commandLotID + "/reservations",
+		"/api/v1/inventory/read/bean-lots/" + commandLotID + "/conflicts",
+		"/api/v1/inventory/read/bean-lots/" + commandLotID + "/conflicts",
+		"/api/v1/inventory/read/conflicts/" + commandConflictID,
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths = %#v, want %#v", paths, want)
@@ -621,9 +575,8 @@ func TestInventoryReadUsageAndUpgradeFailuresHaveStableExits(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = fmt.Fprint(w, commandIdentityForRoleJSON("admin"))
-			return
+		if r.URL.Path != "/api/v1/inventory/read/bean-lots" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"detail":"Not Found"}`)
@@ -640,11 +593,11 @@ func commandConflictJSON() string {
 }
 
 func commandLotDetailFullJSON() string {
-	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/reservations"}}`
+	return strings.TrimSuffix(commandInventorySummaryFull(), "}") + `,"producer":"Producer","supplier":null,"external_reference":"EXT-1","received_date":"2026-08-01","varietals":["Heirloom","74110"],"sca_score":"87.50","processing_detail":"Raised beds","altitude_min_metres":1900,"altitude_max_metres":null,"notes":"seasonal","images":[` + commandInventoryImageJSON() + `],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
 }
 
 func commandLotDetailJSON() string {
-	return strings.TrimSuffix(commandInventorySummary(commandLotID, "Lot", 5000), "}") + `,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/admin/bean-lots/` + commandLotID + `/reservations"}}`
+	return strings.TrimSuffix(commandInventorySummary(commandLotID, "Lot", 5000), "}") + `,"producer":null,"supplier":null,"external_reference":null,"received_date":null,"varietals":[],"sca_score":null,"processing_detail":null,"altitude_min_metres":null,"altitude_max_metres":null,"notes":null,"images":[],"created_at":"` + commandTimestamp + `","archived_at":null,"links":{"self":"/api/v1/inventory/read/bean-lots/` + commandLotID + `","ledger":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/ledger","reservations":"/api/v1/inventory/read/bean-lots/` + commandLotID + `/reservations"}}`
 }
 func TestRouteScopedHostileProjectionIsNeverPrinted(t *testing.T) {
 	const hostileName = "hostile-valid-projection"

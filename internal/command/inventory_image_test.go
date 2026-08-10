@@ -295,7 +295,7 @@ func TestInventoryImageDownloadSelectsVariantAndWritesOnlyFile(t *testing.T) {
 	if result.code != 0 || result.stderr != "" || strings.Contains(result.stdout, "webp-private") {
 		t.Fatalf("result = %#v", result)
 	}
-	if path != "/api/v1/inventory/admin/bean-lots/"+commandLotID+"/images/"+commandImageID+"/thumbnail" {
+	if path != "/api/v1/inventory/read/bean-lots/"+commandLotID+"/images/"+commandImageID+"/thumbnail" {
 		t.Fatalf("path = %q", path)
 	}
 	body, err := os.ReadFile(destination)
@@ -339,7 +339,7 @@ func TestCobraImageDownloadAcceptsDashPrefixedDestinationBeforeLaterFlags(t *tes
 	if err != nil || string(body) != "dash-destination" {
 		t.Fatalf("destination body = %q, %v", body, err)
 	}
-	if path != "/api/v1/inventory/admin/bean-lots/"+commandLotID+"/images/"+commandImageID+"/thumbnail" {
+	if path != "/api/v1/inventory/read/bean-lots/"+commandLotID+"/images/"+commandImageID+"/thumbnail" {
 		t.Fatalf("path = %q", path)
 	}
 }

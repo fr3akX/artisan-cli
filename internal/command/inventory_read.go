@@ -111,28 +111,6 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	if client == nil {
 		return code
 	}
-	identity, identityFailure := client.Identity(ctx)
-	if identityFailure != nil {
-		return writeFailure(runtime, jsonMode, *identityFailure)
-	}
-	if identity.Role == "member" {
-		if options.Query != "" || options.State != "" || options.Availability != "" || options.Conflict != "" || options.RoastUUID != "" {
-			return writeFailure(runtime, jsonMode, output.Error{ExitCode: 2, Code: "member_list_filters_unsupported", Message: "Member lot lists support only --limit, --cursor, and --all"})
-		}
-		pageOptions := api.PageOptions{Limit: options.Limit, Cursor: options.Cursor}
-		var page api.DesktopBeanLotPage
-		var failure *output.Error
-		if *all {
-			page, failure = client.ListAllDesktopBeanLots(ctx, pageOptions)
-		} else {
-			page, failure = client.ListDesktopBeanLots(ctx, pageOptions)
-		}
-		if failure != nil {
-			return writeFailure(runtime, jsonMode, *failure)
-		}
-		return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeDesktopLotTable(w, page) })
-	}
-
 	var page api.BeanLotPage
 	var failure *output.Error
 	if *all {

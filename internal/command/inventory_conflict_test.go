@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestInventoryConflictReadsNeverPromptAndUseAdminNamespace(t *testing.T) {
+func TestInventoryConflictReadsNeverPromptAndUseReadNamespace(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -31,7 +31,7 @@ func TestInventoryConflictReadsNeverPromptAndUseAdminNamespace(t *testing.T) {
 	if listed.code != 0 || shown.code != 0 || listed.stderr != "" || shown.stderr != "" {
 		t.Fatalf("listed=%#v shown=%#v", listed, shown)
 	}
-	want := []string{"/api/v1/inventory/admin/bean-lots/" + commandLotID + "/conflicts", "/api/v1/inventory/admin/conflicts/" + commandConflictID}
+	want := []string{"/api/v1/inventory/read/bean-lots/" + commandLotID + "/conflicts", "/api/v1/inventory/read/conflicts/" + commandConflictID}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths=%#v want=%#v", paths, want)
 	}
