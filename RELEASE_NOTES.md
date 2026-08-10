@@ -12,11 +12,13 @@ integer cents in `price_per_kg_eur_cents` and `roast_cost_eur_cents`. Totals
 report priced and unpriced lot counts so partial valuation coverage remains
 explicit; they are never reconstructed from paginated lot output.
 
-Price flags accept canonical unsigned decimal EUR through two fractional
-digits, for example `--price-per-kg-eur 12.34`; zero is priced and null is
-unpriced. Price changes retain idempotency and authoritative reread
-requirements. A server without the compatible inventory API returns
-`server_upgrade_required`.
+Price flags accept canonical unsigned decimal EUR with zero, one, or two
+fractional digits, for example `--price-per-kg-eur 12.34`.
+Only the single whole part `0` may start with zero;
+whole parts such as `00` and `01` are rejected. Zero is priced and null is
+unpriced. Price changes retain idempotency and
+authoritative reread requirements. A server without the compatible inventory
+API returns `server_upgrade_required`.
 
 Production smoke is read-only. Never mutate production inventory to validate
 this release.

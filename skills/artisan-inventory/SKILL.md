@@ -52,7 +52,7 @@ artisan --json --server <EXPECTED_SERVER_URL> inventory lot conflicts <LOT_ID> -
 
 Select from JSON under a human-supplied policy. Re-read `<LOT_ID>`; compare its normalized `lot_id`, then verify state, integer `on_hand_grams`, `reserved_grams`, `available_grams`, price, and conflicts. Use `inventory totals` for the same initial filter set and again after relevant mutations. Never sum totals or costs locally from paginated lot list output; the server response is authoritative. When valuation coverage is partial, report both `priced_lot_count` and `unpriced_lot_count`.
 
-JSON `price_per_kg_eur_cents` is integer cents or `null`; zero is priced and `null` is unpriced. Human price input uses unsigned decimal EUR with at most two fractional digits, for example `--price-per-kg-eur 12.34`, and must never be converted through floating point.
+JSON `price_per_kg_eur_cents` is integer cents or `null`; zero is priced and `null` is unpriced. Human price input uses unsigned decimal EUR with zero, one, or two fractional digits, for example `--price-per-kg-eur 12.34`. Only the single whole part `0` may start with zero; whole parts such as `00` and `01` are rejected. Never convert a price through floating point.
 
 ```sh
 artisan --json --server <EXPECTED_SERVER_URL> inventory lot create --name <NAME> --opening-grams <INTEGER_GRAMS> --opening-reason <REASON> --price-per-kg-eur 12.34 --idempotency-key <KEY>

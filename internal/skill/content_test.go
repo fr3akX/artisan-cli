@@ -124,6 +124,8 @@ func TestPricingTotalsSkillSourceAndGeneratedContract(t *testing.T) {
 		for _, required := range []string{
 			"inventory totals --state active --availability positive",
 			"--price-per-kg-eur 12.34",
+			"Only the single whole part `0` may start with zero",
+			"whole parts such as `00` and `01` are rejected",
 			"`price_per_kg_eur_cents`",
 			"integer cents or `null`",
 			"`priced_lot_count`",

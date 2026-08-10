@@ -126,12 +126,14 @@ create/image syntax.
 
 Human price input such as `--price-per-kg-eur 12.34` accepts only canonical
 unsigned decimal EUR with zero, one, or two fractional digits: `0`, `0.0`,
-`0.00`, `12.3`, `12.34`, through the maximum `21474836.47`. Signs, leading or
-trailing whitespace, separators, exponent notation, an empty value, a trailing
-decimal point, more than two fractional digits, and larger values are rejected.
-Parsing is decimal-to-integer and never uses floating point. On create, omitted
-price is null/unpriced; on update, omission leaves it unchanged. A price of zero
-is a real priced value, not null.
+`0.00`, `12.3`, `12.34`, through the maximum `21474836.47`.
+Only the single whole part `0` may start with zero;
+whole parts such as `00` and `01` are rejected. Signs, leading or trailing
+whitespace, separators, exponent notation,
+an empty value, a trailing decimal point, more than two fractional digits, and
+larger values are rejected. Parsing is decimal-to-integer and never uses
+floating point. On create, omitted price is null/unpriced; on update, omission
+leaves it unchanged. A price of zero is a real priced value, not null.
 
 Strict JSON uses `price_per_kg_eur_cents`: an integer from 0 through
 2147483647, or `null` where allowed. Create requires the complete field and
