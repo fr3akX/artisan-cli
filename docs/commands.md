@@ -169,8 +169,15 @@ manifest and sparse description patches look like:
 }
 ```
 
+Set `description`:
+
 ```json
 {"description":"Updated customer-facing story"}
+```
+
+Clear `description`:
+
+```json
 {"description":null}
 ```
 

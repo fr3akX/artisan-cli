@@ -162,10 +162,15 @@ representative complete field object uses:
 }
 ```
 
-Strict sparse updates set or clear the same key:
+Strict sparse updates set the same key:
 
 ```json
 {"description":"Updated customer-facing story"}
+```
+
+They clear the key with JSON null:
+
+```json
 {"description":null}
 ```
 

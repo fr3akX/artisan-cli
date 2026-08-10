@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -339,6 +340,55 @@ func TestDocumentationContract(t *testing.T) {
 		} else if !strings.Contains(string(contents), serverRef) {
 			t.Errorf("%s missing minimum compatible server ref %s", path, serverRef)
 		}
+	}
+}
+
+func TestPublicDocumentationJSONFencesContainOneValue(t *testing.T) {
+	root := repositoryRoot(t)
+	paths := []string{
+		filepath.Join(root, "README.md"),
+		filepath.Join(root, "RELEASE_NOTES.md"),
+	}
+	docPaths, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, docPaths...)
+
+	for _, path := range paths {
+		path := path
+		t.Run(filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator))), func(t *testing.T) {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(string(contents), "\n")
+			for index := 0; index < len(lines); index++ {
+				if strings.TrimSpace(lines[index]) != "```json" {
+					continue
+				}
+				startLine := index + 1
+				index++
+				var fenced strings.Builder
+				for index < len(lines) && strings.TrimSpace(lines[index]) != "```" {
+					fenced.WriteString(lines[index])
+					fenced.WriteByte('\n')
+					index++
+				}
+				if index == len(lines) {
+					t.Fatalf("json fence starting on line %d is not closed", startLine)
+				}
+				decoder := json.NewDecoder(strings.NewReader(fenced.String()))
+				var value any
+				if err := decoder.Decode(&value); err != nil {
+					t.Errorf("json fence starting on line %d does not contain a valid JSON value: %v", startLine, err)
+					continue
+				}
+				if err := decoder.Decode(&value); !errors.Is(err, io.EOF) {
+					t.Errorf("json fence starting on line %d must contain exactly one JSON value", startLine)
+				}
+			}
+		})
 	}
 }
 
