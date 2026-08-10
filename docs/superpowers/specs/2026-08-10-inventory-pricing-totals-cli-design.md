@@ -112,7 +112,7 @@ Administrator and member lot lists use the new bearer read route and support the
 
 Reservation-history responses include `roast_cost_eur_cents`. Human tables add `ROAST COST`: reserved and finalized values render as exact EUR, while released or unpriced reservations render as `-`. JSON preserves the nullable integer-cent field without adding presentation strings.
 
-Commands unrelated to the new read contract retain their current authorization. Ledger and conflict administration remain administrator-only.
+All safe inventory reads use the member-capable namespace. Ledger and conflict mutation remain administrator-only.
 
 ## Server API
 
@@ -125,6 +125,11 @@ GET /api/v1/inventory/read/bean-lots
 GET /api/v1/inventory/read/bean-lots/totals
 GET /api/v1/inventory/read/bean-lots/{lot_id}
 GET /api/v1/inventory/read/bean-lots/{lot_id}/reservations
+GET /api/v1/inventory/read/bean-lots/{lot_id}/ledger
+GET /api/v1/inventory/read/bean-lots/{lot_id}/conflicts
+GET /api/v1/inventory/read/conflicts/{conflict_id}
+GET /api/v1/inventory/read/bean-lots/{lot_id}/images/{image_id}/thumbnail
+GET /api/v1/inventory/read/bean-lots/{lot_id}/images/{image_id}/display
 ```
 
 The static `/totals` route is registered before the dynamic `/{lot_id}` route.
@@ -139,9 +144,9 @@ The list route accepts `limit`, `cursor`, `q`, `state`, `availability`, `conflic
 
 The totals route accepts `q`, `state`, `availability`, `conflict`, and `roast_uuid`, but no pagination parameters. It calls the shared filter builder and aggregate service used by the browser totals route.
 
-The detail route returns the complete lot projection including nullable price. Its `self` and `reservations` links use the read namespace. Its ledger link continues to identify the administrator-only ledger resource.
+The detail route returns the complete lot projection including nullable price. Its `self`, `ledger`, and `reservations` links use the read namespace, and every image URL identifies the matching read-namespace stream.
 
-The reservations route returns the established reservation projection including nullable `roast_cost_eur_cents`, derived from the lot's current price and the reservation's current state and quantity basis.
+The ledger, reservations, lot-conflicts, conflict-detail, and image-stream routes reuse the established projections and services. Reservation responses include nullable `roast_cost_eur_cents`, derived from the lot's current price and the reservation's current state and quantity basis. Image streams retain their private cache headers, size limits, content type, and tenant-scoped not-found behavior.
 
 ### Existing boundaries
 
@@ -175,7 +180,7 @@ Malformed values fail as `invalid_server_response` with exit code 9.
 
 ## CLI request flow
 
-`inventory lot list`, `lot show`, `lot reservations`, and `inventory totals` call the read namespace for both administrators and members. This removes the list command's role-dependent desktop/admin route selection and avoids an identity preflight request.
+Every safe inventory read calls the read namespace for both administrators and members: lot list/detail, ledger, reservations, lot conflicts, conflict detail, image download, and filtered totals. This removes the list command's role-dependent desktop/admin route selection, avoids an identity preflight request, and ensures links returned in complete lot projections remain usable by members.
 
 A `404` that indicates the read namespace is absent maps to the established `server_upgrade_required` error. Entity-specific not-found responses remain ordinary `bean_lot_not_found` failures. CLI `v0.3.0` documentation names the resulting merged server commit as its minimum compatible version.
 
@@ -234,7 +239,7 @@ Use unit and `httptest.Server` coverage for:
 - create/update/clear request bodies;
 - list, detail, totals, and reservation response validation;
 - totals query mapping without pagination;
-- member and administrator read behavior;
+- member and administrator behavior for every safe read, including ledger, conflicts, and image download;
 - server-upgrade and entity-not-found classification;
 - exact human money rendering;
 - stable JSON envelopes;
@@ -246,7 +251,7 @@ Use unit and `httptest.Server` coverage for:
 
 Advance `integration/artisan-server.ref` to the merged compatible server commit. The guarded disposable Compose suite compiles the CLI and exercises:
 
-- member and administrator financial reads;
+- member and administrator financial reads plus linked ledger, conflict, and image reads;
 - identical filtered totals for both roles;
 - administrator price create/update/clear behavior inside the disposable stack;
 - member price mutation rejection;
