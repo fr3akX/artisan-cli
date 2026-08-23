@@ -136,10 +136,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 		ValidateResponse: validator,
 	}, &comment)
 	if failure != nil {
-		if containsAny(failure.Code, []string{request.Body}) || containsAny(failure.Message, []string{request.Body}) {
-			return result, invalidServerResponseAvoiding(httpStatusOrZero(failure), []string{c.token, c.serverURL.String(), request.Body})
-		}
-		return result, classifyRoastAPIFailure(failure, true)
+		return result, sanitizeRoastReviewPostFailure(classifyRoastAPIFailure(failure, true), request.Body)
 	}
 	if comment.RoastUUID != roastUUID || comment.CommentUUID != locationCommentUUID || (!replay && (comment.IsDeleted || comment.Body == nil || *comment.Body != request.Body)) {
 		return result, invalidServerResponse(http.StatusCreated)
@@ -213,9 +210,40 @@ func reviewRevisionChangedFailure() *output.Error {
 	return &output.Error{ExitCode: 7, Code: "roast_revision_changed", Message: "The roast revision changed before the review could be posted"}
 }
 
-func httpStatusOrZero(failure *output.Error) int {
-	if failure == nil || failure.HTTPStatus == nil {
-		return 0
+func sanitizeRoastReviewPostFailure(failure *output.Error, requestBody string) *output.Error {
+	if failure == nil {
+		return nil
 	}
-	return *failure.HTTPStatus
+	if failure.HTTPStatus != nil && strings.Contains(requestBody, failure.Code) && !knownRoastReviewFailureCode(failure.Code) {
+		return invalidServerResponse(*failure.HTTPStatus)
+	}
+	sanitized := *failure
+	switch failure.Code {
+	case "roast_revision_changed":
+		sanitized.Message = "The roast revision changed before the review could be posted"
+	case "review_idempotency_conflict":
+		sanitized.Message = "The roast review identity conflicts with an existing request"
+	case "not_found":
+		sanitized.Message = "Roast not found"
+	case "authentication_required":
+		sanitized.Message = "Authentication required"
+	case "permission_denied":
+		sanitized.Message = "Permission denied"
+	case "invalid_review":
+		sanitized.Message = "Roast review is invalid"
+	case "server_upgrade_required":
+		sanitized.Message = "The server does not provide the roast archive API; upgrade Artisan Server"
+	default:
+		sanitized.Message = "Review request failed"
+	}
+	return &sanitized
+}
+
+func knownRoastReviewFailureCode(code string) bool {
+	switch code {
+	case "roast_revision_changed", "review_idempotency_conflict", "not_found", "authentication_required", "permission_denied", "invalid_review":
+		return true
+	default:
+		return false
+	}
 }

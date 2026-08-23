@@ -122,6 +122,9 @@ func windowsPathContainsParent(path string) bool {
 
 func windowsSnapshotPath(path string) (string, []string, bool) {
 	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) && strings.HasPrefix(clean, `\`) {
+		return "", nil, false
+	}
 	root := "."
 	remainder := clean
 	if filepath.IsAbs(clean) {

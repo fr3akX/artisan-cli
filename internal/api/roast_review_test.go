@@ -312,6 +312,28 @@ func TestPostRoastReviewMapsAPIAndMissingEndpointErrors(t *testing.T) {
 	}
 }
 
+func TestPostRoastReviewDoesNotReturnReviewBodyExcerptsFromAPIErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeRoastJSON(w, validRoastDetailJSON())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_review","message":"Measured evidence."}}`)
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion})
+	if failure == nil || failure.Code != "invalid_review" {
+		t.Fatalf("failure = %+v", failure)
+	}
+	if strings.Contains(failure.Message, "Measured evidence.") {
+		t.Fatalf("failure reflects review-body excerpt: %+v", failure)
+	}
+}
+
 func TestPostRoastReviewRejectsRedirectsMalformedResponsesAndReflections(t *testing.T) {
 	for _, test := range []struct {
 		name string

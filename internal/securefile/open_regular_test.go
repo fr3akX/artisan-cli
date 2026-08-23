@@ -165,6 +165,24 @@ func TestReadRegularSnapshotRejectsSameSizeChangeDuringRead(t *testing.T) {
 	}
 }
 
+func TestReadRegularSnapshotRejectsShortRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review")
+	if err := os.WriteFile(path, []byte("abcdefgh"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
+		if event == "during-read" && !changed {
+			changed = true
+			return os.Truncate(path, 4)
+		}
+		return nil
+	}})
+	if !errors.Is(err, ErrInvalidRegularSnapshot) {
+		t.Fatalf("error = %v, want short-read rejection", err)
+	}
+}
+
 func TestReadRegularSnapshotRejectsDevice(t *testing.T) {
 	if _, err := os.Stat(os.DevNull); err != nil {
 		t.Skipf("null device unavailable: %v", err)
