@@ -17,8 +17,12 @@ const (
 	// MaxRoastAggregateItems is the finite item ceiling for every roast --all traversal.
 	MaxRoastAggregateItems = 10_000
 	// MaxRoastAggregatePages bounds requests and cursor memory for every roast --all traversal.
-	MaxRoastAggregatePages = 1_000
-	maxRoastCursorBytes    = 512
+	MaxRoastAggregatePages        = 1_000
+	maxRoastCursorBytes           = 512
+	maxRoastPageItems             = 100
+	defaultRoastListPageItems     = 50
+	defaultRoastRevisionPageItems = 50
+	defaultRoastCommentPageItems  = 20
 )
 
 // RoastListOptions contains every server-supported private roast list filter.
@@ -63,7 +67,13 @@ func (c *Client) ListRoasts(ctx context.Context, options RoastListOptions) (Roas
 	}
 	var page RoastPage
 	failure = c.doRoastRead(ctx, roastAPIRoot, query, false, nil, &page)
-	return page, failure
+	if failure != nil {
+		return page, failure
+	}
+	if failure = validateRoastResponsePageSize(len(page.Items), options.Limit, defaultRoastListPageItems); failure != nil {
+		return RoastPage{}, failure
+	}
+	return page, nil
 }
 
 func (c *Client) ListAllRoasts(ctx context.Context, options RoastListOptions) (RoastPage, *output.Error) {
@@ -100,7 +110,13 @@ func (c *Client) RoastRevisions(ctx context.Context, rawRoastUUID string, option
 	}
 	var page RoastRevisionPage
 	failure = c.doRoastRead(ctx, roastAPIRoot+"/"+roastUUID+"/revisions", query, true, roastRevisionHeaderValidator(roastUUID), &page)
-	return page, failure
+	if failure != nil {
+		return page, failure
+	}
+	if failure = validateRoastResponsePageSize(len(page.Items), options.Limit, defaultRoastRevisionPageItems); failure != nil {
+		return RoastRevisionPage{}, failure
+	}
+	return page, nil
 }
 
 func (c *Client) AllRoastRevisions(ctx context.Context, rawRoastUUID string, options PageOptions) (RoastRevisionPage, *output.Error) {
@@ -124,14 +140,18 @@ func (c *Client) RoastComments(ctx context.Context, rawRoastUUID string, options
 	}
 	var page CommentPage
 	failure = c.doRoastRead(ctx, roastAPIRoot+"/"+roastUUID+"/comments", query, true, nil, &page)
-	if failure == nil {
-		for _, comment := range page.Items {
-			if comment.RoastUUID != roastUUID {
-				return CommentPage{}, invalidServerResponse(http.StatusOK)
-			}
+	if failure != nil {
+		return page, failure
+	}
+	if failure = validateRoastResponsePageSize(len(page.Items), options.Limit, defaultRoastCommentPageItems); failure != nil {
+		return CommentPage{}, failure
+	}
+	for _, comment := range page.Items {
+		if comment.RoastUUID != roastUUID {
+			return CommentPage{}, invalidServerResponse(http.StatusOK)
 		}
 	}
-	return page, failure
+	return page, nil
 }
 
 func (c *Client) AllRoastComments(ctx context.Context, rawRoastUUID string, options PageOptions) (CommentPage, *output.Error) {
@@ -236,7 +256,7 @@ func roastListQuery(options RoastListOptions) (url.Values, *output.Error) {
 func roastPageQuery(options PageOptions) (url.Values, *output.Error) {
 	query := make(url.Values)
 	if options.Limit != 0 {
-		if options.Limit < 1 || options.Limit > 100 {
+		if options.Limit < 1 || options.Limit > maxRoastPageItems {
 			return nil, invalidRoastFilter()
 		}
 		query.Set("limit", strconv.Itoa(options.Limit))
@@ -248,6 +268,17 @@ func roastPageQuery(options PageOptions) (url.Values, *output.Error) {
 		query.Set("cursor", options.Cursor)
 	}
 	return query, nil
+}
+
+func validateRoastResponsePageSize(itemCount, requestedLimit, defaultLimit int) *output.Error {
+	effectiveLimit := requestedLimit
+	if effectiveLimit == 0 {
+		effectiveLimit = defaultLimit
+	}
+	if itemCount > effectiveLimit {
+		return invalidServerResponse(http.StatusOK)
+	}
+	return nil
 }
 
 func normalizeRoastFilterTime(raw string) (*time.Time, *output.Error) {
@@ -296,11 +327,11 @@ func collectRoastPages[T any](initialCursor string, maxItems int, fetch func(str
 		if failure != nil {
 			return nil, failure
 		}
-		if nextCursor != nil && len(pageItems) == 0 {
-			return nil, &output.Error{ExitCode: 9, Code: "invalid_server_response", Message: "The server returned an empty roast page with a continuation cursor"}
+		if len(pageItems) == 0 && (nextCursor != nil || pages > 1) {
+			return nil, &output.Error{ExitCode: 9, Code: "invalid_server_response", Message: "The server returned a roast page without pagination progress"}
 		}
 		if len(pageItems) > maxItems-len(items) {
-			return nil, invalidServerResponse(http.StatusOK)
+			return nil, &output.Error{ExitCode: 9, Code: "pagination_limit_exceeded", Message: "Roast pagination exceeded the 10000 item safety limit"}
 		}
 		items = append(items, pageItems...)
 		if nextCursor == nil {

@@ -317,7 +317,7 @@ func TestAllRoastReadsFollowCursorsPreserveFiltersAndBoundTraversal(t *testing.T
 	_, failure = collectRoastPages("", 2, func(string) ([]int, *string, *output.Error) {
 		return []int{1, 2, 3}, nil, nil
 	})
-	if failure == nil || failure.Code != "invalid_server_response" {
+	if failure == nil || failure.Code != "pagination_limit_exceeded" || failure.ExitCode != 9 {
 		t.Fatalf("item bound failure = %#v", failure)
 	}
 	calls := 0
@@ -339,21 +339,21 @@ func TestPublicRoastAggregateMethodsEnforceExactItemBoundary(t *testing.T) {
 		{
 			name: "roasts", item: validRoastListItemJSON(),
 			call: func(client *Client) (int, *output.Error) {
-				page, failure := client.ListAllRoasts(context.Background(), RoastListOptions{})
+				page, failure := client.ListAllRoasts(context.Background(), RoastListOptions{Limit: maxRoastPageItems})
 				return len(page.Items), failure
 			},
 		},
 		{
 			name: "revisions", item: validRoastRevisionJSON(),
 			call: func(client *Client) (int, *output.Error) {
-				page, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{})
+				page, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{Limit: maxRoastPageItems})
 				return len(page.Items), failure
 			},
 		},
 		{
 			name: "comments", item: validDeletedCommentJSON(),
 			call: func(client *Client) (int, *output.Error) {
-				page, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{})
+				page, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{Limit: maxRoastPageItems})
 				return len(page.Items), failure
 			},
 		},
@@ -393,7 +393,7 @@ func TestPublicRoastAggregateMethodsEnforceExactItemBoundary(t *testing.T) {
 					}
 					return
 				}
-				if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 || count != 0 || requests != 101 {
+				if failure == nil || failure.Code != "pagination_limit_exceeded" || failure.ExitCode != 9 || count != 0 || requests != 101 {
 					t.Fatalf("count=%d failure=%#v requests=%d", count, failure, requests)
 				}
 			})
@@ -474,6 +474,181 @@ func TestRoastAggregateReadsRejectEmptyContinuationPagesWithoutFollowing(t *test
 				t.Fatalf("requests = %d, want 1", requests)
 			}
 		})
+	}
+}
+
+func TestRoastAggregateReadsAcceptInitialTerminalEmptyPages(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*Client) (int, *output.Error)
+	}{
+		{name: "roasts", call: func(client *Client) (int, *output.Error) {
+			page, failure := client.ListAllRoasts(context.Background(), RoastListOptions{})
+			return len(page.Items), failure
+		}},
+		{name: "revisions", call: func(client *Client) (int, *output.Error) {
+			page, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{})
+			return len(page.Items), failure
+		}},
+		{name: "comments", call: func(client *Client) (int, *output.Error) {
+			page, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{})
+			return len(page.Items), failure
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			client := roastAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+			})
+			count, failure := tt.call(client)
+			if failure != nil || count != 0 || requests != 1 {
+				t.Fatalf("count=%d failure=%#v requests=%d", count, failure, requests)
+			}
+		})
+	}
+}
+
+func TestRoastAggregateReadsRejectTerminalEmptyContinuationPages(t *testing.T) {
+	tests := []struct {
+		name string
+		item string
+		call func(context.Context, *Client) *output.Error
+	}{
+		{name: "roasts", item: validRoastListItemJSON(), call: func(ctx context.Context, client *Client) *output.Error {
+			_, failure := client.ListAllRoasts(ctx, RoastListOptions{})
+			return failure
+		}},
+		{name: "revisions", item: validRoastRevisionJSON(), call: func(ctx context.Context, client *Client) *output.Error {
+			_, failure := client.AllRoastRevisions(ctx, roastUUID, PageOptions{})
+			return failure
+		}},
+		{name: "comments", item: validDeletedCommentJSON(), call: func(ctx context.Context, client *Client) *output.Error {
+			_, failure := client.AllRoastComments(ctx, roastUUID, PageOptions{})
+			return failure
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				switch requests {
+				case 1:
+					if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+						t.Fatalf("first request cursor = %q", cursor)
+					}
+					writeRoastJSON(w, `{"items":[`+tt.item+`],"next_cursor":"next"}`)
+				case 2:
+					if cursor := r.URL.Query().Get("cursor"); cursor != "next" {
+						t.Fatalf("continuation request cursor = %q", cursor)
+					}
+					writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+				default:
+					t.Fatalf("unexpected request %d", requests)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			failure := tt.call(ctx, client)
+			if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
+func TestRoastListAndAggregateReadsRejectPagesOverRequestLimit(t *testing.T) {
+	tests := []struct {
+		name         string
+		item         string
+		defaultLimit int
+		list         func(*Client, int) *output.Error
+		all          func(*Client, int) *output.Error
+	}{
+		{
+			name: "roasts", item: validRoastListItemJSON(), defaultLimit: defaultRoastListPageItems,
+			list: func(client *Client, limit int) *output.Error {
+				_, failure := client.ListRoasts(context.Background(), RoastListOptions{Limit: limit})
+				return failure
+			},
+			all: func(client *Client, limit int) *output.Error {
+				_, failure := client.ListAllRoasts(context.Background(), RoastListOptions{Limit: limit})
+				return failure
+			},
+		},
+		{
+			name: "revisions", item: validRoastRevisionJSON(), defaultLimit: defaultRoastRevisionPageItems,
+			list: func(client *Client, limit int) *output.Error {
+				_, failure := client.RoastRevisions(context.Background(), roastUUID, PageOptions{Limit: limit})
+				return failure
+			},
+			all: func(client *Client, limit int) *output.Error {
+				_, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{Limit: limit})
+				return failure
+			},
+		},
+		{
+			name: "comments", item: validDeletedCommentJSON(), defaultLimit: defaultRoastCommentPageItems,
+			list: func(client *Client, limit int) *output.Error {
+				_, failure := client.RoastComments(context.Background(), roastUUID, PageOptions{Limit: limit})
+				return failure
+			},
+			all: func(client *Client, limit int) *output.Error {
+				_, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{Limit: limit})
+				return failure
+			},
+		},
+	}
+	callers := []struct {
+		name  string
+		limit int
+		count int
+		call  func(*Client, int) *output.Error
+	}{
+		{name: "list/explicit", limit: 1, count: 2},
+		{name: "list/effective-default"},
+		{name: "aggregate/explicit", limit: 1, count: 2},
+		{name: "aggregate/effective-default"},
+	}
+	for _, tt := range tests {
+		for _, caller := range callers {
+			caller := caller
+			if strings.HasPrefix(caller.name, "list/") {
+				caller.call = tt.list
+			} else {
+				caller.call = tt.all
+			}
+			t.Run(tt.name+"/"+caller.name, func(t *testing.T) {
+				requests := 0
+				responseItemCount := caller.count
+				if responseItemCount == 0 {
+					responseItemCount = tt.defaultLimit + 1
+				}
+				client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					wantQueryLimit := ""
+					if caller.limit != 0 {
+						wantQueryLimit = strconv.Itoa(caller.limit)
+					}
+					if got := r.URL.Query().Get("limit"); got != wantQueryLimit {
+						t.Fatalf("query limit = %q, want %q", got, wantQueryLimit)
+					}
+					writeRoastJSON(w, `{"items":[`+repeatRoastJSONItem(tt.item, responseItemCount)+`],"next_cursor":null,"future_page_field":{"preserved":true}}`)
+				})
+				failure := caller.call(client, caller.limit)
+				if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+					t.Fatalf("failure = %#v", failure)
+				}
+				if requests != 1 {
+					t.Fatalf("requests = %d, want 1", requests)
+				}
+			})
+		}
 	}
 }
 
