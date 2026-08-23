@@ -29,11 +29,7 @@ func (p *heldOtherDownloadPublication) publish(target *downloadTarget, force boo
 		return downloadInstallResult{}, oldErr
 	}
 	linkedNoReplace := false
-	target.state = downloadTargetNativeAttempted
-	target.nativeOperationInvoked = false
-	target.nativeOperationErr = nil
-	nativeErr := target.operations.nativeOperation(func() error {
-		target.nativeOperationInvoked = true
+	nativeErr := target.invokeNative(func() error {
 		target.nativeOperationErr = func() error {
 			if !force {
 				return os.Link(candidatePath, target.destination)
@@ -69,6 +65,13 @@ func (p *heldOtherDownloadPublication) publish(target *downloadTarget, force boo
 					return err
 				}
 			}
+			// Backup fallback preparation can race the remote revision. Re-run
+			// the fence immediately before the decisive replacement syscall.
+			if err := target.prepareNativeOperation(); err != nil {
+				return err
+			}
+			target.state = downloadTargetNativeAttempted
+			target.nativeOperationInvoked = true
 			return os.Rename(candidatePath, target.destination)
 		}()
 		return target.nativeOperationErr

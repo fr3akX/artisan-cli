@@ -153,6 +153,7 @@ type downloadTarget struct {
 	writerClosed           bool
 	nativeOperationInvoked bool
 	nativeOperationErr     error
+	preNativeCallback      func() error
 }
 
 func newDownloadTarget(destination string, force bool, operations downloadOperations) (*downloadTarget, error) {
@@ -226,17 +227,25 @@ func (target *downloadTarget) Reset() error {
 }
 
 func (target *downloadTarget) Install(force bool) (downloadInstallResult, error) {
-	return target.install(context.Background(), force)
+	return target.install(context.Background(), force, nil)
 }
 
 func (target *downloadTarget) InstallContext(ctx context.Context, force bool) (downloadInstallResult, error) {
+	return target.InstallContextBeforeNative(ctx, force, nil)
+}
+
+// InstallContextBeforeNative installs through the ordinary protected target
+// lifecycle and invokes callback only after sealing and platform candidate
+// preparation, immediately before the native namespace operation. A callback
+// error guarantees that no native publication operation is attempted.
+func (target *downloadTarget) InstallContextBeforeNative(ctx context.Context, force bool, callback func() error) (downloadInstallResult, error) {
 	if ctx == nil {
 		return downloadInstallResult{}, errors.New("download install context is required")
 	}
-	return target.install(ctx, force)
+	return target.install(ctx, force, callback)
 }
 
-func (target *downloadTarget) install(ctx context.Context, force bool) (result downloadInstallResult, returnErr error) {
+func (target *downloadTarget) install(ctx context.Context, force bool, callback func() error) (result downloadInstallResult, returnErr error) {
 	if target == nil || target.state != downloadTargetActive {
 		return result, errors.New("download target cannot be installed")
 	}
@@ -257,6 +266,7 @@ func (target *downloadTarget) install(ctx context.Context, force bool) (result d
 	}
 	target.sealedCount, target.sealedDigest = count, digest
 	target.state = downloadTargetSealed
+	target.preNativeCallback = callback
 	if target.platform.closeWriterBeforePublish() {
 		if err := target.closeWriter(); err != nil {
 			return result, err
@@ -293,6 +303,27 @@ func (target *downloadTarget) install(ctx context.Context, force bool) (result d
 		}
 	}
 	return result, errors.Join(returnErr, target.closeAll())
+}
+
+func (target *downloadTarget) prepareNativeOperation() error {
+	target.nativeOperationInvoked = false
+	target.nativeOperationErr = nil
+	if target.preNativeCallback != nil {
+		return target.preNativeCallback()
+	}
+	return nil
+}
+
+func (target *downloadTarget) invokeNative(operation func() error) error {
+	if err := target.prepareNativeOperation(); err != nil {
+		return err
+	}
+	target.state = downloadTargetNativeAttempted
+	return target.operations.nativeOperation(func() error {
+		target.nativeOperationInvoked = true
+		target.nativeOperationErr = operation()
+		return target.nativeOperationErr
+	})
 }
 
 func (target *downloadTarget) verifyHeldSource() error {

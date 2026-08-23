@@ -238,6 +238,13 @@ func (publication *heldUnixDownloadPublication) linuxBackupReplace(target *downl
 			return err
 		}
 	}
+	// Renameat2 capability fallback performs additional preparation. Re-run the
+	// fence at the decisive replacement boundary after that preparation.
+	if err := target.prepareNativeOperation(); err != nil {
+		return err
+	}
+	target.state = downloadTargetNativeAttempted
+	target.nativeOperationInvoked = true
 	return unix.Renameat(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf)
 }
 

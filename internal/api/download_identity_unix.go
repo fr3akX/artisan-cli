@@ -348,14 +348,7 @@ func (publication *heldUnixDownloadPublication) createCandidateFromSource(target
 }
 
 func (publication *heldUnixDownloadPublication) invokeNative(target *downloadTarget, operation func() error) error {
-	target.state = downloadTargetNativeAttempted
-	target.nativeOperationInvoked = false
-	target.nativeOperationErr = nil
-	return target.operations.nativeOperation(func() error {
-		target.nativeOperationInvoked = true
-		target.nativeOperationErr = operation()
-		return target.nativeOperationErr
-	})
+	return target.invokeNative(operation)
 }
 
 func (publication *heldUnixDownloadPublication) afterNative(target *downloadTarget) error {

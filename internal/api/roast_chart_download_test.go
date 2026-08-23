@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -179,7 +180,7 @@ func TestRoastChartCompressedStageRemainsBoundToVerifiedWireBytes(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, _, failure := decompressAndValidateChart(context.Background(), target, compressedTarget, int64(len(original)), "artisan-4-v1"); failure == nil || failure.Code != "invalid_server_response" {
+	if _, _, failure := decompressAndValidateChart(context.Background(), target, compressedTarget, int64(len(original)), "artisan-4-v1", nil); failure == nil || failure.Code != "invalid_server_response" {
 		t.Fatalf("failure = %#v", failure)
 	}
 	compressedTarget.Abort()
@@ -274,6 +275,26 @@ func TestDownloadRoastChartEnforcesCompressedAndExpandedCeilings(t *testing.T) {
 	})
 }
 
+func TestDownloadRoastChartAcceptsNullableNonnegativeDuration(t *testing.T) {
+	for _, duration := range []string{"null", "0", "12.5"} {
+		raw := []byte(strings.Replace(validChartJSON, `"duration_seconds": 0.0`, `"duration_seconds": `+duration, 1))
+		destination := filepath.Join(t.TempDir(), "duration.json")
+		client := chartClient(t, deterministicGzip(t, raw), nil)
+		if _, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false); failure != nil {
+			t.Fatalf("duration %s: %#v", duration, failure)
+		}
+	}
+	for _, duration := range []string{`-0.1`, `1e400`, `"12"`, `true`, `{}`, `[]`} {
+		raw := []byte(strings.Replace(validChartJSON, `"duration_seconds": 0.0`, `"duration_seconds": `+duration, 1))
+		destination := filepath.Join(t.TempDir(), "duration.json")
+		client := chartClient(t, deterministicGzip(t, raw), nil)
+		if _, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false); failure == nil || failure.Code != "invalid_server_response" {
+			t.Fatalf("duration %s: %#v", duration, failure)
+		}
+		assertMissingFileAndTemps(t, destination)
+	}
+}
+
 func TestDownloadRoastChartStrictJSONSchemaValidation(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -286,6 +307,11 @@ func TestDownloadRoastChartStrictJSONSchemaValidation(t *testing.T) {
 		{name: "missing control", raw: []byte(strings.Replace(validChartJSON, `"control": {"markers": [], "steps": []},`, ``, 1))},
 		{name: "null control", raw: []byte(strings.Replace(validChartJSON, `"control": {"markers": [], "steps": []}`, `"control": null`, 1))},
 		{name: "wrong markers", raw: []byte(strings.Replace(validChartJSON, `"markers": []`, `"markers": {}`, 1))},
+		{name: "scalar marker", raw: []byte(strings.Replace(validChartJSON, `"markers": []`, `"markers": [null]`, 1))},
+		{name: "scalar step", raw: []byte(strings.Replace(validChartJSON, `"steps": []`, `"steps": [1]`, 1))},
+		{name: "scalar milestone", raw: []byte(strings.Replace(validChartJSON, `"milestones": []`, `"milestones": ["drop"]`, 1))},
+		{name: "scalar special", raw: []byte(strings.Replace(validChartJSON, `"special": []`, `"special": [false]`, 1))},
+		{name: "scalar extra series", raw: []byte(strings.Replace(validChartJSON, `"series": []`, `"series": [[]]`, 1))},
 		{name: "missing core field", raw: []byte(strings.Replace(validChartJSON, `"bt_ror": [null], `, ``, 1))},
 		{name: "wrong core sample", raw: []byte(strings.Replace(validChartJSON, `"bt": [100.0]`, `"bt": ["100"]`, 1))},
 		{name: "null time sample", raw: []byte(strings.Replace(validChartJSON, `"time_seconds": [0.0]`, `"time_seconds": [null]`, 1))},
@@ -319,6 +345,25 @@ func TestDownloadRoastChartStrictJSONSchemaValidation(t *testing.T) {
 	}
 }
 
+func TestDownloadRoastChartRejectsReflectedSecretsInValidatedChartBytes(t *testing.T) {
+	for _, reflected := range []string{"chart-secret", "http://127.0.0.1"} {
+		raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_reflection":` + strconv.Quote(reflected) + `}`)
+		destination := filepath.Join(t.TempDir(), "existing.json")
+		if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		client := chartClient(t, deterministicGzip(t, raw), nil)
+		_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, true)
+		if failure == nil || failure.Code != "invalid_server_response" || strings.Contains(failure.Message, reflected) {
+			t.Fatalf("reflection %q: %#v", reflected, failure)
+		}
+		if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
+			t.Fatalf("destination = %q, %v", contents, err)
+		}
+		assertNoDownloadTemps(t, destination)
+	}
+}
+
 func TestDownloadRoastChartRevisionFencePreservesForcedDestination(t *testing.T) {
 	compressed := deterministicGzip(t, []byte(validChartJSON))
 	changedSHA := strings.Repeat("e", 64)
@@ -339,6 +384,55 @@ func TestDownloadRoastChartRevisionFencePreservesForcedDestination(t *testing.T)
 			t.Fatalf("destination = %q, %v", contents, err)
 		}
 		assertNoDownloadTemps(t, destination)
+	}
+}
+
+func TestDownloadRoastChartRevisionFenceRejectsSameSHAPreNativeReparse(t *testing.T) {
+	compressed := deterministicGzip(t, []byte(validChartJSON))
+	changedParser := strings.Replace(validRoastDetailJSON(), `"parser_version":"artisan-4-v1"`, `"parser_version":"artisan-5-v1"`, 1)
+	for _, test := range []struct {
+		name        string
+		afterDetail string
+		wantCode    string
+	}{
+		{name: "same SHA parser reparse", afterDetail: changedParser, wantCode: "roast_revision_changed"},
+		{name: "API failure propagates", afterDetail: `{"malformed":`, wantCode: "invalid_server_response"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "existing.json")
+			if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			client := chartClient(t, compressed, nil)
+			var preparationFinished atomic.Bool
+			var detailReads atomic.Int32
+			client.downloadOps.afterCandidateVerifiedBeforeNative = func(*downloadTarget) error {
+				preparationFinished.Store(true)
+				return nil
+			}
+			client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Path {
+				case "/api/v1/roasts/" + roastUUID:
+					detailReads.Add(1)
+					if preparationFinished.Load() {
+						return jsonHTTPResponse(http.StatusOK, test.afterDetail), nil
+					}
+					return jsonHTTPResponse(http.StatusOK, validRoastDetailJSON()), nil
+				case "/api/v1/roasts/" + roastUUID + "/chart":
+					return chartHTTPResponse(compressed), nil
+				default:
+					return nil, fmt.Errorf("unexpected request path")
+				}
+			})
+			_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, true)
+			if !preparationFinished.Load() || detailReads.Load() != 2 || failure == nil || failure.Code != test.wantCode {
+				t.Fatalf("prepared=%v detailReads=%d failure=%#v", preparationFinished.Load(), detailReads.Load(), failure)
+			}
+			if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
+				t.Fatalf("destination = %q, %v", contents, err)
+			}
+			assertNoDownloadTemps(t, destination)
+		})
 	}
 }
 
@@ -650,6 +744,112 @@ func TestDownloadRoastChartNoForcePreservesExistingWithoutNetwork(t *testing.T) 
 	}
 }
 
+func TestDownloadRoastChartUsesGoTransportContentLengthFraming(t *testing.T) {
+	compressed := deterministicGzip(t, []byte(validChartJSON))
+	for _, test := range []struct {
+		name               string
+		second             int
+		mutateParsedLength bool
+		wantError          bool
+	}{
+		{name: "conflicting duplicate rejected by transport", second: len(compressed) + 1, wantError: true},
+		{name: "identical duplicate normalized", second: len(compressed), wantError: false},
+		{name: "normalized length still checked against response field", second: len(compressed), mutateParsedLength: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptestServer(t, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/api/v1/roasts/"+roastUUID+"/chart" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, validRoastDetailJSON())
+					return
+				}
+				connection, buffered, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer connection.Close()
+				sha := chartSHA(compressed)
+				_, _ = fmt.Fprintf(buffered, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\nContent-Length: %d\r\nETag: \"%s\"\r\nX-Content-SHA256: %s\r\nX-Checksum-SHA256: %s\r\nX-Parser-Version: artisan-4-v1\r\nX-Chart-Schema-Version: 1\r\nConnection: close\r\n\r\n", len(compressed), test.second, sha, sha, sha)
+				_, _ = buffered.Write(compressed)
+				_ = buffered.Flush()
+			}))
+			client, err := NewClient(server.URL, "secret", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var normalized atomic.Bool
+			client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				response, err := http.DefaultTransport.RoundTrip(request)
+				if err == nil && request.URL.Path == "/api/v1/roasts/"+roastUUID+"/chart" {
+					if values := response.Header.Values("Content-Length"); len(values) != 1 {
+						t.Errorf("parsed Content-Length values = %v", values)
+					} else {
+						normalized.Store(true)
+					}
+					if test.mutateParsedLength {
+						response.ContentLength++
+					}
+				}
+				return response, err
+			})
+			destination := filepath.Join(t.TempDir(), "chart.json")
+			_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false)
+			if test.wantError {
+				if failure == nil {
+					t.Fatal("conflicting lengths were accepted")
+				}
+				assertMissingFileAndTemps(t, destination)
+				return
+			}
+			if failure != nil {
+				t.Fatalf("identical normalized lengths: %#v", failure)
+			}
+			if !normalized.Load() {
+				t.Fatal("identical duplicate was not observed after transport normalization")
+			}
+		})
+	}
+}
+
+func TestDownloadRoastChartNearLimitValidationDoesNotAllocateDocumentSizedMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("near-64 MiB streaming allocation regression")
+	}
+	prefix := strings.TrimSuffix(validChartJSON, "}") + `,"future_padding":null`
+	padding := maxRoastChartBytes - int64(len(prefix)) - 1 - 1024
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(writer, repeatedByteReader(' '), padding); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(writer, "}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client := chartClient(t, compressed.Bytes(), nil)
+	destination := filepath.Join(t.TempDir(), "large-chart.json")
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	result, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false)
+	runtime.ReadMemStats(&after)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if result.FileBytes < 63<<20 {
+		t.Fatalf("file bytes = %d", result.FileBytes)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
+		t.Fatalf("streaming validation allocated %d bytes for %d-byte chart", allocated, result.FileBytes)
+	}
+}
+
 func chartClient(t *testing.T, compressed []byte, mutate func(*http.Response)) *Client {
 	t.Helper()
 	return chartClientWithDetails(t, compressed, []string{validRoastDetailJSON(), validRoastDetailJSON()}, mutate)
@@ -723,6 +923,15 @@ func assertMissingFileAndTemps(t *testing.T, destination string) {
 		t.Fatalf("destination exists: %v", err)
 	}
 	assertNoDownloadTemps(t, destination)
+}
+
+type repeatedByteReader byte
+
+func (reader repeatedByteReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = byte(reader)
+	}
+	return len(buffer), nil
 }
 
 type writerFunc func([]byte) (int, error)

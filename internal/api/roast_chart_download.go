@@ -15,7 +15,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
@@ -174,7 +173,7 @@ func (c *Client) DownloadRoastChart(ctx context.Context, rawRoastUUID, destinati
 		break
 	}
 
-	fileBytes, fileSHA, failure := decompressAndValidateChart(ctx, target, compressedTarget, compressedBytes, parserVersion)
+	fileBytes, fileSHA, failure := decompressAndValidateChart(ctx, target, compressedTarget, compressedBytes, parserVersion, []string{c.token, c.serverURL.String()})
 	if failure != nil {
 		return result, failure
 	}
@@ -187,16 +186,6 @@ func (c *Client) DownloadRoastChart(ctx context.Context, rawRoastUUID, destinati
 	if ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
-	after, failure := c.Roast(ctx, roastUUID)
-	if failure != nil {
-		return result, failure
-	}
-	if after.State != "parsed" || after.CurrentRevision == nil ||
-		after.CurrentRevision.ParseState != "parsed" ||
-		after.CurrentRevision.RevisionNumber != revision.RevisionNumber ||
-		after.CurrentRevision.SHA256 != revision.SHA256 {
-		return result, roastRevisionChangedFailure()
-	}
 
 	installedResult := RoastChartDownload{
 		Path: destination, RoastUUID: roastUUID,
@@ -205,7 +194,20 @@ func (c *Client) DownloadRoastChart(ctx context.Context, rawRoastUUID, destinati
 		CompressedBytes: compressedBytes, CompressedSHA256: compressedSHA,
 		FileBytes: fileBytes, FileSHA256: fileSHA,
 	}
-	installed, err := target.InstallContext(ctx, force)
+	installed, err := target.InstallContextBeforeNative(ctx, force, func() error {
+		current, currentFailure := c.Roast(ctx, roastUUID)
+		if currentFailure != nil {
+			return &chartFenceCallbackError{failure: currentFailure}
+		}
+		if !sameRoastChartRevision(current, revision, parserVersion) {
+			return &chartFenceCallbackError{failure: roastRevisionChangedFailure()}
+		}
+		return nil
+	})
+	var fenceErr *chartFenceCallbackError
+	if errors.As(err, &fenceErr) {
+		return result, fenceErr.failure
+	}
 	if installed.Publication == publicationNone && ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
@@ -274,7 +276,7 @@ func validRoastChartHeaders(response *http.Response, revision RoastRevision) (in
 	return length, checksum, parserVersion, true
 }
 
-func decompressAndValidateChart(ctx context.Context, target, compressedTarget *downloadTarget, compressedBytes int64, parserVersion string) (int64, string, *output.Error) {
+func decompressAndValidateChart(ctx context.Context, target, compressedTarget *downloadTarget, compressedBytes int64, parserVersion string, forbidden []string) (int64, string, *output.Error) {
 	if compressedBytes < 1 || compressedTarget.heldSourceFile() == nil {
 		return 0, "", invalidServerResponse(http.StatusOK)
 	}
@@ -307,14 +309,10 @@ func decompressAndValidateChart(ctx context.Context, target, compressedTarget *d
 	if compressedTarget.observer == nil || compressedTarget.observer.count != compressedBytes || stageDigest != compressedTarget.observer.digest() {
 		return 0, "", invalidServerResponse(http.StatusOK)
 	}
-	contents, err := io.ReadAll(io.LimitReader(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(target.heldSourceFile(), 0, fileBytes+1)}, maxRoastChartBytes+1))
-	if ctx.Err() != nil {
-		return 0, "", contextOrNetworkFailure(ctx)
-	}
-	if err != nil {
-		return 0, "", chartStorageFailure("Unable to store the roast chart safely")
-	}
-	if int64(len(contents)) != fileBytes || !validateRoastChartJSON(contents, parserVersion) {
+	if err := validateRoastChartFile(ctx, target.heldSourceFile(), fileBytes, parserVersion, forbidden); err != nil {
+		if ctx.Err() != nil {
+			return 0, "", contextOrNetworkFailure(ctx)
+		}
 		return 0, "", invalidServerResponse(http.StatusOK)
 	}
 	return fileBytes, hex.EncodeToString(hasher.Sum(nil)), nil
@@ -332,202 +330,554 @@ func (reader contextBoundReader) Read(buffer []byte) (int, error) {
 	return reader.reader.Read(buffer)
 }
 
-func validateRoastChartJSON(data []byte, parserVersion string) bool {
-	if len(data) == 0 || !utf8.Valid(data) || validateJSONStringSurrogateEscapes(data) != nil || rejectDuplicateJSONKeys(data) != nil {
-		return false
-	}
-	root, ok := decodeChartObject(data)
-	if !ok {
-		return false
-	}
-	control, ok := requiredChartObject(root, "control")
-	if !ok || !requiredChartArray(control, "markers") || !requiredChartArray(control, "steps") {
-		return false
-	}
-	core, ok := requiredChartObject(root, "core")
-	if !ok {
-		return false
-	}
-	bt, ok := requiredChartNumberArray(core, "bt", true)
-	if !ok {
-		return false
-	}
-	btRoR, ok := requiredChartNumberArray(core, "bt_ror", true)
-	if !ok {
-		return false
-	}
-	et, ok := requiredChartNumberArray(core, "et", true)
-	if !ok {
-		return false
-	}
-	etRoR, ok := requiredChartNumberArray(core, "et_ror", true)
-	if !ok {
-		return false
-	}
-	times, ok := requiredChartNumberArray(core, "time_seconds", false)
-	if !ok {
-		return false
-	}
-	events, ok := requiredChartObject(root, "events")
-	if !ok || !requiredChartArray(events, "milestones") {
-		return false
-	}
-	special, ok := requiredChartRawArray(events, "special")
-	if !ok {
-		return false
-	}
-	extra, ok := requiredChartObject(root, "extra")
-	if !ok {
-		return false
-	}
-	series, ok := requiredChartRawArray(extra, "series")
-	if !ok {
-		return false
-	}
-	summary, ok := requiredChartObject(root, "summary")
-	if !ok {
-		return false
-	}
-	if raw, exists := summary["duration_seconds"]; !exists || !validChartNumber(raw, false) {
-		return false
-	}
-	sampleCount, ok := requiredChartCount(summary, "sample_count")
-	if !ok {
-		return false
-	}
-	extraCount, ok := requiredChartCount(summary, "extra_series_count")
-	if !ok {
-		return false
-	}
-	specialCount, ok := requiredChartCount(summary, "special_event_count")
-	if !ok {
-		return false
-	}
-	if sampleCount != len(times) || len(bt) != sampleCount || len(btRoR) != sampleCount || len(et) != sampleCount || len(etRoR) != sampleCount || extraCount != len(series) || specialCount != len(special) {
-		return false
-	}
-	var bodyParser string
-	if raw, exists := root["parser_version"]; !exists || decodeOneJSON(raw, &bodyParser) != nil || bodyParser != parserVersion {
-		return false
-	}
-	var schema json.Number
-	if raw, exists := root["schema_version"]; !exists || !isJSONNumberToken(raw) || decodeChartScalar(raw, &schema) != nil || schema.String() != "1" {
-		return false
-	}
-	unitRaw, exists := root["source_temperature_unit"]
-	if !exists {
-		return false
-	}
-	if bytes.Equal(bytes.TrimSpace(unitRaw), []byte("null")) {
-		return true
-	}
-	var unit string
-	return decodeOneJSON(unitRaw, &unit) == nil && (unit == "C" || unit == "F")
+const (
+	// These ceilings bound adversarial active object-key state while leaving
+	// ample room for ordinary future schema fields inside the 64 MiB document.
+	maxRoastChartJSONDepth      = 64
+	maxRoastChartObjectKeys     = 100_000
+	maxRoastChartObjectKeyBytes = 4 << 20
+)
+
+var errInvalidRoastChartJSON = errors.New("invalid roast chart JSON")
+
+type roastChartShape struct {
+	control, core, events, extra, parser, schema, unit, summary bool
+	bt, btRoR, et, etRoR, times, special, series                int
+	sampleCount, extraCount, specialCount                       int
 }
 
-func decodeChartObject(data []byte) (map[string]json.RawMessage, bool) {
-	if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
-		return nil, false
+func validateRoastChartFile(ctx context.Context, file *os.File, fileBytes int64, parserVersion string, forbidden []string) error {
+	if file == nil || fileBytes < 1 || fileBytes > maxRoastChartBytes {
+		return errInvalidRoastChartJSON
 	}
-	var object map[string]json.RawMessage
-	if err := decodeChartScalar(data, &object); err != nil || object == nil {
-		return nil, false
+	if err := validateRoastChartRawText(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}); err != nil {
+		return err
 	}
-	return object, true
-}
-
-func decodeChartScalar(data []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(&roastChartSignificantReader{reader: contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}})
 	decoder.UseNumber()
-	if err := decoder.Decode(destination); err != nil {
+	if err := validateRoastChartTokens(decoder, parserVersion); err != nil {
 		return err
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
+	if reflected, err := roastChartContainsAny(file, fileBytes, forbidden); err != nil {
 		return err
+	} else if reflected {
+		return errInvalidRoastChartJSON
 	}
 	return nil
 }
 
-func requiredChartObject(parent map[string]json.RawMessage, name string) (map[string]json.RawMessage, bool) {
-	raw, exists := parent[name]
-	if !exists {
-		return nil, false
-	}
-	return decodeChartObject(raw)
+// roastChartSignificantReader removes only insignificant JSON whitespace from
+// the validation stream. The held file remains untouched and is published
+// byte-for-byte, while json.Decoder cannot retain an adversarial document-sized
+// whitespace run while waiting for its next token.
+type roastChartSignificantReader struct {
+	reader           io.Reader
+	input            [32 << 10]byte
+	offset, count    int
+	inString, escape bool
+	err              error
 }
 
-func requiredChartRawArray(parent map[string]json.RawMessage, name string) ([]json.RawMessage, bool) {
-	raw, exists := parent[name]
-	if !exists || !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
-		return nil, false
+func (reader *roastChartSignificantReader) Read(destination []byte) (int, error) {
+	if len(destination) == 0 {
+		return 0, nil
 	}
-	var values []json.RawMessage
-	if decodeChartScalar(raw, &values) != nil || values == nil {
-		return nil, false
-	}
-	return values, true
-}
-
-func requiredChartArray(parent map[string]json.RawMessage, name string) bool {
-	_, ok := requiredChartRawArray(parent, name)
-	return ok
-}
-
-func requiredChartNumberArray(parent map[string]json.RawMessage, name string, nullable bool) ([]json.RawMessage, bool) {
-	values, ok := requiredChartRawArray(parent, name)
-	if !ok {
-		return nil, false
-	}
-	for _, value := range values {
-		if !validChartNumber(value, nullable) {
-			return nil, false
+	written := 0
+	for written == 0 {
+		if reader.offset == reader.count {
+			reader.offset = 0
+			reader.count, reader.err = reader.reader.Read(reader.input[:])
+			if reader.count == 0 {
+				return 0, reader.err
+			}
+		}
+		for reader.offset < reader.count && written < len(destination) {
+			value := reader.input[reader.offset]
+			reader.offset++
+			if !reader.inString && (value == ' ' || value == '\t' || value == '\r' || value == '\n') {
+				continue
+			}
+			destination[written] = value
+			written++
+			if !reader.inString {
+				if value == '"' {
+					reader.inString = true
+				}
+				continue
+			}
+			if reader.escape {
+				reader.escape = false
+			} else if value == '\\' {
+				reader.escape = true
+			} else if value == '"' {
+				reader.inString = false
+			}
 		}
 	}
-	return values, true
+	return written, nil
 }
 
-func validChartNumber(raw json.RawMessage, nullable bool) bool {
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+func validateRoastChartRawText(reader io.Reader) error {
+	buffered := bufio.NewReaderSize(reader, 32<<10)
+	inString := false
+	for {
+		value, err := buffered.ReadByte()
+		if errors.Is(err, io.EOF) {
+			if inString {
+				return errInvalidRoastChartJSON
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if value >= 0x80 {
+			if err := buffered.UnreadByte(); err != nil {
+				return err
+			}
+			runeValue, size, err := buffered.ReadRune()
+			if err != nil || runeValue == '\uFFFD' && size == 1 {
+				return errInvalidRoastChartJSON
+			}
+			continue
+		}
+		if !inString {
+			if value == '"' {
+				inString = true
+			}
+			continue
+		}
+		switch value {
+		case '"':
+			inString = false
+		case '\\':
+			escape, err := buffered.ReadByte()
+			if err != nil {
+				return errInvalidRoastChartJSON
+			}
+			if escape != 'u' {
+				if !strings.ContainsRune(`"\\/bfnrt`, rune(escape)) {
+					return errInvalidRoastChartJSON
+				}
+				continue
+			}
+			code, err := readRoastChartHexEscape(buffered)
+			if err != nil {
+				return errInvalidRoastChartJSON
+			}
+			if code >= 0xDC00 && code <= 0xDFFF {
+				return errInvalidRoastChartJSON
+			}
+			if code >= 0xD800 && code <= 0xDBFF {
+				backslash, firstErr := buffered.ReadByte()
+				u, secondErr := buffered.ReadByte()
+				low, thirdErr := readRoastChartHexEscape(buffered)
+				if firstErr != nil || secondErr != nil || thirdErr != nil || backslash != '\\' || u != 'u' || low < 0xDC00 || low > 0xDFFF {
+					return errInvalidRoastChartJSON
+				}
+			}
+		default:
+			if value < 0x20 {
+				return errInvalidRoastChartJSON
+			}
+		}
+	}
+}
+
+func readRoastChartHexEscape(reader *bufio.Reader) (uint16, error) {
+	var encoded [4]byte
+	if _, err := io.ReadFull(reader, encoded[:]); err != nil {
+		return 0, err
+	}
+	value, err := strconv.ParseUint(string(encoded[:]), 16, 16)
+	return uint16(value), err
+}
+
+func roastChartContainsAny(file *os.File, fileBytes int64, forbidden []string) (bool, error) {
+	maxPattern := 0
+	patterns := make([][]byte, 0, len(forbidden))
+	for _, value := range forbidden {
+		if value == "" {
+			continue
+		}
+		patterns = append(patterns, []byte(value))
+		if len(value) > maxPattern {
+			maxPattern = len(value)
+		}
+	}
+	if len(patterns) == 0 {
+		return false, nil
+	}
+	overlap := maxPattern - 1
+	window := make([]byte, (32<<10)+overlap)
+	carry := 0
+	reader := io.NewSectionReader(file, 0, fileBytes)
+	for {
+		count, err := reader.Read(window[carry:])
+		active := window[:carry+count]
+		for _, pattern := range patterns {
+			if bytes.Contains(active, pattern) {
+				return true, nil
+			}
+		}
+		carry = overlap
+		if carry > len(active) {
+			carry = len(active)
+		}
+		copy(window[:carry], active[len(active)-carry:])
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
+func validateRoastChartTokens(decoder *json.Decoder, parserVersion string) error {
+	root, err := decoder.Token()
+	if err != nil || root != json.Delim('{') {
+		return errInvalidRoastChartJSON
+	}
+	shape := roastChartShape{}
+	err = consumeRoastChartObject(decoder, 1, func(name string) error {
+		switch name {
+		case "control":
+			shape.control = true
+			return validateRoastChartControl(decoder, 2)
+		case "core":
+			shape.core = true
+			return validateRoastChartCore(decoder, 2, &shape)
+		case "events":
+			shape.events = true
+			return validateRoastChartEvents(decoder, 2, &shape)
+		case "extra":
+			shape.extra = true
+			return validateRoastChartExtra(decoder, 2, &shape)
+		case "summary":
+			shape.summary = true
+			return validateRoastChartSummary(decoder, 2, &shape)
+		case "parser_version":
+			shape.parser = true
+			value, err := decoder.Token()
+			if err != nil || value != parserVersion {
+				return errInvalidRoastChartJSON
+			}
+			return nil
+		case "schema_version":
+			shape.schema = true
+			value, err := decoder.Token()
+			number, ok := value.(json.Number)
+			if err != nil || !ok || number.String() != "1" {
+				return errInvalidRoastChartJSON
+			}
+			return nil
+		case "source_temperature_unit":
+			shape.unit = true
+			value, err := decoder.Token()
+			if err != nil || value != nil && value != "C" && value != "F" {
+				return errInvalidRoastChartJSON
+			}
+			return nil
+		default:
+			return skipRoastChartValue(decoder, 2)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errInvalidRoastChartJSON
+	}
+	if !shape.control || !shape.core || !shape.events || !shape.extra || !shape.summary || !shape.parser || !shape.schema || !shape.unit ||
+		shape.sampleCount != shape.times || shape.bt != shape.sampleCount || shape.btRoR != shape.sampleCount ||
+		shape.et != shape.sampleCount || shape.etRoR != shape.sampleCount || shape.extraCount != shape.series || shape.specialCount != shape.special {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func consumeRoastChartObject(decoder *json.Decoder, depth int, consume func(string) error) error {
+	if depth > maxRoastChartJSONDepth {
+		return errInvalidRoastChartJSON
+	}
+	seen := make(map[string]struct{})
+	keyBytes := 0
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return errInvalidRoastChartJSON
+		}
+		keyBytes += len(name)
+		if len(seen) >= maxRoastChartObjectKeys || keyBytes > maxRoastChartObjectKeyBytes {
+			return errInvalidRoastChartJSON
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return errInvalidRoastChartJSON
+		}
+		seen[name] = struct{}{}
+		if err := consume(name); err != nil {
+			return err
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func requireRoastChartObject(decoder *json.Decoder, depth int, consume func(string) error) error {
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return errInvalidRoastChartJSON
+	}
+	return consumeRoastChartObject(decoder, depth, consume)
+}
+
+func validateRoastChartControl(decoder *json.Decoder, depth int) error {
+	markers, steps := false, false
+	err := requireRoastChartObject(decoder, depth, func(name string) error {
+		switch name {
+		case "markers":
+			markers = true
+			_, err := roastChartObjectArray(decoder, depth+1)
+			return err
+		case "steps":
+			steps = true
+			_, err := roastChartObjectArray(decoder, depth+1)
+			return err
+		default:
+			return skipRoastChartValue(decoder, depth+1)
+		}
+	})
+	if err != nil || !markers || !steps {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func validateRoastChartCore(decoder *json.Decoder, depth int, shape *roastChartShape) error {
+	bt, btRoR, et, etRoR, times := false, false, false, false, false
+	err := requireRoastChartObject(decoder, depth, func(name string) error {
+		var destination *int
+		nullable := true
+		switch name {
+		case "bt":
+			bt, destination = true, &shape.bt
+		case "bt_ror":
+			btRoR, destination = true, &shape.btRoR
+		case "et":
+			et, destination = true, &shape.et
+		case "et_ror":
+			etRoR, destination = true, &shape.etRoR
+		case "time_seconds":
+			times, destination, nullable = true, &shape.times, false
+		default:
+			return skipRoastChartValue(decoder, depth+1)
+		}
+		count, err := roastChartNumberArray(decoder, nullable)
+		if err == nil {
+			*destination = count
+		}
+		return err
+	})
+	if err != nil || !bt || !btRoR || !et || !etRoR || !times {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func validateRoastChartEvents(decoder *json.Decoder, depth int, shape *roastChartShape) error {
+	milestones, special := false, false
+	err := requireRoastChartObject(decoder, depth, func(name string) error {
+		switch name {
+		case "milestones":
+			milestones = true
+			_, err := roastChartObjectArray(decoder, depth+1)
+			return err
+		case "special":
+			special = true
+			count, err := roastChartObjectArray(decoder, depth+1)
+			shape.special = count
+			return err
+		default:
+			return skipRoastChartValue(decoder, depth+1)
+		}
+	})
+	if err != nil || !milestones || !special {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func validateRoastChartExtra(decoder *json.Decoder, depth int, shape *roastChartShape) error {
+	series := false
+	err := requireRoastChartObject(decoder, depth, func(name string) error {
+		if name != "series" {
+			return skipRoastChartValue(decoder, depth+1)
+		}
+		series = true
+		count, err := roastChartObjectArray(decoder, depth+1)
+		shape.series = count
+		return err
+	})
+	if err != nil || !series {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func validateRoastChartSummary(decoder *json.Decoder, depth int, shape *roastChartShape) error {
+	duration, samples, extras, specials := false, false, false, false
+	err := requireRoastChartObject(decoder, depth, func(name string) error {
+		switch name {
+		case "duration_seconds":
+			duration = true
+			value, err := decoder.Token()
+			if err != nil || !validRoastChartNumber(value, true, true) {
+				return errInvalidRoastChartJSON
+			}
+			return nil
+		case "sample_count":
+			samples = true
+			count, err := roastChartCount(decoder)
+			shape.sampleCount = count
+			return err
+		case "extra_series_count":
+			extras = true
+			count, err := roastChartCount(decoder)
+			shape.extraCount = count
+			return err
+		case "special_event_count":
+			specials = true
+			count, err := roastChartCount(decoder)
+			shape.specialCount = count
+			return err
+		default:
+			return skipRoastChartValue(decoder, depth+1)
+		}
+	})
+	if err != nil || !duration || !samples || !extras || !specials {
+		return errInvalidRoastChartJSON
+	}
+	return nil
+}
+
+func roastChartNumberArray(decoder *json.Decoder, nullable bool) (int, error) {
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('[') {
+		return 0, errInvalidRoastChartJSON
+	}
+	count := 0
+	for decoder.More() {
+		value, err := decoder.Token()
+		if err != nil || !validRoastChartNumber(value, nullable, false) {
+			return 0, errInvalidRoastChartJSON
+		}
+		count++
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim(']') {
+		return 0, errInvalidRoastChartJSON
+	}
+	return count, nil
+}
+
+func roastChartObjectArray(decoder *json.Decoder, depth int) (int, error) {
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('[') || depth > maxRoastChartJSONDepth {
+		return 0, errInvalidRoastChartJSON
+	}
+	count := 0
+	for decoder.More() {
+		value, err := decoder.Token()
+		if err != nil || value != json.Delim('{') {
+			return 0, errInvalidRoastChartJSON
+		}
+		if err := consumeRoastChartObject(decoder, depth+1, func(string) error { return skipRoastChartValue(decoder, depth+2) }); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim(']') {
+		return 0, errInvalidRoastChartJSON
+	}
+	return count, nil
+}
+
+func validRoastChartNumber(value json.Token, nullable, nonnegative bool) bool {
+	if value == nil {
 		return nullable
 	}
-	if !isJSONNumberToken(raw) {
+	number, ok := value.(json.Number)
+	if !ok {
 		return false
 	}
-	var number json.Number
-	if decodeChartScalar(raw, &number) != nil {
-		return false
-	}
-	value, err := strconv.ParseFloat(number.String(), 64)
-	return err == nil && !math.IsNaN(value) && !math.IsInf(value, 0)
+	parsed, err := strconv.ParseFloat(number.String(), 64)
+	return err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) && (!nonnegative || parsed >= 0)
 }
 
-func isJSONNumberToken(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) != 0 && (trimmed[0] == '-' || trimmed[0] >= '0' && trimmed[0] <= '9')
+func roastChartCount(decoder *json.Decoder) (int, error) {
+	value, err := decoder.Token()
+	number, ok := value.(json.Number)
+	if err != nil || !ok {
+		return 0, errInvalidRoastChartJSON
+	}
+	parsed, err := strconv.ParseInt(number.String(), 10, 64)
+	if err != nil || parsed < 0 || parsed > maxRoastChartBytes {
+		return 0, errInvalidRoastChartJSON
+	}
+	return int(parsed), nil
 }
 
-func requiredChartCount(parent map[string]json.RawMessage, name string) (int, bool) {
-	raw, exists := parent[name]
-	if !exists {
-		return 0, false
+func skipRoastChartValue(decoder *json.Decoder, depth int) error {
+	value, err := decoder.Token()
+	if err != nil {
+		return errInvalidRoastChartJSON
 	}
-	if !isJSONNumberToken(raw) {
-		return 0, false
+	delimiter, ok := value.(json.Delim)
+	if !ok {
+		return nil
 	}
-	var number json.Number
-	if decodeChartScalar(raw, &number) != nil {
-		return 0, false
+	if depth > maxRoastChartJSONDepth {
+		return errInvalidRoastChartJSON
 	}
-	value, err := strconv.ParseInt(number.String(), 10, 64)
-	if err != nil || value < 0 || value > int64(maxRoastChartBytes) {
-		return 0, false
+	switch delimiter {
+	case '{':
+		return consumeRoastChartObject(decoder, depth, func(string) error { return skipRoastChartValue(decoder, depth+1) })
+	case '[':
+		for decoder.More() {
+			if err := skipRoastChartValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return errInvalidRoastChartJSON
+		}
+		return nil
+	default:
+		return errInvalidRoastChartJSON
 	}
-	return int(value), true
 }
+
+func sameRoastChartRevision(current RoastDetail, before RoastRevision, parserVersion string) bool {
+	return current.State == "parsed" && current.CurrentRevision != nil &&
+		current.CurrentRevision.ParseState == "parsed" &&
+		current.CurrentRevision.RevisionNumber == before.RevisionNumber &&
+		current.CurrentRevision.SHA256 == before.SHA256 &&
+		current.CurrentRevision.ByteSize == before.ByteSize &&
+		current.CurrentRevision.UploadedAt == before.UploadedAt &&
+		current.CurrentRevision.ParserVersion == before.ParserVersion &&
+		current.CurrentRevision.ParserVersion == parserVersion
+}
+
+type chartFenceCallbackError struct{ failure *output.Error }
+
+func (err *chartFenceCallbackError) Error() string { return "roast chart publication fence rejected" }
 
 func chartTargetFailure(err error) *output.Error {
 	if errors.Is(err, errInvalidDownloadDestination) {

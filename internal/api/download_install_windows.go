@@ -34,13 +34,8 @@ func (p *heldWindowsDownloadPublication) publish(target *downloadTarget, force b
 	if err := target.verifyHeldSource(); err != nil {
 		return downloadInstallResult{}, err
 	}
-	target.state = downloadTargetNativeAttempted
-	target.nativeOperationInvoked = false
-	target.nativeOperationErr = nil
-	nativeErr := target.operations.nativeOperation(func() error {
-		target.nativeOperationInvoked = true
-		target.nativeOperationErr = p.renameExactSource(filepath.Base(target.destination), force)
-		return target.nativeOperationErr
+	nativeErr := target.invokeNative(func() error {
+		return p.renameExactSource(target, filepath.Base(target.destination), force)
 	})
 	var hookErr error
 	if target.operations.afterNativeBeforeReconcile != nil {
@@ -81,7 +76,7 @@ func (p *heldWindowsDownloadPublication) publish(target *downloadTarget, force b
 	return result, errors.Join(nativeErr, hookErr, probeErr, fileFlushErr, directoryFlushErr)
 }
 
-func (p *heldWindowsDownloadPublication) renameExactSource(leaf string, force bool) error {
+func (p *heldWindowsDownloadPublication) renameExactSource(target *downloadTarget, leaf string, force bool) error {
 	name, err := windows.UTF16FromString(leaf)
 	if err != nil {
 		return err
@@ -102,6 +97,13 @@ func (p *heldWindowsDownloadPublication) renameExactSource(leaf string, force bo
 	if err == nil || !unsupportedWindowsRenameEx(err) {
 		return err
 	}
+	// The legacy capability fallback is a second namespace syscall. Re-run the
+	// publication fence immediately before it.
+	if err := target.prepareNativeOperation(); err != nil {
+		return err
+	}
+	target.state = downloadTargetNativeAttempted
+	target.nativeOperationInvoked = true
 	return p.renameExactSourceLegacy(name, force)
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -103,6 +104,58 @@ func TestDownloadTargetResetAndPreNativeFailuresDoNotPublish(t *testing.T) {
 			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("destination visible: %v", err)
 			}
+		})
+	}
+}
+
+func TestDownloadTargetPreNativeCallbackRunsAfterSealingAndCanRejectWithoutPublication(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no force", true: "force"}[force], func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile")
+			if force {
+				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := defaultDownloadOperations()
+			var sealed, callbackInvoked, nativeInvoked bool
+			ops.afterSealedBeforeCandidate = func(*downloadTarget) error {
+				sealed = true
+				return nil
+			}
+			ops.nativeOperation = func(operation func() error) error {
+				nativeInvoked = true
+				return operation()
+			}
+			target, err := newDownloadTarget(destination, force, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(target.Writer(), "new")
+			callbackErr := errors.New("publication rejected")
+			result, err := target.InstallContextBeforeNative(context.Background(), force, func() error {
+				callbackInvoked = true
+				if !sealed || target.state != downloadTargetSealed {
+					t.Fatalf("callback before seal: sealed=%v state=%v", sealed, target.state)
+				}
+				return callbackErr
+			})
+			if !errors.Is(err, callbackErr) || result.Publication != publicationNone || result.Visibility != visibilityNotVisible {
+				t.Fatalf("install = %#v, %v", result, err)
+			}
+			if !callbackInvoked || nativeInvoked || target.nativeOperationInvoked {
+				t.Fatalf("callback=%v native=%v target.native=%v", callbackInvoked, nativeInvoked, target.nativeOperationInvoked)
+			}
+			target.Abort()
+			contents, readErr := os.ReadFile(destination)
+			if force {
+				if readErr != nil || string(contents) != "existing" {
+					t.Fatalf("forced destination = %q, %v", contents, readErr)
+				}
+			} else if !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("destination published: %v", readErr)
+			}
+			assertNoDownloadTemps(t, destination)
 		})
 	}
 }
