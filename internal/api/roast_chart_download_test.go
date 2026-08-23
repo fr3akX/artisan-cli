@@ -345,8 +345,11 @@ func TestDownloadRoastChartStrictJSONSchemaValidation(t *testing.T) {
 	}
 }
 
-func TestDownloadRoastChartRejectsSplitJSONLexemesWithoutPublishingOriginal(t *testing.T) {
-	for _, split := range []string{"n ull", "t rue", "1 2", "0 . 0"} {
+func TestDownloadRoastChartRejectsSplitJSONLexemesAndMalformedSeparatorsWithoutPublishingOriginal(t *testing.T) {
+	for _, split := range []string{
+		"n ull", "t rue", "1 2", "0 . 0",
+		"1,2", "1:2", "true,false", "null:true", ",1",
+	} {
 		raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_split":` + split + `}`)
 		destination := filepath.Join(t.TempDir(), "existing.json")
 		if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
@@ -374,6 +377,31 @@ func TestDownloadRoastChartAcceptsBoundedUnknownFutureString(t *testing.T) {
 	}
 	if contents, err := os.ReadFile(destination); err != nil || !bytes.Equal(contents, raw) {
 		t.Fatalf("future contents=%d bytes err=%v", len(contents), err)
+	}
+}
+
+func TestDownloadRoastChartAcceptsNormalScalarTokens(t *testing.T) {
+	for _, scalar := range []string{
+		"0",
+		"-9223372036854775808",
+		"3.141592653589793",
+		"6.02214076e+23",
+		"1.7976931348623157e+308",
+		"null",
+		"true",
+		"false",
+	} {
+		t.Run(scalar, func(t *testing.T) {
+			raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_scalar":` + scalar + `}`)
+			destination := filepath.Join(t.TempDir(), "future.json")
+			client := chartClient(t, deterministicGzip(t, raw), nil)
+			if _, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false); failure != nil {
+				t.Fatalf("scalar %s: %#v", scalar, failure)
+			}
+			if contents, err := os.ReadFile(destination); err != nil || !bytes.Equal(contents, raw) {
+				t.Fatalf("scalar %s contents=%d bytes err=%v", scalar, len(contents), err)
+			}
+		})
 	}
 }
 
@@ -886,6 +914,51 @@ func TestDownloadRoastChartNearLimitStringTokensAreRejectedWithBoundedAllocation
 	}
 }
 
+func TestDownloadRoastChartNearLimitNumericTokenIsRejectedWithBoundedAllocation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("near-64 MiB streaming allocation regression")
+	}
+	prefix := strings.TrimSuffix(validChartJSON, "}") + `,"future_number":`
+	suffix := `}`
+	digits := maxRoastChartBytes - int64(len(prefix)) - int64(len(suffix)) - 1024
+	if digits <= maxRoastChartTokenBytes {
+		t.Fatalf("digits=%d does not exceed token ceiling", digits)
+	}
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(writer, repeatedByteReader('9'), digits); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(writer, suffix); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fileBytes := int64(len(prefix)) + digits + int64(len(suffix))
+	client := chartClient(t, compressed.Bytes(), nil)
+	destination := filepath.Join(t.TempDir(), "large-number-chart.json")
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false)
+	runtime.ReadMemStats(&after)
+	if failure == nil || failure.Code != "invalid_server_response" {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if fileBytes < 63<<20 {
+		t.Fatalf("file bytes = %d", fileBytes)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
+		t.Fatalf("lexical validation allocated %d bytes for %d-byte numeric token", allocated, digits)
+	}
+	assertMissingFileAndTemps(t, destination)
+}
+
 func nearLimitRoastChartString(t *testing.T, key bool) ([]byte, int64) {
 	t.Helper()
 	prefix := strings.TrimSuffix(validChartJSON, "}")
@@ -897,7 +970,7 @@ func nearLimitRoastChartString(t *testing.T, key bool) ([]byte, int64) {
 		prefix += `,"future_padding":"`
 	}
 	padding := maxRoastChartBytes - int64(len(prefix)) - int64(len(suffix)) - 1024
-	if padding <= maxRoastChartStringTokenBytes {
+	if padding <= maxRoastChartTokenBytes {
 		t.Fatalf("padding=%d does not exceed token ceiling", padding)
 	}
 	var compressed bytes.Buffer

@@ -340,9 +340,10 @@ const (
 	maxRoastChartJSONDepth      = 64
 	maxRoastChartObjectKeys     = 100_000
 	maxRoastChartObjectKeyBytes = 4 << 20
-	// Schema-v1 strings are small identifiers and labels. One MiB leaves ample
-	// room for future text while preventing a 64 MiB scalar or key allocation.
-	maxRoastChartStringTokenBytes = 1 << 20
+	// Schema-v1 scalar tokens are small values, identifiers, and labels. One MiB
+	// leaves ample room for future data while preventing document-sized token
+	// allocations in encoding/json.
+	maxRoastChartTokenBytes = 1 << 20
 )
 
 var errInvalidRoastChartJSON = errors.New("invalid roast chart JSON")
@@ -357,16 +358,17 @@ func validateRoastChartFile(ctx context.Context, file *os.File, fileBytes int64,
 	if file == nil || fileBytes < 1 || fileBytes > maxRoastChartBytes {
 		return errInvalidRoastChartJSON
 	}
-	reflected, err := preScanRoastChartStrings(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}, forbidden)
+	reflected, err := preScanRoastChartTokens(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}, forbidden)
 	if err != nil {
 		return err
 	}
 	if reflected {
 		return errInvalidRoastChartJSON
 	}
-	// The lexical pass capped every raw and decoded string token before
-	// encoding/json can materialize it. Decode the unchanged held bytes so
-	// whitespace can never repair an invalid split keyword or number.
+	// The lexical pass capped every contiguous non-string scalar and every raw
+	// and decoded string before encoding/json can materialize a token. Decode
+	// the unchanged held bytes so malformed separators or split syntax remain
+	// the decoder's responsibility.
 	decoder := json.NewDecoder(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)})
 	decoder.UseNumber()
 	if err := validateRoastChartTokens(decoder, parserVersion); err != nil {
@@ -375,7 +377,7 @@ func validateRoastChartFile(ctx context.Context, file *os.File, fileBytes int64,
 	return nil
 }
 
-func preScanRoastChartStrings(reader io.Reader, forbidden []string) (bool, error) {
+func preScanRoastChartTokens(reader io.Reader, forbidden []string) (bool, error) {
 	buffered := bufio.NewReaderSize(reader, 32<<10)
 	patterns := make([][]byte, 0, len(forbidden))
 	for _, value := range forbidden {
@@ -384,6 +386,7 @@ func preScanRoastChartStrings(reader io.Reader, forbidden []string) (bool, error
 		}
 	}
 	decoded := make([]byte, 0, 32<<10)
+	scalarBytes := 0
 	for {
 		value, err := buffered.ReadByte()
 		if errors.Is(err, io.EOF) {
@@ -393,12 +396,21 @@ func preScanRoastChartStrings(reader io.Reader, forbidden []string) (bool, error
 			return false, err
 		}
 		if value == '"' {
+			scalarBytes = 0
 			var reflected bool
 			decoded, reflected, err = scanRoastChartJSONString(buffered, decoded[:0], patterns)
 			if err != nil || reflected {
 				return reflected, err
 			}
 			continue
+		}
+		if isRoastChartScalarSeparator(value) {
+			scalarBytes = 0
+			continue
+		}
+		scalarBytes++
+		if scalarBytes > maxRoastChartTokenBytes {
+			return false, errInvalidRoastChartJSON
 		}
 		if value >= 0x80 {
 			if err := buffered.UnreadByte(); err != nil {
@@ -408,7 +420,20 @@ func preScanRoastChartStrings(reader io.Reader, forbidden []string) (bool, error
 			if err != nil || runeValue == '\uFFFD' && size == 1 {
 				return false, errInvalidRoastChartJSON
 			}
+			scalarBytes += size - 1
+			if scalarBytes > maxRoastChartTokenBytes {
+				return false, errInvalidRoastChartJSON
+			}
 		}
+	}
+}
+
+func isRoastChartScalarSeparator(value byte) bool {
+	switch value {
+	case ' ', '\t', '\r', '\n', '{', '}', '[', ']', ',', ':':
+		return true
+	default:
+		return false
 	}
 }
 
@@ -416,7 +441,7 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 	rawBytes := 0
 	appendDecoded := func(value ...byte) bool {
 		decoded = append(decoded, value...)
-		return len(decoded) <= maxRoastChartStringTokenBytes
+		return len(decoded) <= maxRoastChartTokenBytes
 	}
 	for {
 		value, err := reader.ReadByte()
@@ -432,7 +457,7 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 			return decoded, false, nil
 		}
 		rawBytes++
-		if rawBytes > maxRoastChartStringTokenBytes {
+		if rawBytes > maxRoastChartTokenBytes {
 			return decoded, false, errInvalidRoastChartJSON
 		}
 		if value >= 0x80 {
@@ -444,11 +469,11 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 				return decoded, false, errInvalidRoastChartJSON
 			}
 			rawBytes += size - 1
-			if rawBytes > maxRoastChartStringTokenBytes {
+			if rawBytes > maxRoastChartTokenBytes {
 				return decoded, false, errInvalidRoastChartJSON
 			}
 			decoded = utf8.AppendRune(decoded, runeValue)
-			if len(decoded) > maxRoastChartStringTokenBytes {
+			if len(decoded) > maxRoastChartTokenBytes {
 				return decoded, false, errInvalidRoastChartJSON
 			}
 			continue
@@ -462,7 +487,7 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 
 		escape, err := reader.ReadByte()
 		rawBytes++
-		if err != nil || rawBytes > maxRoastChartStringTokenBytes {
+		if err != nil || rawBytes > maxRoastChartTokenBytes {
 			return decoded, false, errInvalidRoastChartJSON
 		}
 		switch escape {
@@ -493,7 +518,7 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 		case 'u':
 			code, err := readRoastChartHexEscape(reader)
 			rawBytes += 4
-			if err != nil || rawBytes > maxRoastChartStringTokenBytes || code >= 0xDC00 && code <= 0xDFFF {
+			if err != nil || rawBytes > maxRoastChartTokenBytes || code >= 0xDC00 && code <= 0xDFFF {
 				return decoded, false, errInvalidRoastChartJSON
 			}
 			runeValue := rune(code)
@@ -502,13 +527,13 @@ func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden []
 				u, secondErr := reader.ReadByte()
 				low, thirdErr := readRoastChartHexEscape(reader)
 				rawBytes += 6
-				if firstErr != nil || secondErr != nil || thirdErr != nil || rawBytes > maxRoastChartStringTokenBytes || backslash != '\\' || u != 'u' || low < 0xDC00 || low > 0xDFFF {
+				if firstErr != nil || secondErr != nil || thirdErr != nil || rawBytes > maxRoastChartTokenBytes || backslash != '\\' || u != 'u' || low < 0xDC00 || low > 0xDFFF {
 					return decoded, false, errInvalidRoastChartJSON
 				}
 				runeValue = 0x10000 + (rune(code)-0xD800)<<10 + rune(low) - 0xDC00
 			}
 			decoded = utf8.AppendRune(decoded, runeValue)
-			if len(decoded) > maxRoastChartStringTokenBytes {
+			if len(decoded) > maxRoastChartTokenBytes {
 				return decoded, false, errInvalidRoastChartJSON
 			}
 		default:
