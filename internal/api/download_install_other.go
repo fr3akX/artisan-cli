@@ -98,20 +98,43 @@ func (p *heldOtherDownloadPublication) publish(target *downloadTarget, force boo
 		return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr)
 	}
 	result := downloadInstallResult{Publication: publicationExact, Visibility: visibilityExact, Durability: durabilityExact}
-	if err := p.sync(target); err != nil {
-		result.Durability = durabilityUncertain
-		return result, errors.Join(nativeErr, hookErr, err)
+	cleanups := []exactDownloadCleanup{
+		func() (bool, error) {
+			if p.sourceName == "" {
+				return false, nil
+			}
+			err := p.removeOwned(target, p.sourceName, p.sourceInfo)
+			if err == nil {
+				p.sourceName = ""
+				return true, nil
+			}
+			return false, err
+		},
 	}
-	cleanupErr := p.removeOwned(target, p.sourceName, p.sourceInfo)
 	if !force || linkedNoReplace {
-		cleanupErr = errors.Join(cleanupErr, p.removeOwned(target, p.candidate, p.candidateInfo))
+		cleanups = append(cleanups, func() (bool, error) {
+			if p.candidate == "" {
+				return false, nil
+			}
+			err := p.removeOwned(target, p.candidate, p.candidateInfo)
+			if err == nil {
+				p.candidate = ""
+				return true, nil
+			}
+			return false, err
+		})
 	}
 	if p.backup != "" {
-		cleanupErr = errors.Join(cleanupErr, p.removeOwned(target, p.backup, p.backupInfo))
+		cleanups = append(cleanups, func() (bool, error) {
+			err := p.removeOwnedBackup(target, p.backup, p.backupInfo)
+			if err == nil {
+				p.backup = ""
+				return true, nil
+			}
+			return false, err
+		})
 	}
-	if err := p.sync(target); err != nil {
-		result.Durability = durabilityUncertain
-		cleanupErr = errors.Join(cleanupErr, err)
-	}
+	durability, cleanupErr := finishExactDownloadCleanup(func() error { return p.sync(target) }, cleanups...)
+	result.Durability = durability
 	return result, errors.Join(nativeErr, hookErr, cleanupErr)
 }

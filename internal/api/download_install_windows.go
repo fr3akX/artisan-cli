@@ -64,16 +64,21 @@ func (p *heldWindowsDownloadPublication) publish(target *downloadTarget, force b
 		visibility = visibilityAmbiguous
 	}
 	result := downloadInstallResult{Publication: publicationExact, Visibility: visibility, Durability: durabilityExact}
-	var flushErr error
+	var fileFlushErr error
 	if target.operations.flushFile != nil {
-		flushErr = target.operations.flushFile(p.source)
+		fileFlushErr = target.operations.flushFile(p.source)
 	} else {
-		flushErr = windows.FlushFileBuffers(windows.Handle(p.source.Fd()))
+		fileFlushErr = windows.FlushFileBuffers(windows.Handle(p.source.Fd()))
 	}
-	if flushErr != nil {
+	// A successful exact-handle rename must flush both file contents and the
+	// retained directory namespace before Windows durability can be exact.
+	// Attempt the directory flush even when the file flush failed so callers
+	// receive every boundary error and no durability step is silently skipped.
+	directoryFlushErr := p.flushDirectory(target)
+	if fileFlushErr != nil || directoryFlushErr != nil {
 		result.Durability = durabilityUncertain
 	}
-	return result, errors.Join(nativeErr, hookErr, probeErr, flushErr)
+	return result, errors.Join(nativeErr, hookErr, probeErr, fileFlushErr, directoryFlushErr)
 }
 
 func (p *heldWindowsDownloadPublication) renameExactSource(leaf string, force bool) error {

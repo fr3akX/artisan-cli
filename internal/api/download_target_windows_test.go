@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -218,17 +219,42 @@ func TestWindowsDispositionFallbackIsRestrictedToUnsupportedErrors(t *testing.T)
 	}
 }
 
-func TestWindowsDownloadFlushFailureIsVisibleButNotDurable(t *testing.T) {
-	destination := filepath.Join(t.TempDir(), "profile.alog")
-	ops := defaultDownloadOperations()
-	ops.flushFile = func(*os.File) error { return errors.New("flush") }
-	target, err := newDownloadTarget(destination, false, ops)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.WriteString(target.Writer(), "verified")
-	result, err := target.Install(false)
-	if err == nil || result.Publication != publicationExact || !result.Visible() || result.Durable() || result.Durability != durabilityUncertain {
-		t.Fatalf("install = %#v, %v", result, err)
+func TestWindowsDownloadFileOrDirectoryFlushFailureIsVisibleButNotDurable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		inject func(*downloadOperations)
+		marker string
+	}{
+		{name: "file", inject: func(ops *downloadOperations) {
+			ops.flushFile = func(*os.File) error { return errors.New("file flush") }
+		}, marker: "file flush"},
+		{name: "directory", inject: func(ops *downloadOperations) {
+			ops.flushDirectory = func(*os.File) error { return errors.New("directory flush") }
+		}, marker: "directory flush"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile.alog")
+			ops := defaultDownloadOperations()
+			var directoryFlushCalls int
+			if test.name == "file" {
+				ops.flushDirectory = func(*os.File) error {
+					directoryFlushCalls++
+					return nil
+				}
+			}
+			test.inject(&ops)
+			target, err := newDownloadTarget(destination, false, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(target.Writer(), "verified")
+			result, installErr := target.Install(false)
+			if installErr == nil || !strings.Contains(installErr.Error(), test.marker) || result.Publication != publicationExact || !result.Visible() || result.Durable() || result.Durability != durabilityUncertain {
+				t.Fatalf("install = %#v, %v", result, installErr)
+			}
+			if test.name == "file" && directoryFlushCalls != 1 {
+				t.Fatalf("directory flush calls=%d", directoryFlushCalls)
+			}
+		})
 	}
 }

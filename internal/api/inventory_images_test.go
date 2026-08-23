@@ -574,7 +574,7 @@ func TestDownloadInventoryImageRetriesOnlyNetworkResponseReadFailures(t *testing
 
 func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows durability is verified through the exact renamed handle")
+		t.Skip("Windows durability is verified through exact file and retained-directory flushes")
 	}
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {
@@ -615,7 +615,7 @@ func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
 
 func TestDownloadInventoryImageParentSyncFailurePreservesInstalledDestination(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows durability is verified through the exact renamed handle")
+		t.Skip("Windows durability is verified through exact file and retained-directory flushes")
 	}
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {

@@ -48,6 +48,72 @@ func TestLinuxDownloadCandidateRegistersImmediatelyAfterLink(t *testing.T) {
 	}
 }
 
+func TestLinuxDownloadCandidateKeepsKnownIdentityWhenPostLinkStatFails(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDownloadOperations()
+	ops.statLinkedCandidate = func(*os.File) (os.FileInfo, error) {
+		return nil, errors.New("post-link stat")
+	}
+	target, err := newDownloadTarget(destination, true, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr == nil || result.Publication != publicationNone || !strings.Contains(installErr.Error(), "post-link stat") {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("candidate residue leaked: %v", entries)
+	}
+}
+
+func TestLinuxDownloadBackupReplaceFirstSyncFailureStillCleansOwnedResidue(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDownloadOperations()
+	ops.openAnonymousSource = func(int) (int, error) { return -1, unix.EOPNOTSUPP }
+	ops.forceBackupReplace = true
+	var syncCalls int
+	ops.syncParent = func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("first parent sync")
+		}
+		return nil
+	}
+	target, err := newDownloadTarget(destination, true, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr == nil || result.Publication != publicationExact || !result.Visible() || result.Durability != durabilityUncertain || syncCalls != 2 {
+		t.Fatalf("install=%#v syncCalls=%d err=%v", result, syncCalls, installErr)
+	}
+	if contents, err := os.ReadFile(destination); err != nil || string(contents) != "new" {
+		t.Fatalf("destination=%q,%v", contents, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("owned residue leaked: %v", entries)
+	}
+}
+
 func TestLinuxDownloadConstructorJoinsProtectionAndCleanupErrors(t *testing.T) {
 	directory := t.TempDir()
 	destination := filepath.Join(directory, "profile")

@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func TestWindowsDownloadInventoryImageFlushesExactRenamedHandleWithoutParentSync(t *testing.T) {
+func TestWindowsDownloadInventoryImageFlushesExactRenamedHandleAndRetainedDirectory(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "durable.webp")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/webp")
@@ -35,11 +35,16 @@ func TestWindowsDownloadInventoryImageFlushesExactRenamedHandleWithoutParentSync
 		_, err := file.Stat()
 		return err
 	}
+	client.downloadOps.flushDirectory = func(directory *os.File) error {
+		events = append(events, "flush-retained-directory")
+		_, err := directory.Stat()
+		return err
+	}
 	client.downloadOps.syncParent = func(string) error { return errors.New("syncParent must not run on Windows") }
 	if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false); failure != nil {
 		t.Fatal(failure)
 	}
-	if !reflect.DeepEqual(events, []string{"sync-file", "close-writer", "native", "flush-exact-handle"}) {
+	if !reflect.DeepEqual(events, []string{"sync-file", "close-writer", "native", "flush-exact-handle", "flush-retained-directory"}) {
 		t.Fatalf("events=%v", events)
 	}
 }

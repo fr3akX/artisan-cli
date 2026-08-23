@@ -61,7 +61,7 @@ func openWindowsDownloadParent(path string) (windows.Handle, windows.ByHandleFil
 	if err != nil {
 		return windows.InvalidHandle, windows.ByHandleFileInformation{}, err
 	}
-	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	handle, err := windows.CreateFile(pointer, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.SYNCHRONIZE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_WRITE_THROUGH, 0)
 	if err != nil {
 		return windows.InvalidHandle, windows.ByHandleFileInformation{}, err
 	}
@@ -178,6 +178,19 @@ func openWindowsDownloadRelative(parent windows.Handle, name string, access, sha
 		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
 		0, 0)
 	return handle, err
+}
+
+func (p *heldWindowsDownloadPublication) flushDirectory(target *downloadTarget) error {
+	if target.operations.flushDirectory == nil {
+		return windows.FlushFileBuffers(p.parent)
+	}
+	process := windows.CurrentProcess()
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(process, p.parent, process, &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(duplicate), p.parentPath)
+	return errors.Join(target.operations.flushDirectory(directory), directory.Close())
 }
 
 func (p *heldWindowsDownloadPublication) sourceNameMatches() bool {

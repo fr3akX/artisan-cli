@@ -254,6 +254,77 @@ func TestFallbackDownloadVerifiedNoPublicationCleansBackupCandidateAndSource(t *
 	}
 }
 
+func TestFallbackDownloadFirstSyncFailureStillCleansOwnedSourceCandidateAndBackup(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDownloadOperations()
+	var syncCalls int
+	ops.syncParent = func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("first parent sync")
+		}
+		return nil
+	}
+	target, err := newDownloadTarget(destination, true, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr == nil || result.Publication != publicationExact || !result.Visible() || result.Durability != durabilityUncertain || syncCalls != 2 {
+		t.Fatalf("install=%#v syncCalls=%d err=%v", result, syncCalls, installErr)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("owned residue leaked: %v", entries)
+	}
+}
+
+func TestFallbackDownloadForceReplacesSymlinkAndCleansBackupWithoutFollowing(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "downloads")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "profile")
+	if err := os.Symlink(outside, destination); err != nil {
+		t.Fatal(err)
+	}
+	target, err := newDownloadTarget(destination, true, defaultDownloadOperations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr != nil || result.Publication != publicationExact || !result.Durable() {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	if contents, err := os.ReadFile(destination); err != nil || string(contents) != "new" {
+		t.Fatalf("destination=%q,%v", contents, err)
+	}
+	if contents, err := os.ReadFile(outside); err != nil || string(contents) != "outside" {
+		t.Fatalf("symlink target=%q,%v", contents, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("symlink backup leaked: %v", entries)
+	}
+}
+
 func TestFallbackDownloadForceNoOperationPreservesBackupSourceAndOldDestination(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "profile")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {

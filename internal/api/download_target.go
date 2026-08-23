@@ -66,6 +66,7 @@ type downloadOperations struct {
 	syncFile        func(*os.File) error
 	closeFile       func(*os.File) error
 	flushFile       func(*os.File) error
+	flushDirectory  func(*os.File) error
 	copyCandidate   func(io.Writer, io.Reader) (int64, error)
 	syncCandidate   func(*os.File) error
 	digestCandidate func(*os.File) (int64, [sha256.Size]byte, error)
@@ -73,6 +74,7 @@ type downloadOperations struct {
 	// Linux-only deterministic capability seams. Other platforms leave these
 	// unused while sharing the same operation bundle in common tests.
 	openAnonymousSource func(int) (int, error)
+	statLinkedCandidate func(*os.File) (os.FileInfo, error)
 	forceBackupReplace  bool
 	forceCandidateCopy  bool
 

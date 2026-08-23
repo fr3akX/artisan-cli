@@ -460,8 +460,8 @@ func TestDownloadRoastProfileInstallAndDurabilityFailuresPropagate(t *testing.T)
 		{name: "force install", force: true, inject: func(ops *downloadOperations) {
 			ops.nativeOperation = func(func() error) error { return errors.New("replace") }
 		}, wantMessage: "Unable to store the roast profile safely"},
-		{name: "parent sync visible", inject: func(ops *downloadOperations) {
-			ops.syncParent = func(string) error { return errors.New("parent sync") }
+		{name: "durability failure visible", inject: func(ops *downloadOperations) {
+			injectDownloadDurabilityFailure(ops)
 		}, wantVisible: true, wantMessage: "The roast profile is installed, but storage durability is uncertain"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

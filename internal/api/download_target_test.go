@@ -193,10 +193,10 @@ func TestDownloadTargetPostNativeDestinationSwapIsAmbiguousAndCompetitorSurvives
 	}
 }
 
-func TestDownloadTargetParentSyncFailureIsExactVisibleButUncertain(t *testing.T) {
+func TestDownloadTargetDurabilityFailureIsExactVisibleButUncertain(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "profile")
 	ops := defaultDownloadOperations()
-	ops.syncParent = func(string) error { return errors.New("sync") }
+	injectDownloadDurabilityFailure(&ops)
 	target, err := newDownloadTarget(destination, false, ops)
 	if err != nil {
 		t.Fatal(err)

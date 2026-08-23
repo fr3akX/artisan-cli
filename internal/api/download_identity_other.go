@@ -98,30 +98,37 @@ func (p *heldOtherDownloadPublication) pathMatches() bool {
 	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && os.SameFile(info, p.parentInfo)
 }
 func (p *heldOtherDownloadPublication) matches(name string, want os.FileInfo) bool {
-	info, err := os.Lstat(filepath.Join(p.parentPath, name))
-	return err == nil && info.Mode().IsRegular() && os.SameFile(info, want)
+	return ownedDownloadNodeMatches(filepath.Join(p.parentPath, name), want, false)
 }
 func (p *heldOtherDownloadPublication) removeOwned(target *downloadTarget, name string, want os.FileInfo) error {
+	return p.removeOwnedNode(target, name, want, false)
+}
+func (p *heldOtherDownloadPublication) removeOwnedBackup(target *downloadTarget, name string, want os.FileInfo) error {
+	return p.removeOwnedNode(target, name, want, true)
+}
+func (p *heldOtherDownloadPublication) removeOwnedNode(target *downloadTarget, name string, want os.FileInfo, allowSymlink bool) error {
 	if name == "" {
 		return nil
 	}
-	if want == nil || !p.pathMatches() || !p.matches(name, want) {
+	if !p.pathMatches() {
 		return errDownloadIdentityAmbiguous
 	}
-	if target.operations.afterCleanupCheck != nil {
-		if err := target.operations.afterCleanupCheck(target, name); err != nil {
-			return err
+	return removeOwnedDownloadNode(filepath.Join(p.parentPath, name), want, allowSymlink, func() error {
+		if target.operations.afterCleanupCheck != nil {
+			if err := target.operations.afterCleanupCheck(target, name); err != nil {
+				return err
+			}
 		}
-	}
-	if !p.pathMatches() || !p.matches(name, want) {
-		return errDownloadIdentityAmbiguous
-	}
-	return os.Remove(filepath.Join(p.parentPath, name))
+		if !p.pathMatches() {
+			return errDownloadIdentityAmbiguous
+		}
+		return nil
+	})
 }
 func (p *heldOtherDownloadPublication) abort(target *downloadTarget) error {
 	sourceErr := p.removeOwned(target, p.sourceName, p.sourceInfo)
 	candidateErr := p.removeOwned(target, p.candidate, p.candidateInfo)
-	backupErr := p.removeOwned(target, p.backup, p.backupInfo)
+	backupErr := p.removeOwnedBackup(target, p.backup, p.backupInfo)
 	if sourceErr == nil {
 		p.sourceName = ""
 	}

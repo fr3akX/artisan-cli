@@ -53,7 +53,7 @@ func linkHeldLinuxDescriptor(sourceFD, parentFD int, name string) error {
 	return unix.Linkat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", sourceFD), parentFD, name, unix.AT_SYMLINK_FOLLOW)
 }
 
-func cloneHeldUnixDownloadSource(sourceFD int, sourceInfo os.FileInfo, parentFD int, name string, _ downloadOperations, register func(os.FileInfo) error) error {
+func cloneHeldUnixDownloadSource(sourceFD int, sourceInfo os.FileInfo, parentFD int, name string, operations downloadOperations, register func(os.FileInfo) error) error {
 	if err := linkHeldLinuxDescriptor(sourceFD, parentFD, name); err != nil {
 		return err
 	}
@@ -67,9 +67,22 @@ func cloneHeldUnixDownloadSource(sourceFD int, sourceInfo os.FileInfo, parentFD 
 		return err
 	}
 	file := os.NewFile(uintptr(fd), name)
-	info, statErr := file.Stat()
+	var info os.FileInfo
+	var statErr error
+	if operations.statLinkedCandidate != nil {
+		info, statErr = operations.statLinkedCandidate(file)
+	} else {
+		info, statErr = file.Stat()
+	}
+	var registerErr error
+	if statErr == nil {
+		// Never overwrite the known hard-link identity with nil after a later
+		// confirming stat failure. The initial source identity remains enough
+		// for conservative name revalidation and cleanup.
+		registerErr = register(info)
+	}
 	closeErr := file.Close()
-	return errors.Join(statErr, register(info), closeErr)
+	return errors.Join(statErr, registerErr, closeErr)
 }
 
 func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, force bool) (downloadInstallResult, error) {
@@ -167,12 +180,32 @@ func (publication *heldUnixDownloadPublication) publishLinuxForce(target *downlo
 			cleanupErr = publication.removeOwnedNode(target, publication.candidateName, oldIdentity)
 		}
 	} else if publication.backupName != "" {
-		// The verified hard-link backup is preserved through the first parent
-		// sync, then removed only after double-checking its identity.
-		if err := publication.syncParent(target); err != nil {
-			return downloadInstallResult{Publication: publicationExact, Visibility: visibilityForUnixParent(publication.parent, true), Durability: durabilityUncertain}, errors.Join(nativeErr, hookErr, err)
+		// Preserve the verified backup through the first sync, but do not let a
+		// sync failure skip identity-bound backup/source cleanup. Every changed
+		// namespace is followed by one final parent sync.
+		cleanups := []exactDownloadCleanup{
+			func() (bool, error) {
+				err := publication.removeOwnedName(target, publication.backupName, publication.backupInfo)
+				if err == nil {
+					publication.backupName = ""
+					return true, nil
+				}
+				return false, err
+			},
 		}
-		cleanupErr = publication.removeOwnedName(target, publication.backupName, publication.backupInfo)
+		if publication.sourceName != "" {
+			cleanups = append(cleanups, func() (bool, error) {
+				err := publication.removeOwnedName(target, publication.sourceName, publication.sourceInfo)
+				if err == nil {
+					publication.sourceName = ""
+					return true, nil
+				}
+				return false, err
+			})
+		}
+		durability, finishErr := finishExactDownloadCleanup(func() error { return publication.syncParent(target) }, cleanups...)
+		result := downloadInstallResult{Publication: publicationExact, Visibility: visibilityForUnixParent(publication.parent, true), Durability: durability}
+		return result, errors.Join(nativeErr, hookErr, probeErr, finishErr)
 	}
 	return resultAfterUnixExact(publication, target, errors.Join(nativeErr, hookErr, probeErr, cleanupErr))
 }
