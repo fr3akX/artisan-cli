@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,12 +97,37 @@ func TestRoastFilterCanonicalizesValidRFC3339Boundaries(t *testing.T) {
 		{raw: "2024-02-29T23:59:59.1+23:59", want: "2024-02-29T00:00:59.1Z"},
 		{raw: "2026-12-31T23:59:59.999999999-23:59", want: "2027-01-01T23:58:59.999999999Z"},
 		{raw: "2026-01-01T00:00:00+00:00", want: "2026-01-01T00:00:00Z"},
+		{raw: "0001-01-01T00:01:00.123456789+00:01", want: "0001-01-01T00:00:00.123456789Z"},
+		{raw: "9999-12-31T23:58:59.123456789-00:01", want: "9999-12-31T23:59:59.123456789Z"},
 	}
 	for _, tt := range tests {
 		query, failure := roastListQuery(RoastListOptions{RoastAtFrom: tt.raw})
 		if failure != nil || query.Get("roast_at_from") != tt.want {
 			t.Errorf("roastListQuery(%q) = %q, %#v; want %q", tt.raw, query.Get("roast_at_from"), failure, tt.want)
 		}
+	}
+}
+
+func TestRoastFilterRejectsUTCYearRolloverBeforeRequest(t *testing.T) {
+	requests := 0
+	client := roastAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+	})
+	for _, raw := range []string{
+		"0001-01-01T00:00:00.123456789+00:01",
+		"9999-12-31T23:59:59.123456789-00:01",
+	} {
+		options := RoastListOptions{RoastAtFrom: raw}
+		if failure := ValidateRoastListOptions(options); failure == nil || failure.Code != "invalid_roast_filter" || failure.ExitCode != 2 {
+			t.Errorf("ValidateRoastListOptions(%q) = %#v", raw, failure)
+		}
+		if _, failure := client.ListRoasts(context.Background(), options); failure == nil || failure.Code != "invalid_roast_filter" || failure.ExitCode != 2 {
+			t.Errorf("ListRoasts(%q) = %#v", raw, failure)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 
@@ -127,7 +153,7 @@ func TestValidateRoastListOptionsRejectsInvalidFiltersBeforeNetwork(t *testing.T
 	})
 	invalid := []RoastListOptions{
 		{Limit: -1}, {Limit: 101}, {Cursor: strings.Repeat("x", 513)},
-		{Search: strings.Repeat("x", 201)}, {Search: "review\x00hidden"}, {Machine: strings.Repeat("x", 101)},
+		{Search: strings.Repeat("x", 201)}, {Search: "review\x00hidden"}, {Machine: strings.Repeat("x", 101)}, {Machine: "roaster\x00hidden"},
 		{State: "deleted"}, {LabelID: "invalid"},
 		{RoastAtFrom: "2026-08-23T12:00:00"},
 		{RoastAtFrom: "2026-08-23T12:00:00+24:00"},
@@ -148,6 +174,21 @@ func TestValidateRoastListOptionsRejectsInvalidFiltersBeforeNetwork(t *testing.T
 	}
 	if requests != 0 {
 		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+func TestRoastTextFiltersDoNotRejectOtherControlsWithoutContractEvidence(t *testing.T) {
+	var got url.Values
+	client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+	})
+	options := RoastListOptions{Search: "review\x01term", Machine: "roaster\x1fmodel"}
+	if _, failure := client.ListRoasts(context.Background(), options); failure != nil {
+		t.Fatalf("ListRoasts() failure = %#v", failure)
+	}
+	if got.Get("search") != options.Search || got.Get("machine") != options.Machine {
+		t.Fatalf("query = %#v", got)
 	}
 }
 
@@ -276,7 +317,7 @@ func TestAllRoastReadsFollowCursorsPreserveFiltersAndBoundTraversal(t *testing.T
 	_, failure = collectRoastPages("", 2, func(string) ([]int, *string, *output.Error) {
 		return []int{1, 2, 3}, nil, nil
 	})
-	if failure == nil || failure.Code != "pagination_limit_exceeded" {
+	if failure == nil || failure.Code != "invalid_server_response" {
 		t.Fatalf("item bound failure = %#v", failure)
 	}
 	calls := 0
@@ -287,6 +328,84 @@ func TestAllRoastReadsFollowCursorsPreserveFiltersAndBoundTraversal(t *testing.T
 	if failure == nil || failure.Code != "pagination_page_limit_exceeded" || calls != MaxRoastAggregatePages {
 		t.Fatalf("page bound failure=%#v calls=%d", failure, calls)
 	}
+}
+
+func TestPublicRoastAggregateMethodsEnforceExactItemBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		item string
+		call func(*Client) (int, *output.Error)
+	}{
+		{
+			name: "roasts", item: validRoastListItemJSON(),
+			call: func(client *Client) (int, *output.Error) {
+				page, failure := client.ListAllRoasts(context.Background(), RoastListOptions{})
+				return len(page.Items), failure
+			},
+		},
+		{
+			name: "revisions", item: validRoastRevisionJSON(),
+			call: func(client *Client) (int, *output.Error) {
+				page, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{})
+				return len(page.Items), failure
+			},
+		},
+		{
+			name: "comments", item: validDeletedCommentJSON(),
+			call: func(client *Client) (int, *output.Error) {
+				page, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{})
+				return len(page.Items), failure
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, total := range []int{MaxRoastAggregateItems, MaxRoastAggregateItems + 1} {
+			t.Run(tt.name+"/"+strconv.Itoa(total), func(t *testing.T) {
+				requests := 0
+				client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					pageNumber := 0
+					if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+						var err error
+						pageNumber, err = strconv.Atoi(cursor)
+						if err != nil {
+							t.Fatalf("cursor = %q", cursor)
+						}
+					}
+					start := pageNumber * 100
+					count := total - start
+					if count > 100 {
+						count = 100
+					}
+					if count < 1 {
+						t.Fatalf("unexpected aggregate request %d for total %d", requests, total)
+					}
+					next := "null"
+					if start+count < total {
+						next = strconv.Quote(strconv.Itoa(pageNumber + 1))
+					}
+					writeRoastJSON(w, `{"items":[`+repeatRoastJSONItem(tt.item, count)+`],"next_cursor":`+next+`}`)
+				})
+				count, failure := tt.call(client)
+				if total == MaxRoastAggregateItems {
+					if failure != nil || count != MaxRoastAggregateItems || requests != 100 {
+						t.Fatalf("count=%d failure=%#v requests=%d", count, failure, requests)
+					}
+					return
+				}
+				if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 || count != 0 || requests != 101 {
+					t.Fatalf("count=%d failure=%#v requests=%d", count, failure, requests)
+				}
+			})
+		}
+	}
+}
+
+func repeatRoastJSONItem(item string, count int) string {
+	if count == 1 {
+		return item
+	}
+	return strings.Repeat(item+",", count-1) + item
 }
 
 func TestAllRoastRevisionAndCommentReadsReturnNoCursor(t *testing.T) {

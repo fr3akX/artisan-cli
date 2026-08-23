@@ -55,6 +55,7 @@ func TestClientResponseValidatorReceivesClonedHeadersBeforeSuccessDecode(t *test
 					}
 				}
 			}
+			header["X-Contract"][0] = "mutated-slice-element"
 			header.Set("X-Contract", "mutated-clone")
 			header.Add("X-Callback-Only", "value")
 			return nil

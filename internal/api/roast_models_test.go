@@ -256,6 +256,48 @@ func TestRoastModelsRejectDuplicateJSONKeysAtEveryTypedResponseLevel(t *testing.
 	}
 }
 
+func TestRoastModelsTolerateArbitraryJSONNumbersWhileRejectingNestedDuplicateKeys(t *testing.T) {
+	const arbitraryNumbers = `{"integer":123456789012345678901234567890123456789012345678901234567890,"exponent":9.876543210123456789e+9999}`
+	tests := []struct {
+		name    string
+		payload string
+		target  any
+	}{
+		{
+			name:    "revision metadata",
+			payload: strings.Replace(validRoastRevisionJSON(), `{"nested":{"safe":true}}`, arbitraryNumbers, 1),
+			target:  &RoastRevision{},
+		},
+		{
+			name:    "current metadata",
+			payload: strings.Replace(validRoastDetailJSON(), `{"notes":{"roast":"private"}}`, arbitraryNumbers, 1),
+			target:  &RoastDetail{},
+		},
+		{
+			name:    "unknown nested future field",
+			payload: strings.TrimSuffix(validRoastListItemJSON(), "}") + `,"future":{"numbers":` + arbitraryNumbers + `}}`,
+			target:  &RoastListItem{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tt.payload), tt.target); err != nil {
+				t.Fatalf("valid arbitrary JSON numbers rejected: %v", err)
+			}
+		})
+	}
+
+	duplicateWithLargeNumber := strings.Replace(
+		validRoastRevisionJSON(),
+		`{"nested":{"safe":true}}`,
+		`{"nested":{"large":1e9999,"large":1e9999}}`,
+		1,
+	)
+	if err := json.Unmarshal([]byte(duplicateWithLargeNumber), &RoastRevision{}); err == nil {
+		t.Fatal("nested duplicate key was accepted when paired with a large JSON number")
+	}
+}
+
 func TestRoastPagesRequireProgressAndUseTheRequestCursorByteLimit(t *testing.T) {
 	pages := []struct {
 		name   string

@@ -349,6 +349,7 @@ func decodeRequiredRoastObject(data []byte, destination any, nullable []string, 
 
 func rejectDuplicateJSONKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	if err := consumeUniqueJSONValue(decoder); err != nil {
 		return err
 	}
