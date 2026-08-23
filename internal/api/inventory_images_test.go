@@ -606,7 +606,9 @@ func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
 			if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, force); failure != nil {
 				t.Fatal(failure)
 			}
-			if !reflect.DeepEqual(events, []string{"sync-file", "close-file", "native", "sync-parent"}) {
+			want := []string{"sync-file", "close-file", "native", "sync-parent"}
+			linuxNoForceFallback := []string{"sync-file", "close-file", "native", "native", "sync-parent"}
+			if !reflect.DeepEqual(events, want) && (force || !reflect.DeepEqual(events, linuxNoForceFallback)) {
 				t.Fatalf("events=%v", events)
 			}
 		})

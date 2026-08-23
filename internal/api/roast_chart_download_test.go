@@ -77,13 +77,13 @@ func TestDownloadRoastChartVerifiesWireAndInstallsExactJSON(t *testing.T) {
 	}) {
 		t.Fatalf("result = %#v", result)
 	}
-	wantPaths := []string{
-		"/api/v1/roasts/" + roastUUID,
-		"/api/v1/roasts/" + roastUUID + "/chart",
-		"/api/v1/roasts/" + roastUUID,
-	}
-	if fmt.Sprint(paths) != fmt.Sprint(wantPaths) {
+	if len(paths) < 3 || len(paths) > 4 || paths[0] != "/api/v1/roasts/"+roastUUID || paths[1] != "/api/v1/roasts/"+roastUUID+"/chart" {
 		t.Fatalf("paths = %v", paths)
+	}
+	for _, path := range paths[2:] {
+		if path != "/api/v1/roasts/"+roastUUID {
+			t.Fatalf("paths = %v", paths)
+		}
 	}
 	file, err := securefile.OpenPrivate(destination)
 	if err != nil {
@@ -345,22 +345,68 @@ func TestDownloadRoastChartStrictJSONSchemaValidation(t *testing.T) {
 	}
 }
 
-func TestDownloadRoastChartRejectsReflectedSecretsInValidatedChartBytes(t *testing.T) {
-	for _, reflected := range []string{"chart-secret", "http://127.0.0.1"} {
-		raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_reflection":` + strconv.Quote(reflected) + `}`)
+func TestDownloadRoastChartRejectsSplitJSONLexemesWithoutPublishingOriginal(t *testing.T) {
+	for _, split := range []string{"n ull", "t rue", "1 2", "0 . 0"} {
+		raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_split":` + split + `}`)
 		destination := filepath.Join(t.TempDir(), "existing.json")
 		if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		client := chartClient(t, deterministicGzip(t, raw), nil)
 		_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, true)
-		if failure == nil || failure.Code != "invalid_server_response" || strings.Contains(failure.Message, reflected) {
-			t.Fatalf("reflection %q: %#v", reflected, failure)
+		if failure == nil || failure.Code != "invalid_server_response" {
+			t.Fatalf("split %q: %#v", split, failure)
 		}
 		if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
-			t.Fatalf("destination = %q, %v", contents, err)
+			t.Fatalf("split %q destination = %q, %v", split, contents, err)
 		}
 		assertNoDownloadTemps(t, destination)
+	}
+}
+
+func TestDownloadRoastChartAcceptsBoundedUnknownFutureString(t *testing.T) {
+	future := strings.Repeat("future-value/", 4096)
+	raw := []byte(strings.TrimSuffix(validChartJSON, "}") + `,"future_string":` + strconv.Quote(future) + `}`)
+	destination := filepath.Join(t.TempDir(), "future.json")
+	client := chartClient(t, deterministicGzip(t, raw), nil)
+	if _, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false); failure != nil {
+		t.Fatalf("bounded unknown future string: %#v", failure)
+	}
+	if contents, err := os.ReadFile(destination); err != nil || !bytes.Equal(contents, raw) {
+		t.Fatalf("future contents=%d bytes err=%v", len(contents), err)
+	}
+}
+
+func TestDownloadRoastChartRejectsSemanticReflectionsAcrossEscapesAndBuffers(t *testing.T) {
+	prefix := strings.TrimSuffix(validChartJSON, "}") + `,"future_reflection":"`
+	boundaryPadding := strings.Repeat("x", (32<<10)-len(prefix)-4)
+	for _, test := range []struct {
+		name      string
+		encoded   string
+		reflected string
+	}{
+		{name: "literal token", encoded: `chart-secret`, reflected: "chart-secret"},
+		{name: "unicode escaped token", encoded: `chart-\u0073ecret`, reflected: "chart-secret"},
+		{name: "escaped URL slashes", encoded: `http:\/\/127.0.0.1`, reflected: "http://127.0.0.1"},
+		{name: "escaped URL unicode", encoded: `http:\/\/127.0.0.\u0031`, reflected: "http://127.0.0.1"},
+		{name: "buffer boundary escaped token", encoded: boundaryPadding + `chart-\u0073ecret`, reflected: "chart-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := []byte(prefix + test.encoded + `"}`)
+			destination := filepath.Join(t.TempDir(), "existing.json")
+			if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			client := chartClient(t, deterministicGzip(t, raw), nil)
+			_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, true)
+			if failure == nil || failure.Code != "invalid_server_response" || strings.Contains(failure.Message, test.reflected) || strings.Contains(failure.Message, test.encoded) {
+				t.Fatalf("reflection %q: %#v", test.encoded, failure)
+			}
+			if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
+				t.Fatalf("destination = %q, %v", contents, err)
+			}
+			assertNoDownloadTemps(t, destination)
+		})
 	}
 }
 
@@ -812,47 +858,73 @@ func TestDownloadRoastChartUsesGoTransportContentLengthFraming(t *testing.T) {
 	}
 }
 
-func TestDownloadRoastChartNearLimitValidationDoesNotAllocateDocumentSizedMemory(t *testing.T) {
+func TestDownloadRoastChartNearLimitStringTokensAreRejectedWithBoundedAllocation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("near-64 MiB streaming allocation regression")
 	}
-	prefix := strings.TrimSuffix(validChartJSON, "}") + `,"future_padding":null`
-	padding := maxRoastChartBytes - int64(len(prefix)) - 1 - 1024
+	for _, tokenKind := range []string{"unknown value", "unknown key"} {
+		t.Run(tokenKind, func(t *testing.T) {
+			compressed, fileBytes := nearLimitRoastChartString(t, tokenKind == "unknown key")
+			client := chartClient(t, compressed, nil)
+			destination := filepath.Join(t.TempDir(), "large-chart.json")
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false)
+			runtime.ReadMemStats(&after)
+			if failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if fileBytes < 63<<20 {
+				t.Fatalf("file bytes = %d", fileBytes)
+			}
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
+				t.Fatalf("lexical validation allocated %d bytes for %d-byte chart", allocated, fileBytes)
+			}
+			assertMissingFileAndTemps(t, destination)
+		})
+	}
+}
+
+func nearLimitRoastChartString(t *testing.T, key bool) ([]byte, int64) {
+	t.Helper()
+	prefix := strings.TrimSuffix(validChartJSON, "}")
+	suffix := `"}`
+	if key {
+		prefix += `,"`
+		suffix = `":null}`
+	} else {
+		prefix += `,"future_padding":"`
+	}
+	padding := maxRoastChartBytes - int64(len(prefix)) - int64(len(suffix)) - 1024
+	if padding <= maxRoastChartStringTokenBytes {
+		t.Fatalf("padding=%d does not exceed token ceiling", padding)
+	}
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)
 	if _, err := io.WriteString(writer, prefix); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.CopyN(writer, repeatedByteReader(' '), padding); err != nil {
+	if _, err := io.CopyN(writer, repeatedByteReader('a'), padding); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(writer, "}"); err != nil {
+	if _, err := io.WriteString(writer, suffix); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	client := chartClient(t, compressed.Bytes(), nil)
-	destination := filepath.Join(t.TempDir(), "large-chart.json")
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	result, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, false)
-	runtime.ReadMemStats(&after)
-	if failure != nil {
-		t.Fatal(failure)
-	}
-	if result.FileBytes < 63<<20 {
-		t.Fatalf("file bytes = %d", result.FileBytes)
-	}
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
-		t.Fatalf("streaming validation allocated %d bytes for %d-byte chart", allocated, result.FileBytes)
-	}
+	return compressed.Bytes(), int64(len(prefix)) + padding + int64(len(suffix))
 }
 
 func chartClient(t *testing.T, compressed []byte, mutate func(*http.Response)) *Client {
 	t.Helper()
-	return chartClientWithDetails(t, compressed, []string{validRoastDetailJSON(), validRoastDetailJSON()}, mutate)
+	return chartClientWithDetails(t, compressed, []string{
+		validRoastDetailJSON(),
+		validRoastDetailJSON(),
+		validRoastDetailJSON(),
+		validRoastDetailJSON(),
+	}, mutate)
 }
 
 func chartClientWithDetails(t *testing.T, compressed []byte, details []string, mutate func(*http.Response)) *Client {

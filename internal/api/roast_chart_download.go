@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
 )
@@ -206,6 +207,9 @@ func (c *Client) DownloadRoastChart(ctx context.Context, rawRoastUUID, destinati
 	})
 	var fenceErr *chartFenceCallbackError
 	if errors.As(err, &fenceErr) {
+		if installed.CleanupUncertain {
+			return result, chartStorageFailure("Unable to clean up the roast chart safely")
+		}
 		return result, fenceErr.failure
 	}
 	if installed.Publication == publicationNone && ctx.Err() != nil {
@@ -336,6 +340,9 @@ const (
 	maxRoastChartJSONDepth      = 64
 	maxRoastChartObjectKeys     = 100_000
 	maxRoastChartObjectKeyBytes = 4 << 20
+	// Schema-v1 strings are small identifiers and labels. One MiB leaves ample
+	// room for future text while preventing a 64 MiB scalar or key allocation.
+	maxRoastChartStringTokenBytes = 1 << 20
 )
 
 var errInvalidRoastChartJSON = errors.New("invalid roast chart JSON")
@@ -350,188 +357,186 @@ func validateRoastChartFile(ctx context.Context, file *os.File, fileBytes int64,
 	if file == nil || fileBytes < 1 || fileBytes > maxRoastChartBytes {
 		return errInvalidRoastChartJSON
 	}
-	if err := validateRoastChartRawText(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}); err != nil {
+	reflected, err := preScanRoastChartStrings(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}, forbidden)
+	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(&roastChartSignificantReader{reader: contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)}})
+	if reflected {
+		return errInvalidRoastChartJSON
+	}
+	// The lexical pass capped every raw and decoded string token before
+	// encoding/json can materialize it. Decode the unchanged held bytes so
+	// whitespace can never repair an invalid split keyword or number.
+	decoder := json.NewDecoder(contextBoundReader{ctx: ctx, reader: io.NewSectionReader(file, 0, fileBytes)})
 	decoder.UseNumber()
 	if err := validateRoastChartTokens(decoder, parserVersion); err != nil {
 		return err
 	}
-	if reflected, err := roastChartContainsAny(file, fileBytes, forbidden); err != nil {
-		return err
-	} else if reflected {
-		return errInvalidRoastChartJSON
-	}
 	return nil
 }
 
-// roastChartSignificantReader removes only insignificant JSON whitespace from
-// the validation stream. The held file remains untouched and is published
-// byte-for-byte, while json.Decoder cannot retain an adversarial document-sized
-// whitespace run while waiting for its next token.
-type roastChartSignificantReader struct {
-	reader           io.Reader
-	input            [32 << 10]byte
-	offset, count    int
-	inString, escape bool
-	err              error
-}
-
-func (reader *roastChartSignificantReader) Read(destination []byte) (int, error) {
-	if len(destination) == 0 {
-		return 0, nil
-	}
-	written := 0
-	for written == 0 {
-		if reader.offset == reader.count {
-			reader.offset = 0
-			reader.count, reader.err = reader.reader.Read(reader.input[:])
-			if reader.count == 0 {
-				return 0, reader.err
-			}
-		}
-		for reader.offset < reader.count && written < len(destination) {
-			value := reader.input[reader.offset]
-			reader.offset++
-			if !reader.inString && (value == ' ' || value == '\t' || value == '\r' || value == '\n') {
-				continue
-			}
-			destination[written] = value
-			written++
-			if !reader.inString {
-				if value == '"' {
-					reader.inString = true
-				}
-				continue
-			}
-			if reader.escape {
-				reader.escape = false
-			} else if value == '\\' {
-				reader.escape = true
-			} else if value == '"' {
-				reader.inString = false
-			}
-		}
-	}
-	return written, nil
-}
-
-func validateRoastChartRawText(reader io.Reader) error {
+func preScanRoastChartStrings(reader io.Reader, forbidden []string) (bool, error) {
 	buffered := bufio.NewReaderSize(reader, 32<<10)
-	inString := false
-	for {
-		value, err := buffered.ReadByte()
-		if errors.Is(err, io.EOF) {
-			if inString {
-				return errInvalidRoastChartJSON
-			}
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if value >= 0x80 {
-			if err := buffered.UnreadByte(); err != nil {
-				return err
-			}
-			runeValue, size, err := buffered.ReadRune()
-			if err != nil || runeValue == '\uFFFD' && size == 1 {
-				return errInvalidRoastChartJSON
-			}
-			continue
-		}
-		if !inString {
-			if value == '"' {
-				inString = true
-			}
-			continue
-		}
-		switch value {
-		case '"':
-			inString = false
-		case '\\':
-			escape, err := buffered.ReadByte()
-			if err != nil {
-				return errInvalidRoastChartJSON
-			}
-			if escape != 'u' {
-				if !strings.ContainsRune(`"\\/bfnrt`, rune(escape)) {
-					return errInvalidRoastChartJSON
-				}
-				continue
-			}
-			code, err := readRoastChartHexEscape(buffered)
-			if err != nil {
-				return errInvalidRoastChartJSON
-			}
-			if code >= 0xDC00 && code <= 0xDFFF {
-				return errInvalidRoastChartJSON
-			}
-			if code >= 0xD800 && code <= 0xDBFF {
-				backslash, firstErr := buffered.ReadByte()
-				u, secondErr := buffered.ReadByte()
-				low, thirdErr := readRoastChartHexEscape(buffered)
-				if firstErr != nil || secondErr != nil || thirdErr != nil || backslash != '\\' || u != 'u' || low < 0xDC00 || low > 0xDFFF {
-					return errInvalidRoastChartJSON
-				}
-			}
-		default:
-			if value < 0x20 {
-				return errInvalidRoastChartJSON
-			}
-		}
-	}
-}
-
-func readRoastChartHexEscape(reader *bufio.Reader) (uint16, error) {
-	var encoded [4]byte
-	if _, err := io.ReadFull(reader, encoded[:]); err != nil {
-		return 0, err
-	}
-	value, err := strconv.ParseUint(string(encoded[:]), 16, 16)
-	return uint16(value), err
-}
-
-func roastChartContainsAny(file *os.File, fileBytes int64, forbidden []string) (bool, error) {
-	maxPattern := 0
 	patterns := make([][]byte, 0, len(forbidden))
 	for _, value := range forbidden {
-		if value == "" {
-			continue
-		}
-		patterns = append(patterns, []byte(value))
-		if len(value) > maxPattern {
-			maxPattern = len(value)
+		if value != "" {
+			patterns = append(patterns, []byte(value))
 		}
 	}
-	if len(patterns) == 0 {
-		return false, nil
-	}
-	overlap := maxPattern - 1
-	window := make([]byte, (32<<10)+overlap)
-	carry := 0
-	reader := io.NewSectionReader(file, 0, fileBytes)
+	decoded := make([]byte, 0, 32<<10)
 	for {
-		count, err := reader.Read(window[carry:])
-		active := window[:carry+count]
-		for _, pattern := range patterns {
-			if bytes.Contains(active, pattern) {
-				return true, nil
-			}
-		}
-		carry = overlap
-		if carry > len(active) {
-			carry = len(active)
-		}
-		copy(window[:carry], active[len(active)-carry:])
+		value, err := buffered.ReadByte()
 		if errors.Is(err, io.EOF) {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
 		}
+		if value == '"' {
+			var reflected bool
+			decoded, reflected, err = scanRoastChartJSONString(buffered, decoded[:0], patterns)
+			if err != nil || reflected {
+				return reflected, err
+			}
+			continue
+		}
+		if value >= 0x80 {
+			if err := buffered.UnreadByte(); err != nil {
+				return false, err
+			}
+			runeValue, size, err := buffered.ReadRune()
+			if err != nil || runeValue == '\uFFFD' && size == 1 {
+				return false, errInvalidRoastChartJSON
+			}
+		}
 	}
+}
+
+func scanRoastChartJSONString(reader *bufio.Reader, decoded []byte, forbidden [][]byte) ([]byte, bool, error) {
+	rawBytes := 0
+	appendDecoded := func(value ...byte) bool {
+		decoded = append(decoded, value...)
+		return len(decoded) <= maxRoastChartStringTokenBytes
+	}
+	for {
+		value, err := reader.ReadByte()
+		if err != nil {
+			return decoded, false, errInvalidRoastChartJSON
+		}
+		if value == '"' {
+			for _, pattern := range forbidden {
+				if bytes.Contains(decoded, pattern) {
+					return decoded, true, nil
+				}
+			}
+			return decoded, false, nil
+		}
+		rawBytes++
+		if rawBytes > maxRoastChartStringTokenBytes {
+			return decoded, false, errInvalidRoastChartJSON
+		}
+		if value >= 0x80 {
+			if err := reader.UnreadByte(); err != nil {
+				return decoded, false, err
+			}
+			runeValue, size, err := reader.ReadRune()
+			if err != nil || runeValue == '\uFFFD' && size == 1 {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+			rawBytes += size - 1
+			if rawBytes > maxRoastChartStringTokenBytes {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+			decoded = utf8.AppendRune(decoded, runeValue)
+			if len(decoded) > maxRoastChartStringTokenBytes {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+			continue
+		}
+		if value != '\\' {
+			if value < 0x20 || !appendDecoded(value) {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+			continue
+		}
+
+		escape, err := reader.ReadByte()
+		rawBytes++
+		if err != nil || rawBytes > maxRoastChartStringTokenBytes {
+			return decoded, false, errInvalidRoastChartJSON
+		}
+		switch escape {
+		case '"', '\\', '/':
+			if !appendDecoded(escape) {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 'b':
+			if !appendDecoded('\b') {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 'f':
+			if !appendDecoded('\f') {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 'n':
+			if !appendDecoded('\n') {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 'r':
+			if !appendDecoded('\r') {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 't':
+			if !appendDecoded('\t') {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		case 'u':
+			code, err := readRoastChartHexEscape(reader)
+			rawBytes += 4
+			if err != nil || rawBytes > maxRoastChartStringTokenBytes || code >= 0xDC00 && code <= 0xDFFF {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+			runeValue := rune(code)
+			if code >= 0xD800 && code <= 0xDBFF {
+				backslash, firstErr := reader.ReadByte()
+				u, secondErr := reader.ReadByte()
+				low, thirdErr := readRoastChartHexEscape(reader)
+				rawBytes += 6
+				if firstErr != nil || secondErr != nil || thirdErr != nil || rawBytes > maxRoastChartStringTokenBytes || backslash != '\\' || u != 'u' || low < 0xDC00 || low > 0xDFFF {
+					return decoded, false, errInvalidRoastChartJSON
+				}
+				runeValue = 0x10000 + (rune(code)-0xD800)<<10 + rune(low) - 0xDC00
+			}
+			decoded = utf8.AppendRune(decoded, runeValue)
+			if len(decoded) > maxRoastChartStringTokenBytes {
+				return decoded, false, errInvalidRoastChartJSON
+			}
+		default:
+			return decoded, false, errInvalidRoastChartJSON
+		}
+	}
+}
+
+func readRoastChartHexEscape(reader *bufio.Reader) (uint16, error) {
+	var value uint16
+	for index := 0; index < 4; index++ {
+		digit, err := reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value |= uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value |= uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value |= uint16(digit-'A') + 10
+		default:
+			return 0, errInvalidRoastChartJSON
+		}
+	}
+	return value, nil
 }
 
 func validateRoastChartTokens(decoder *json.Decoder, parserVersion string) error {

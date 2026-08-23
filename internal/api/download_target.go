@@ -41,9 +41,10 @@ const (
 )
 
 type downloadInstallResult struct {
-	Publication downloadPublicationState
-	Visibility  downloadVisibilityState
-	Durability  downloadDurabilityState
+	Publication      downloadPublicationState
+	Visibility       downloadVisibilityState
+	Durability       downloadDurabilityState
+	CleanupUncertain bool
 }
 
 func (result downloadInstallResult) Visible() bool {
@@ -73,10 +74,12 @@ type downloadOperations struct {
 
 	// Linux-only deterministic capability seams. Other platforms leave these
 	// unused while sharing the same operation bundle in common tests.
-	openAnonymousSource func(int) (int, error)
-	statLinkedCandidate func(*os.File) (os.FileInfo, error)
-	forceBackupReplace  bool
-	forceCandidateCopy  bool
+	openAnonymousSource     func(int) (int, error)
+	statLinkedCandidate     func(*os.File) (os.FileInfo, error)
+	linkDescriptorEmptyPath func(int, int, string) error
+	linkDescriptorProcPath  func(int, int, string) error
+	forceBackupReplace      bool
+	forceCandidateCopy      bool
 
 	// A non-nil syncParent is a deterministic fault seam; production syncs the
 	// retained parent descriptor/handle directly.
@@ -286,6 +289,7 @@ func (target *downloadTarget) install(ctx context.Context, force bool, callback 
 		return result, err
 	}
 	result, returnErr = target.platform.publish(target, force)
+	var cleanupErr error
 	switch result.Publication {
 	case publicationExact:
 		target.state = downloadTargetInstalledExact
@@ -294,7 +298,7 @@ func (target *downloadTarget) install(ctx context.Context, force bool, callback 
 		// it still authorizes identity-bound cleanup of every definitely-owned
 		// source, candidate, and backup.
 		target.state = downloadTargetTerminalNone
-		returnErr = errors.Join(returnErr, target.platform.abort(target))
+		cleanupErr = target.platform.abort(target)
 	case publicationAmbiguous:
 		target.state = downloadTargetTerminalAmbiguous
 	default:
@@ -302,7 +306,13 @@ func (target *downloadTarget) install(ctx context.Context, force bool, callback 
 			target.state = downloadTargetTerminalAmbiguous
 		}
 	}
-	return result, errors.Join(returnErr, target.closeAll())
+	closeErr := target.closeAll()
+	if result.Publication == publicationNone && (cleanupErr != nil || closeErr != nil) {
+		// Keep fence/API errors distinguishable from a fence that also left
+		// local cleanup or descriptor-close uncertainty.
+		result.CleanupUncertain = true
+	}
+	return result, errors.Join(returnErr, cleanupErr, closeErr)
 }
 
 func (target *downloadTarget) prepareNativeOperation() error {

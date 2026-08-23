@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -134,6 +135,43 @@ func TestLinuxDownloadConstructorJoinsProtectionAndCleanupErrors(t *testing.T) {
 	}
 }
 
+func TestLinuxDownloadNoForceDescriptorFallbackRunsFenceAgainBeforeProcLink(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	ops := defaultDownloadOperations()
+	var emptyPathCalls, procPathCalls int
+	ops.linkDescriptorEmptyPath = func(int, int, string) error {
+		emptyPathCalls++
+		return unix.EOPNOTSUPP
+	}
+	ops.linkDescriptorProcPath = func(int, int, string) error {
+		procPathCalls++
+		return errors.New("proc link must not run after fence rejection")
+	}
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	stale := errors.New("revision changed")
+	var fenceCalls int
+	result, installErr := target.InstallContextBeforeNative(context.Background(), false, func() error {
+		fenceCalls++
+		if fenceCalls == 2 {
+			return stale
+		}
+		return nil
+	})
+	if !errors.Is(installErr, stale) || result.Publication != publicationNone || result.Visible() {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	if fenceCalls != 2 || emptyPathCalls != 1 || procPathCalls != 0 {
+		t.Fatalf("fence=%d empty-path=%d proc-path=%d", fenceCalls, emptyPathCalls, procPathCalls)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination published: %v", err)
+	}
+}
+
 func TestLinuxDownloadNamedFallbackCompletesNoForceAndForceSafely(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no-force", true: "force"}[force], func(t *testing.T) {
@@ -190,7 +228,7 @@ func TestLinuxDownloadPreNativeFailureCleansTrackedNamedSourceAndCandidateAndJoi
 	}
 	_, _ = io.WriteString(target.Writer(), "new")
 	result, err := target.Install(true)
-	if err == nil || result.Publication != publicationNone || !strings.Contains(err.Error(), "pre-native") || !strings.Contains(err.Error(), "candidate-cleanup") {
+	if err == nil || result.Publication != publicationNone || !result.CleanupUncertain || !strings.Contains(err.Error(), "pre-native") || !strings.Contains(err.Error(), "candidate-cleanup") {
 		t.Fatalf("install=%#v,%v", result, err)
 	}
 	var sawSource, sawCandidate bool

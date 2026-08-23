@@ -42,19 +42,34 @@ func createAnonymousUnixDownloadSource(parentFD int, target *downloadTarget, pre
 	return -1, "", errors.New("could not allocate held download source")
 }
 
-func linkHeldLinuxDescriptor(sourceFD, parentFD int, name string) error {
-	err := unix.Linkat(sourceFD, "", parentFD, name, unix.AT_EMPTY_PATH)
-	if err == nil {
-		return nil
+func linkHeldLinuxDescriptorEmptyPath(sourceFD, parentFD int, name string, operations downloadOperations) error {
+	if operations.linkDescriptorEmptyPath != nil {
+		return operations.linkDescriptorEmptyPath(sourceFD, parentFD, name)
 	}
-	if !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EOPNOTSUPP) {
-		return err
+	return unix.Linkat(sourceFD, "", parentFD, name, unix.AT_EMPTY_PATH)
+}
+
+func linkHeldLinuxDescriptorProcPath(sourceFD, parentFD int, name string, operations downloadOperations) error {
+	if operations.linkDescriptorProcPath != nil {
+		return operations.linkDescriptorProcPath(sourceFD, parentFD, name)
 	}
 	return unix.Linkat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", sourceFD), parentFD, name, unix.AT_SYMLINK_FOLLOW)
 }
 
+func linuxDescriptorLinkFallbackEligible(err error) bool {
+	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP)
+}
+
+func linkHeldLinuxDescriptor(sourceFD, parentFD int, name string, operations downloadOperations) error {
+	err := linkHeldLinuxDescriptorEmptyPath(sourceFD, parentFD, name, operations)
+	if err == nil || !linuxDescriptorLinkFallbackEligible(err) {
+		return err
+	}
+	return linkHeldLinuxDescriptorProcPath(sourceFD, parentFD, name, operations)
+}
+
 func cloneHeldUnixDownloadSource(sourceFD int, sourceInfo os.FileInfo, parentFD int, name string, operations downloadOperations, register func(os.FileInfo) error) error {
-	if err := linkHeldLinuxDescriptor(sourceFD, parentFD, name); err != nil {
+	if err := linkHeldLinuxDescriptor(sourceFD, parentFD, name, operations); err != nil {
 		return err
 	}
 	// A hard link has the exact source identity. Register it before any later
@@ -97,9 +112,18 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 
 func (publication *heldUnixDownloadPublication) publishLinuxNoForce(target *downloadTarget) (downloadInstallResult, error) {
 	leaf := filepath.Base(target.destination)
+	sourceFD, parentFD := int(publication.source.Fd()), int(publication.parent.file.Fd())
 	nativeErr := publication.invokeNative(target, func() error {
-		return linkHeldLinuxDescriptor(int(publication.source.Fd()), int(publication.parent.file.Fd()), leaf)
+		return linkHeldLinuxDescriptorEmptyPath(sourceFD, parentFD, leaf, target.operations)
 	})
+	if target.nativeOperationInvoked && linuxDescriptorLinkFallbackEligible(target.nativeOperationErr) {
+		// The procfs capability fallback is a separate namespace operation. Run
+		// the publication fence again immediately before its decisive linkat.
+		// The expected capability error is superseded by this attempt's result.
+		nativeErr = publication.invokeNative(target, func() error {
+			return linkHeldLinuxDescriptorProcPath(sourceFD, parentFD, leaf, target.operations)
+		})
+	}
 	hookErr := publication.afterNative(target)
 	_, exact, probeErr := publication.destinationExact(target, publication.sourceInfo)
 	if exact {
