@@ -20,15 +20,19 @@ import (
 
 const maxResponseBodyBytes = 1 << 20
 
+// ResponseValidator validates trusted response metadata for a successful API operation.
+type ResponseValidator func(status int, header http.Header) *output.Error
+
 // Request describes one API operation. Body must return a newly opened body on
 // every call so an idempotent mutation can be replayed safely.
 type Request struct {
-	Method         string
-	Path           string
-	Query          url.Values
-	Body           func() (io.ReadCloser, string, error)
-	IdempotencyKey string
-	ExpectedStatus int
+	Method           string
+	Path             string
+	Query            url.Values
+	Body             func() (io.ReadCloser, string, error)
+	IdempotencyKey   string
+	ExpectedStatus   int
+	ValidateResponse ResponseValidator
 }
 
 // Client is an authenticated Artisan API client.
@@ -170,8 +174,9 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
 		}
-		if containsExactTokenReflection(responseBody, c.token) {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		forbiddenResponseValues := []string{c.token, c.serverURL.String()}
+		if containsExactTokenReflection(responseBody, c.token) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if responseRequiresJSON(responseBody) && !trustedJSONContentType(response.Header) {
 			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
@@ -186,6 +191,11 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			if request.ExpectedStatus != 0 && status != request.ExpectedStatus {
 				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
+			if request.ValidateResponse != nil {
+				if failure := request.ValidateResponse(status, response.Header.Clone()); failure != nil {
+					return failure
+				}
+			}
 			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
 		if status >= 400 && status < 600 {
@@ -198,6 +208,20 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 
 func responseRequiresJSON(body []byte) bool {
 	return len(bytes.TrimSpace(body)) != 0
+}
+
+func responseHeaderContainsAny(header http.Header, forbiddenValues []string) bool {
+	for name, values := range header {
+		if containsAny(name, forbiddenValues) {
+			return true
+		}
+		for _, value := range values {
+			if containsAny(value, forbiddenValues) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func containsExactTokenReflection(body []byte, token string) bool {

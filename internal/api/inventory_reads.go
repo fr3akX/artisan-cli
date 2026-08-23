@@ -338,16 +338,23 @@ func pageQuery(options PageOptions) (url.Values, *output.Error) {
 }
 
 func normalizeInventoryUUID(raw string) (string, *output.Error) {
+	if len(raw) == 36 && (raw[8] != '-' || raw[13] != '-' || raw[18] != '-' || raw[23] != '-') {
+		return "", inventoryUsageFailure("invalid_uuid", "UUID must be compact or standard dashed form")
+	}
+	return normalizeCompactUUID(raw, "invalid_uuid", "UUID must be compact lowercase or standard dashed form")
+}
+
+func normalizeCompactUUID(raw, code, message string) (string, *output.Error) {
 	value := raw
 	if len(value) == 36 {
 		if value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-			return "", inventoryUsageFailure("invalid_uuid", "UUID must be compact or standard dashed form")
+			return "", inventoryUsageFailure(code, message)
 		}
 		value = value[:8] + value[9:13] + value[14:18] + value[19:23] + value[24:]
 		value = strings.ToLower(value)
 	}
-	if !canonicalInventoryUUID.MatchString(value) {
-		return "", inventoryUsageFailure("invalid_uuid", "UUID must be compact lowercase or standard dashed form")
+	if !canonicalCompactUUID.MatchString(value) {
+		return "", inventoryUsageFailure(code, message)
 	}
 	return value, nil
 }

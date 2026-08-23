@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	canonicalInventoryUUID   = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	canonicalCompactUUID     = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	canonicalScore           = regexp.MustCompile(`^(?:0|[1-9][0-9]?|100)\.[0-9]{2}$`)
 	canonicalDate            = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	inventoryProjectionRoots = []string{
@@ -764,7 +764,7 @@ func optionalStringsEqual(left, right *string) bool {
 	return *left == *right
 }
 
-func validUUID(value string) bool                { return canonicalInventoryUUID.MatchString(value) }
+func validUUID(value string) bool                { return canonicalCompactUUID.MatchString(value) }
 func validOptionalUUID(value *string) bool       { return value == nil || validUUID(*value) }
 func validGrams(value int64) bool                { return between(value, -maxInventoryGrams, maxInventoryGrams) }
 func between(value, minimum, maximum int64) bool { return value >= minimum && value <= maximum }
