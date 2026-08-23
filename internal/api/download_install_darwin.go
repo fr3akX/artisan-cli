@@ -63,31 +63,31 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 	}
 	leaf := filepath.Base(target.destination)
 	if !force {
-		nativeErr := publication.invokeNative(target, func() error {
-			return unix.Fclonefileat(int(publication.source.Fd()), int(publication.parent.file.Fd()), leaf, 0)
-		})
-		_, exact, probeErr := publication.destinationExact(target)
-		if !exact && (errors.Is(nativeErr, unix.ENOTSUP) || errors.Is(nativeErr, unix.EXDEV) || errors.Is(nativeErr, unix.EINVAL)) && errors.Is(probeErr, unix.ENOENT) {
-			if err := publication.createCandidateFromSource(target); err != nil {
-				return downloadInstallResult{}, err
-			}
-			if err := publication.checkCandidateAfterHook(target); err != nil {
-				return downloadInstallResult{}, retainedResidueError(publication.candidateName, err)
-			}
-			nativeErr = publication.invokeNative(target, func() error {
-				return unix.RenameatxNp(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, unix.RENAME_EXCL)
-			})
-			_, exact, probeErr = publication.destinationExact(target)
+		// Stage the clone/copy under a held identity before the no-replace
+		// rename. A direct clone to the destination has no pre-held identity,
+		// so an identical-byte competitor could otherwise be mistaken for the
+		// object created by a native operation that later reported an error.
+		if err := publication.createCandidateFromSource(target); err != nil {
+			return downloadInstallResult{}, err
 		}
+		if err := publication.checkCandidateAfterHook(target); err != nil {
+			return downloadInstallResult{}, retainedResidueError(publication.candidateName, err)
+		}
+		nativeErr := publication.invokeNative(target, func() error {
+			return unix.RenameatxNp(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, unix.RENAME_EXCL)
+		})
 		hookErr := publication.afterNative(target)
+		_, exact, probeErr := publication.destinationExact(target, publication.candidateInfo)
 		if exact {
 			return resultAfterUnixExact(publication, target, errors.Join(nativeErr, hookErr, probeErr))
 		}
 		if (errors.Is(nativeErr, unix.EEXIST) || errors.Is(nativeErr, os.ErrExist)) && hookErr == nil {
-			return downloadInstallResult{}, os.ErrExist
+			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, errors.Join(os.ErrExist, cleanupErr)
 		}
 		if nativeErr != nil && hookErr == nil && errors.Is(probeErr, unix.ENOENT) {
-			return downloadInstallResult{}, nativeErr
+			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, errors.Join(nativeErr, cleanupErr)
 		}
 		return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr, probeErr)
 	}
@@ -114,7 +114,7 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 		return unix.RenameatxNp(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, flag)
 	})
 	hookErr := publication.afterNative(target)
-	_, exact, probeErr := publication.destinationExact(target)
+	_, exact, probeErr := publication.destinationExact(target, publication.candidateInfo)
 	if !exact {
 		candidateStillExact := publication.relativeMatches(publication.candidateName, publication.candidateInfo)
 		oldStillExact := false

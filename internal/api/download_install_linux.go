@@ -70,7 +70,7 @@ func (publication *heldUnixDownloadPublication) publishLinuxNoForce(target *down
 		return linkHeldLinuxDescriptor(int(publication.source.Fd()), int(publication.parent.file.Fd()), leaf)
 	})
 	hookErr := publication.afterNative(target)
-	_, exact, probeErr := publication.destinationExact(target)
+	_, exact, probeErr := publication.destinationExact(target, publication.sourceInfo)
 	if exact {
 		return resultAfterUnixExact(publication, target, errors.Join(nativeErr, hookErr, probeErr))
 	}
@@ -117,7 +117,7 @@ func (publication *heldUnixDownloadPublication) publishLinuxForce(target *downlo
 		return unix.Renameat2(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, unix.RENAME_NOREPLACE)
 	})
 	hookErr := publication.afterNative(target)
-	_, exact, probeErr := publication.destinationExact(target)
+	_, exact, probeErr := publication.destinationExact(target, publication.candidateInfo)
 	if !exact {
 		candidateStillExact := publication.relativeMatches(publication.candidateName, publication.candidateInfo)
 		oldStillExact := false

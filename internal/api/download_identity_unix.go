@@ -343,8 +343,10 @@ func resultAfterUnixExact(publication *heldUnixDownloadPublication, target *down
 	return result, errors.Join(priorErr, sourceCleanupErr, syncErr)
 }
 
-func (publication *heldUnixDownloadPublication) destinationExact(target *downloadTarget) (os.FileInfo, bool, error) {
-	return publication.verifyRelativeDigest(filepath.Base(target.destination), target.sealedCount, target.sealedDigest)
+func (publication *heldUnixDownloadPublication) destinationExact(target *downloadTarget, want os.FileInfo) (os.FileInfo, bool, error) {
+	info, digestExact, err := publication.verifyRelativeDigest(filepath.Base(target.destination), target.sealedCount, target.sealedDigest)
+	identityExact := err == nil && want != nil && os.SameFile(info, want)
+	return info, digestExact && identityExact, err
 }
 
 func (publication *heldUnixDownloadPublication) checkCandidateAfterHook(target *downloadTarget) error {

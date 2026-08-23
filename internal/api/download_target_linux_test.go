@@ -180,6 +180,33 @@ func TestLinuxDownloadExactTerminalClosesWriterSourceAndParentDescriptors(t *tes
 	}
 }
 
+func TestLinuxDownloadPostNativeIdenticalCompetitorIsNotMistakenForPublishedIdentity(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	ops := defaultDownloadOperations()
+	published := destination + ".published"
+	ops.afterNativeBeforeReconcile = func(*downloadTarget) error {
+		if err := os.Rename(destination, published); err != nil {
+			return err
+		}
+		return os.WriteFile(destination, []byte("exact"), 0o600)
+	}
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "exact")
+	result, err := target.Install(false)
+	if err == nil || result.Publication != publicationAmbiguous || result.Visible() {
+		t.Fatalf("install=%#v, %v", result, err)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "exact" {
+		t.Fatalf("competitor=%q", contents)
+	}
+	if contents, _ := os.ReadFile(published); string(contents) != "exact" {
+		t.Fatalf("published residue=%q", contents)
+	}
+}
+
 func TestLinuxDownloadForcePostNativeSwapIsAmbiguousAndPriorDestinationRemainsAtCandidate(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "profile")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
