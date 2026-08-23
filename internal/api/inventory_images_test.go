@@ -486,7 +486,7 @@ func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *test
 			name:         "no-replace install",
 			wantRequests: 1,
 			inject: func(client *Client) {
-				client.downloadOps.installNoReplace = func(string, string) (bool, error) {
+				client.downloadOps.installNoReplace = func(*downloadFileIdentity, string, string) (bool, error) {
 					return false, errors.New("install local-secret destination-secret")
 				}
 			},
@@ -496,7 +496,7 @@ func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *test
 			wantRequests: 1,
 			force:        true,
 			inject: func(client *Client) {
-				client.downloadOps.replace = func(string, string) (bool, error) {
+				client.downloadOps.replace = func(*downloadFileIdentity, string, string) (bool, error) {
 					return false, errors.New("replace local-secret destination-secret")
 				}
 			},
@@ -607,12 +607,12 @@ func TestDownloadInventoryImageSyncsParentAfterInstallInExactOrder(t *testing.T)
 				return defaults.syncParent(path)
 			}
 			if test.force {
-				client.downloadOps.replace = func(from, to string) (bool, error) {
+				client.downloadOps.replace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 					events = append(events, "install")
-					return defaults.replace(from, to)
+					return defaults.replace(identity, from, to)
 				}
 			} else if test.fallback {
-				client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+				client.downloadOps.installNoReplace = func(_ *downloadFileIdentity, from, to string) (bool, error) {
 					events = append(events, "install")
 					if err := os.Link(from, to); err != nil {
 						return false, err
@@ -623,9 +623,9 @@ func TestDownloadInventoryImageSyncsParentAfterInstallInExactOrder(t *testing.T)
 					return true, nil
 				}
 			} else {
-				client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+				client.downloadOps.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 					events = append(events, "install")
-					return defaults.installNoReplace(from, to)
+					return defaults.installNoReplace(identity, from, to)
 				}
 			}
 			if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, test.force); failure != nil {
@@ -691,7 +691,7 @@ func TestDownloadInventoryImageSyncsFallbackMetadataEvenWhenCleanupFails(t *test
 	client, _ := NewClient(server.URL, "secret", time.Second)
 	defaults := client.downloadOps
 	var parentSynced atomic.Bool
-	client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+	client.downloadOps.installNoReplace = func(_ *downloadFileIdentity, from, to string) (bool, error) {
 		if err := os.Link(from, to); err != nil {
 			return false, err
 		}

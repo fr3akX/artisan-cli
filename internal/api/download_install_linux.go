@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
+func atomicInstallDownloadNoReplace(_ *downloadFileIdentity, from, to string) (bool, error) {
 	err := unix.Renameat2(unix.AT_FDCWD, from, unix.AT_FDCWD, to, unix.RENAME_NOREPLACE)
 	if err == nil {
 		return true, nil
@@ -26,7 +26,7 @@ func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
 	return false, err
 }
 
-func atomicReplaceDownload(from, to string) (bool, error) {
+func atomicReplaceDownload(_ *downloadFileIdentity, from, to string) (bool, error) {
 	if err := os.Rename(from, to); err != nil {
 		return false, err
 	}

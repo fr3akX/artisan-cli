@@ -98,6 +98,131 @@ func TestDownloadTargetAbortRemovesOnlyOwnedTemporary(t *testing.T) {
 	target.Abort()
 }
 
+func TestDownloadTargetAbortRetainsReplacementWhenTemporaryNameIdentityChanges(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile.alog")
+	ops := defaultDownloadOperations()
+	var heldPath string
+	ops.beforeAbort = func(source string) error {
+		heldPath = source + ".held"
+		if err := os.Rename(source, heldPath); err != nil {
+			return err
+		}
+		return os.WriteFile(source, []byte("racer-replacement"), 0o600)
+	}
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(target.Writer(), "verified-owned"); err != nil {
+		t.Fatal(err)
+	}
+	target.Abort()
+
+	if contents, err := os.ReadFile(target.temporaryPath); err != nil || string(contents) != "racer-replacement" {
+		t.Fatalf("replacement = %q, %v", contents, err)
+	}
+	if contents, err := os.ReadFile(heldPath); err != nil || string(contents) != "verified-owned" {
+		t.Fatalf("held verified residue = %q, %v", contents, err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination visible: %v", err)
+	}
+}
+
+func TestDownloadTargetRejectsTemporaryIdentitySwapImmediatelyBeforeNativeInstall(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		force bool
+	}{
+		{name: "no force"},
+		{name: "force with existing destination", force: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile.alog")
+			if test.force {
+				if err := os.WriteFile(destination, []byte("existing-destination"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := defaultDownloadOperations()
+			var heldPath string
+			var nativeCalls int
+			defaults := ops
+			ops.beforeInstall = func(source, _ string) error {
+				heldPath = source + ".held"
+				if err := os.Rename(source, heldPath); err != nil {
+					return err
+				}
+				return os.WriteFile(source, []byte("unverified-racer"), 0o600)
+			}
+			ops.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
+				nativeCalls++
+				return defaults.installNoReplace(identity, from, to)
+			}
+			ops.replace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
+				nativeCalls++
+				return defaults.replace(identity, from, to)
+			}
+			target, err := newDownloadTarget(destination, test.force, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(target.Writer(), "verified-owned"); err != nil {
+				t.Fatal(err)
+			}
+			installed, installErr := target.Install(test.force)
+			if installErr == nil || installed.Visible || nativeCalls != 0 {
+				t.Fatalf("install = %#v, %v; native calls = %d", installed, installErr, nativeCalls)
+			}
+			target.Abort()
+			if contents, err := os.ReadFile(target.temporaryPath); err != nil || string(contents) != "unverified-racer" {
+				t.Fatalf("replacement = %q, %v", contents, err)
+			}
+			if contents, err := os.ReadFile(heldPath); err != nil || string(contents) != "verified-owned" {
+				t.Fatalf("verified residue = %q, %v", contents, err)
+			}
+			if test.force {
+				if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing-destination" {
+					t.Fatalf("existing destination = %q, %v", contents, err)
+				}
+			} else if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination visible: %v", err)
+			}
+		})
+	}
+}
+
+func TestDownloadTargetRejectsFinalNameThatDoesNotMatchHeldIdentity(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile.alog")
+	ops := defaultDownloadOperations()
+	var verifiedPublished string
+	ops.afterInstall = func(_, destination string) error {
+		verifiedPublished = destination + ".verified"
+		if err := os.Rename(destination, verifiedPublished); err != nil {
+			return err
+		}
+		return os.WriteFile(destination, []byte("racer-final"), 0o600)
+	}
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(target.Writer(), "verified-owned"); err != nil {
+		t.Fatal(err)
+	}
+	installed, installErr := target.Install(false)
+	if installErr == nil || installed.Visible {
+		t.Fatalf("install = %#v, %v", installed, installErr)
+	}
+	target.Abort()
+	if contents, err := os.ReadFile(destination); err != nil || string(contents) != "racer-final" {
+		t.Fatalf("racer final = %q, %v", contents, err)
+	}
+	if contents, err := os.ReadFile(verifiedPublished); err != nil || string(contents) != "verified-owned" {
+		t.Fatalf("verified publication residue = %q, %v", contents, err)
+	}
+}
+
 func TestDownloadTargetInstallNoReplaceAndForceAreFinalAtomicStep(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -118,13 +243,13 @@ func TestDownloadTargetInstallNoReplaceAndForceAreFinalAtomicStep(t *testing.T) 
 			var events []string
 			ops.syncFile = func(file *os.File) error { events = append(events, "sync"); return defaults.syncFile(file) }
 			ops.closeFile = func(file *os.File) error { events = append(events, "close"); return defaults.closeFile(file) }
-			ops.installNoReplace = func(from, to string) (bool, error) {
+			ops.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 				events = append(events, "install-no-replace")
-				return defaults.installNoReplace(from, to)
+				return defaults.installNoReplace(identity, from, to)
 			}
-			ops.replace = func(from, to string) (bool, error) {
+			ops.replace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 				events = append(events, "replace")
-				return defaults.replace(from, to)
+				return defaults.replace(identity, from, to)
 			}
 			ops.syncParent = func(path string) error { events = append(events, "sync-parent"); return defaults.syncParent(path) }
 			target, err := newDownloadTarget(destination, test.force, ops)
@@ -211,19 +336,19 @@ func TestDownloadTargetResetSyncAndCloseFailuresNeverExposeDestination(t *testin
 func TestDownloadTargetInstallReportsVisibilityAndDurabilityPrecisely(t *testing.T) {
 	for _, test := range []struct {
 		name        string
-		install     func(string, string) (bool, error)
+		install     func(*downloadFileIdentity, string, string) (bool, error)
 		syncParent  func(string) error
 		wantVisible bool
 		wantDurable bool
 	}{
-		{name: "install failure", install: func(string, string) (bool, error) { return false, errors.New("install") }},
-		{name: "visible cleanup failure", install: func(from, to string) (bool, error) {
+		{name: "install failure", install: func(*downloadFileIdentity, string, string) (bool, error) { return false, errors.New("install") }},
+		{name: "visible cleanup failure", install: func(_ *downloadFileIdentity, from, to string) (bool, error) {
 			if err := os.Link(from, to); err != nil {
 				return false, err
 			}
 			return true, errors.New("cleanup")
 		}, wantVisible: true, wantDurable: true},
-		{name: "parent sync failure", install: func(from, to string) (bool, error) {
+		{name: "parent sync failure", install: func(_ *downloadFileIdentity, from, to string) (bool, error) {
 			if err := os.Rename(from, to); err != nil {
 				return false, err
 			}
@@ -263,11 +388,11 @@ func TestDownloadTargetInstallRaceNeverClobbersAndFailuresNeverExposePartial(t *
 	destination := filepath.Join(t.TempDir(), "profile.alog")
 	ops := defaultDownloadOperations()
 	defaults := ops
-	ops.installNoReplace = func(from, to string) (bool, error) {
+	ops.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 		if err := os.WriteFile(to, []byte("racer"), 0o600); err != nil {
 			return false, err
 		}
-		return defaults.installNoReplace(from, to)
+		return defaults.installNoReplace(identity, from, to)
 	}
 	target, err := newDownloadTarget(destination, false, ops)
 	if err != nil {

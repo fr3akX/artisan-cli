@@ -84,8 +84,11 @@ func (c *Client) DownloadRoastProfile(ctx context.Context, rawRoastUUID string, 
 			if ctx.Err() != nil {
 				return result, contextOrNetworkFailure(ctx)
 			}
-			if attempt < maxAttempts-1 && waitForRetry(ctx, attempt) == nil {
-				continue
+			if attempt < maxAttempts-1 {
+				if waitForRetry(ctx, attempt) == nil {
+					continue
+				}
+				return result, contextOrNetworkFailure(ctx)
 			}
 			return result, networkFailure()
 		}
@@ -106,7 +109,7 @@ func (c *Client) DownloadRoastProfile(ctx context.Context, rawRoastUUID string, 
 			if !oversized && responseRequiresJSON(body) && !trustedJSONContentType(response.Header) {
 				return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 			}
-			if isTransientStatus(status) && attempt < maxAttempts-1 && !oversized && readErr == nil {
+			if isTransientStatus(status) && attempt < maxAttempts-1 && !oversized {
 				if waitForRetry(ctx, attempt) == nil {
 					continue
 				}
@@ -134,8 +137,11 @@ func (c *Client) DownloadRoastProfile(ctx context.Context, rawRoastUUID string, 
 			if ctx.Err() != nil {
 				return result, contextOrNetworkFailure(ctx)
 			}
-			if attempt < maxAttempts-1 && waitForRetry(ctx, attempt) == nil {
-				continue
+			if attempt < maxAttempts-1 {
+				if waitForRetry(ctx, attempt) == nil {
+					continue
+				}
+				return result, contextOrNetworkFailure(ctx)
 			}
 			return result, networkFailure()
 		}
@@ -184,7 +190,7 @@ func (c *Client) findRoastRevision(ctx context.Context, roastUUID string, revisi
 		if failure != nil {
 			return RoastRevision{}, failure
 		}
-		if pageNumber > 0 && len(page.Items) == 0 {
+		if len(page.Items) == 0 && (pageNumber > 0 || page.NextCursor != nil) {
 			return RoastRevision{}, invalidServerResponse(http.StatusOK)
 		}
 		items += len(page.Items)

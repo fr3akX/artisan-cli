@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 func TestDownloadRoastProfileFindsBoundedRevisionAndInstallsExactRawBytes(t *testing.T) {
@@ -104,15 +106,26 @@ func TestDownloadRoastProfileRejectsHostileHeadersWithoutVisibility(t *testing.T
 		name   string
 		mutate func(http.Header)
 	}{
+		{name: "missing content type", mutate: func(h http.Header) { h.Del("Content-Type") }},
 		{name: "content type parameter", mutate: func(h http.Header) { h.Set("Content-Type", "application/x-artisan-profile; charset=binary") }},
+		{name: "smuggled content type", mutate: func(h http.Header) {
+			h.Set("Content-Type", "application/x-artisan-profile, application/x-artisan-profile")
+		}},
+		{name: "missing disposition", mutate: func(h http.Header) { h.Del("Content-Disposition") }},
 		{name: "unsafe filename path", mutate: func(h http.Header) { h.Set("Content-Disposition", `attachment; filename="../stolen.alog"`) }},
 		{name: "unsafe filename control", mutate: func(h http.Header) { h.Set("Content-Disposition", "attachment; filename=bad\\name.alog") }},
 		{name: "inline disposition", mutate: func(h http.Header) { h.Set("Content-Disposition", `inline; filename="profile.alog"`) }},
 		{name: "missing length", mutate: func(h http.Header) { h.Del("Content-Length") }},
+		{name: "whitespace length", mutate: func(h http.Header) { h.Set("Content-Length", " 7") }},
+		{name: "smuggled length", mutate: func(h http.Header) { h.Set("Content-Length", "7, 7") }},
 		{name: "wrong length", mutate: func(h http.Header) { h.Set("Content-Length", "8") }},
+		{name: "missing etag", mutate: func(h http.Header) { h.Del("ETag") }},
 		{name: "wrong etag", mutate: func(h http.Header) { h.Set("ETag", `"`+strings.Repeat("a", 64)+`"`) }},
+		{name: "missing content sha", mutate: func(h http.Header) { h.Del("X-Content-SHA256") }},
 		{name: "wrong content sha", mutate: func(h http.Header) { h.Set("X-Content-SHA256", strings.Repeat("a", 64)) }},
+		{name: "missing checksum sha", mutate: func(h http.Header) { h.Del("X-Checksum-SHA256") }},
 		{name: "wrong checksum sha", mutate: func(h http.Header) { h.Set("X-Checksum-SHA256", strings.Repeat("a", 64)) }},
+		{name: "missing revision", mutate: func(h http.Header) { h.Del("X-Revision-Number") }},
 		{name: "wrong revision", mutate: func(h http.Header) { h.Set("X-Revision-Number", "2") }},
 		{name: "duplicate content type", mutate: func(h http.Header) { h.Add("Content-Type", "application/x-artisan-profile") }},
 		{name: "duplicate disposition", mutate: func(h http.Header) { h.Add("Content-Disposition", `attachment; filename="other.alog"`) }},
@@ -180,6 +193,85 @@ func TestDownloadRoastProfileRequiresExactBoundedCountAndSHA(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("oversized requests = %d", requests.Load())
+	}
+}
+
+func TestDownloadRoastProfileRetriesTransientStatusWhenErrorBodyReadFails(t *testing.T) {
+	body := []byte("complete-profile")
+	sha := profileSHA(body)
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "retry-status.alog")
+			var downloads atomic.Int32
+			var closes atomic.Int32
+			client := profileClientWithTransport(t, body, sha, func(response *http.Response) {
+				if downloads.Add(1) == 1 {
+					response.StatusCode = status
+					response.Header = http.Header{"Content-Type": []string{"text/plain"}}
+					response.Body = &failingDownloadReadCloser{data: []byte("partial untrusted error"), err: errors.New("error body read failed"), closes: &closes}
+					response.ContentLength = -1
+				}
+			})
+			result, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false)
+			if failure != nil {
+				t.Fatal(failure)
+			}
+			if downloads.Load() != 2 || closes.Load() != 1 || result.SHA256 != sha {
+				t.Fatalf("downloads=%d closes=%d result=%#v", downloads.Load(), closes.Load(), result)
+			}
+			if contents, err := os.ReadFile(destination); err != nil || !bytes.Equal(contents, body) {
+				t.Fatalf("contents = %q, %v", contents, err)
+			}
+		})
+	}
+}
+
+func TestDownloadRoastProfileCancellationDuringRetryBackoffIsInterrupted(t *testing.T) {
+	body := []byte("profile")
+	sha := profileSHA(body)
+	for _, test := range []struct {
+		name       string
+		response   func(*atomic.Int32, *atomic.Int32) (*http.Response, error)
+		wantCloses int32
+	}{
+		{name: "transport", response: func(_ *atomic.Int32, _ *atomic.Int32) (*http.Response, error) {
+			return nil, errors.New("temporary transport failure")
+		}},
+		{name: "response read", wantCloses: 1, response: func(_ *atomic.Int32, closes *atomic.Int32) (*http.Response, error) {
+			header := make(http.Header)
+			setProfileHeaders(header, body, 1, sha, "profile.alog")
+			return &http.Response{StatusCode: http.StatusOK, Header: header, ContentLength: int64(len(body)), Body: &failingDownloadReadCloser{err: errors.New("temporary read failure"), closes: closes}}, nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "cancel-backoff.alog")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var downloads atomic.Int32
+			var closes atomic.Int32
+			client, _ := NewClient("http://127.0.0.1", "secret", time.Second)
+			client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(request.URL.Path, "/revisions") {
+					return jsonHTTPResponse(http.StatusOK, `{"items":[`+profileRevisionJSON(1, sha, int64(len(body)))+`],"next_cursor":null}`), nil
+				}
+				downloads.Add(1)
+				go func() {
+					time.Sleep(time.Millisecond)
+					cancel()
+				}()
+				return test.response(&downloads, &closes)
+			})
+			if _, failure := client.DownloadRoastProfile(ctx, roastUUID, 1, destination, false); failure == nil || failure.Code != "interrupted" || failure.ExitCode != 130 {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if downloads.Load() != 1 || closes.Load() != test.wantCloses {
+				t.Fatalf("downloads=%d closes=%d", downloads.Load(), closes.Load())
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination visible: %v", err)
+			}
+			assertNoDownloadTemps(t, destination)
+		})
 	}
 }
 
@@ -287,17 +379,197 @@ func TestDownloadRoastProfileCancellationClosesBodyWithoutRetryOrVisibility(t *t
 	assertNoDownloadTemps(t, destination)
 }
 
+func TestDownloadRoastProfileAbortRetainsSwappedTemporaryNamesAndClosesBody(t *testing.T) {
+	body := []byte("verified-profile")
+	sha := profileSHA(body)
+	destination := filepath.Join(t.TempDir(), "abort-source-swap.alog")
+	var closes atomic.Int32
+	client := profileClientWithTransport(t, body, sha, func(response *http.Response) {
+		response.Header.Set("X-Checksum-SHA256", strings.Repeat("a", 64))
+		response.Body = &failingDownloadReadCloser{data: body, closes: &closes}
+	})
+	var replacementPath, heldPath string
+	client.downloadOps.beforeAbort = func(source string) error {
+		replacementPath = source
+		heldPath = source + ".held"
+		if err := os.Rename(source, heldPath); err != nil {
+			return err
+		}
+		return os.WriteFile(source, []byte("racer-replacement"), 0o600)
+	}
+	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure == nil || failure.Code != "invalid_server_response" {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("body closes = %d", closes.Load())
+	}
+	if contents, err := os.ReadFile(replacementPath); err != nil || string(contents) != "racer-replacement" {
+		t.Fatalf("replacement = %q, %v", contents, err)
+	}
+	if contents, err := os.ReadFile(heldPath); err != nil || len(contents) != 0 {
+		t.Fatalf("held verified temporary = %q, %v", contents, err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination visible: %v", err)
+	}
+}
+
+func TestDownloadRoastProfilePropagatesTemporarySourceIdentitySwapSafely(t *testing.T) {
+	body := []byte("verified-profile")
+	sha := profileSHA(body)
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no force", true: "force existing"}[force], func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "source-swap.alog")
+			if force {
+				if err := os.WriteFile(destination, []byte("existing-destination"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := profileClientWithTransport(t, body, sha, nil)
+			var replacementPath, heldPath string
+			client.downloadOps.beforeInstall = func(source, _ string) error {
+				replacementPath = source
+				heldPath = source + ".held"
+				if err := os.Rename(source, heldPath); err != nil {
+					return err
+				}
+				return os.WriteFile(source, []byte("unverified-racer"), 0o600)
+			}
+			result, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, force)
+			if failure == nil || result != (RoastProfileDownload{}) || failure.Code != "local_storage_error" {
+				t.Fatalf("result=%#v failure=%#v", result, failure)
+			}
+			if contents, err := os.ReadFile(replacementPath); err != nil || string(contents) != "unverified-racer" {
+				t.Fatalf("racer replacement = %q, %v", contents, err)
+			}
+			if contents, err := os.ReadFile(heldPath); err != nil || !bytes.Equal(contents, body) {
+				t.Fatalf("held verified residue = %q, %v", contents, err)
+			}
+			if force {
+				if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing-destination" {
+					t.Fatalf("existing destination = %q, %v", contents, err)
+				}
+			} else if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination visible: %v", err)
+			}
+		})
+	}
+}
+
+func TestDownloadRoastProfileInstallAndDurabilityFailuresPropagate(t *testing.T) {
+	body := []byte("complete-profile")
+	sha := profileSHA(body)
+	for _, test := range []struct {
+		name        string
+		force       bool
+		inject      func(*downloadOperations)
+		wantVisible bool
+		wantMessage string
+	}{
+		{name: "sync", inject: func(ops *downloadOperations) { ops.syncFile = func(*os.File) error { return errors.New("sync") } }, wantMessage: "Unable to store the roast profile safely"},
+		{name: "close", inject: func(ops *downloadOperations) {
+			ops.closeFile = func(file *os.File) error { _ = file.Close(); return errors.New("close") }
+		}, wantMessage: "Unable to store the roast profile safely"},
+		{name: "no replace install", inject: func(ops *downloadOperations) {
+			ops.installNoReplace = func(*downloadFileIdentity, string, string) (bool, error) { return false, errors.New("install") }
+		}, wantMessage: "Unable to store the roast profile safely"},
+		{name: "force install", force: true, inject: func(ops *downloadOperations) {
+			ops.replace = func(*downloadFileIdentity, string, string) (bool, error) { return false, errors.New("replace") }
+		}, wantMessage: "Unable to store the roast profile safely"},
+		{name: "parent sync visible", inject: func(ops *downloadOperations) {
+			ops.syncParent = func(string) error { return errors.New("parent sync") }
+		}, wantVisible: true, wantMessage: "The roast profile is installed, but storage durability is uncertain"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "failure.alog")
+			if test.force {
+				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := profileClientWithTransport(t, body, sha, nil)
+			test.inject(&client.downloadOps)
+			result, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, test.force)
+			if failure == nil || failure.Code != "local_storage_error" || failure.Message != test.wantMessage {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if test.wantVisible {
+				if result.Path != destination || result.SHA256 != sha {
+					t.Fatalf("visible result = %#v", result)
+				}
+				if contents, err := os.ReadFile(destination); err != nil || !bytes.Equal(contents, body) {
+					t.Fatalf("visible contents = %q, %v", contents, err)
+				}
+			} else {
+				if result != (RoastProfileDownload{}) {
+					t.Fatalf("pre-visibility result = %#v", result)
+				}
+				if test.force {
+					if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
+						t.Fatalf("existing destination = %q, %v", contents, err)
+					}
+				} else if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("destination visible: %v", err)
+				}
+			}
+			assertNoDownloadTemps(t, destination)
+		})
+	}
+}
+
+func TestDownloadRoastProfileUsesPrivateTemporaryAndInstalledFile(t *testing.T) {
+	body := []byte("private-profile")
+	sha := profileSHA(body)
+	destination := filepath.Join(t.TempDir(), "private.alog")
+	client := profileClientWithTransport(t, body, sha, func(response *http.Response) {
+		matches, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("temporary matches = %v, %v", matches, err)
+		}
+		file, openErr := securefile.OpenPrivate(matches[0])
+		if openErr != nil {
+			t.Fatalf("temporary private contract: %v", openErr)
+		}
+		_ = file.Close()
+	})
+	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure != nil {
+		t.Fatal(failure)
+	}
+	file, err := securefile.OpenPrivate(destination)
+	if err != nil {
+		t.Fatalf("installed private contract: %v", err)
+	}
+	_ = file.Close()
+}
+
+func TestDownloadRoastProfileClosesHeldIdentityAfterSuccess(t *testing.T) {
+	body := []byte("closed-profile")
+	sha := profileSHA(body)
+	destination := filepath.Join(t.TempDir(), "closed.alog")
+	client := profileClientWithTransport(t, body, sha, nil)
+	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure != nil {
+		t.Fatal(failure)
+	}
+	moved := destination + ".moved"
+	if err := os.Rename(destination, moved); err != nil {
+		t.Fatalf("rename after successful download (held descriptor leak): %v", err)
+	}
+	if contents, err := os.ReadFile(moved); err != nil || !bytes.Equal(contents, body) {
+		t.Fatalf("moved contents = %q, %v", contents, err)
+	}
+}
+
 func TestDownloadRoastProfileInstallRacePreservesCompetitor(t *testing.T) {
 	body := []byte("profile")
 	sha := profileSHA(body)
 	destination := filepath.Join(t.TempDir(), "race.alog")
 	client := profileClientWithTransport(t, body, sha, nil)
 	defaults := client.downloadOps
-	client.downloadOps.installNoReplace = func(from, to string) (bool, error) {
+	client.downloadOps.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
 		if err := os.WriteFile(to, []byte("competitor"), 0o600); err != nil {
 			return false, err
 		}
-		return defaults.installNoReplace(from, to)
+		return defaults.installNoReplace(identity, from, to)
 	}
 	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure == nil || failure.Message != "Destination already exists; use --force to replace it" {
 		t.Fatalf("failure = %#v", failure)
@@ -353,6 +625,68 @@ func TestDownloadRoastProfileRefusesRedirectClassifies404AndProtectsSecrets(t *t
 	}
 	if targetRequests.Load() != 0 {
 		t.Fatalf("redirect target requests = %d", targetRequests.Load())
+	}
+}
+
+func TestFindRoastRevisionRejectsMissingProgressAndBoundsRequests(t *testing.T) {
+	fullPage := func(request int32, terminal bool) string {
+		items := make([]string, maxRoastPageItems)
+		for index := range items {
+			number := int64(request-1)*maxRoastPageItems + int64(index) + 1
+			items[index] = profileRevisionJSON(number, profileSHA([]byte("x")), 1)
+		}
+		next := `"page-` + strconv.Itoa(int(request)) + `"`
+		if terminal {
+			next = "null"
+		}
+		return `{"items":[` + strings.Join(items, ",") + `],"next_cursor":` + next + `}`
+	}
+	for _, test := range []struct {
+		name         string
+		response     func(int32) string
+		wantCode     string
+		wantExit     int
+		wantRequests int32
+	}{
+		{name: "initial terminal empty", response: func(int32) string { return `{"items":[],"next_cursor":null}` }, wantCode: "not_found", wantExit: 6, wantRequests: 1},
+		{name: "first empty with next", response: func(int32) string { return `{"items":[],"next_cursor":"next"}` }, wantCode: "invalid_server_response", wantExit: 9, wantRequests: 1},
+		{name: "later terminal empty", response: func(request int32) string {
+			if request == 1 {
+				return `{"items":[` + profileRevisionJSON(1, profileSHA([]byte("x")), 1) + `],"next_cursor":"next"}`
+			}
+			return `{"items":[],"next_cursor":null}`
+		}, wantCode: "invalid_server_response", wantExit: 9, wantRequests: 2},
+		{name: "repeated cursor", response: func(request int32) string {
+			return `{"items":[` + profileRevisionJSON(int64(request), profileSHA([]byte("x")), 1) + `],"next_cursor":"repeat"}`
+		}, wantCode: "invalid_server_response", wantExit: 9, wantRequests: 2},
+		{name: "page ceiling", response: func(request int32) string {
+			return `{"items":[` + profileRevisionJSON(int64(request), profileSHA([]byte("x")), 1) + `],"next_cursor":"page-` + strconv.Itoa(int(request)) + `"}`
+		}, wantCode: "pagination_page_limit_exceeded", wantExit: 9, wantRequests: MaxRoastAggregatePages},
+		{name: "item ceiling", response: func(request int32) string {
+			return fullPage(request, false)
+		}, wantCode: "pagination_limit_exceeded", wantExit: 9, wantRequests: MaxRoastAggregateItems / maxRoastPageItems},
+		{name: "exact item ceiling terminal", response: func(request int32) string {
+			return fullPage(request, request == MaxRoastAggregateItems/maxRoastPageItems)
+		}, wantCode: "not_found", wantExit: 6, wantRequests: MaxRoastAggregateItems / maxRoastPageItems},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			client, _ := NewClient("http://127.0.0.1", "secret", time.Minute)
+			client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				request := requests.Add(1)
+				response := jsonHTTPResponse(http.StatusOK, test.response(request))
+				response.Header.Set("X-Roast-UUID", roastUUID)
+				response.Header.Set("X-Roast-Revisions-Version", "1")
+				return response, nil
+			})
+			_, failure := client.findRoastRevision(context.Background(), roastUUID, maxRoastRevisionNumber)
+			if failure == nil || failure.Code != test.wantCode || failure.ExitCode != test.wantExit {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if requests.Load() != test.wantRequests {
+				t.Fatalf("requests = %d, want %d", requests.Load(), test.wantRequests)
+			}
+		})
 	}
 }
 

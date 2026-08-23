@@ -10,7 +10,10 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
-var errInvalidDownloadDestination = errors.New("invalid download destination")
+var (
+	errInvalidDownloadDestination = errors.New("invalid download destination")
+	errDownloadIdentityAmbiguous  = errors.New("download temporary identity is ambiguous")
+)
 
 type downloadOperations struct {
 	createTemp       func(string, string) (*os.File, error)
@@ -19,14 +22,20 @@ type downloadOperations struct {
 	resetFile        func(*os.File) error
 	syncFile         func(*os.File) error
 	closeFile        func(*os.File) error
-	installNoReplace func(string, string) (bool, error)
-	replace          func(string, string) (bool, error)
+	installNoReplace func(*downloadFileIdentity, string, string) (bool, error)
+	replace          func(*downloadFileIdentity, string, string) (bool, error)
 	syncParent       func(string) error
+
+	// Test seams bracket the identity checks immediately around native
+	// publication and cleanup. Production leaves them nil.
+	beforeInstall func(string, string) error
+	afterInstall  func(string, string) error
+	beforeAbort   func(string) error
 }
 
 func defaultDownloadOperations() downloadOperations {
 	return downloadOperations{
-		createTemp: os.CreateTemp,
+		createTemp: createDownloadTemp,
 		protect:    securefile.ProtectPrivateFile,
 		writer:     func(file *os.File) io.Writer { return file },
 		resetFile: func(file *os.File) error {
@@ -58,16 +67,19 @@ type downloadInstallResult struct {
 	Durable bool
 }
 
-// downloadTarget owns one protected same-directory temporary file. Its bytes
-// cannot become visible at destination until Install performs the final atomic
-// no-replace or replace operation.
+// downloadTarget owns one protected same-directory temporary file and a
+// separately held native identity for it. Its bytes cannot become visible at
+// destination until Install performs the final atomic no-replace or replace
+// operation and proves the final name refers to that held identity.
 type downloadTarget struct {
 	destination   string
 	directory     string
 	temporaryPath string
 	file          *os.File
+	identity      *downloadFileIdentity
 	operations    downloadOperations
 	state         downloadTargetState
+	ambiguous     bool
 }
 
 func newDownloadTarget(destination string, force bool, operations downloadOperations) (*downloadTarget, error) {
@@ -90,6 +102,14 @@ func newDownloadTarget(destination string, force bool, operations downloadOperat
 		destination: destination, directory: directory, temporaryPath: file.Name(),
 		file: file, operations: operations, state: downloadTargetActive,
 	}
+	identity, err := captureDownloadFileIdentity(file)
+	if err != nil {
+		_ = file.Close()
+		// Without a captured identity, deleting by name could remove a racer's
+		// replacement. Retain the ambiguous private residue instead.
+		return nil, err
+	}
+	target.identity = identity
 	if err := operations.protect(file); err != nil {
 		target.Abort()
 		return nil, err
@@ -139,45 +159,81 @@ func (target *downloadTarget) install(ctx context.Context, force bool) (download
 	if err := ctx.Err(); err != nil {
 		return downloadInstallResult{}, err
 	}
+	if target.operations.beforeInstall != nil {
+		if err := target.operations.beforeInstall(target.temporaryPath, target.destination); err != nil {
+			return downloadInstallResult{}, err
+		}
+	}
+	matches, err := target.identity.matches(target.temporaryPath)
+	if err != nil || !matches {
+		target.ambiguous = true
+		return downloadInstallResult{}, errors.Join(errDownloadIdentityAmbiguous, err)
+	}
 
 	var visible bool
 	var installErr error
 	if force {
-		visible, installErr = target.operations.replace(target.temporaryPath, target.destination)
+		visible, installErr = target.operations.replace(target.identity, target.temporaryPath, target.destination)
 	} else {
-		visible, installErr = target.operations.installNoReplace(target.temporaryPath, target.destination)
+		visible, installErr = target.operations.installNoReplace(target.identity, target.temporaryPath, target.destination)
 	}
 	if !visible {
 		return downloadInstallResult{}, installErr
 	}
+	if target.operations.afterInstall != nil {
+		if err := target.operations.afterInstall(target.temporaryPath, target.destination); err != nil {
+			target.ambiguous = true
+			return downloadInstallResult{}, err
+		}
+	}
+	matches, identityErr := target.identity.matches(target.destination)
+	if identityErr != nil || !matches {
+		target.ambiguous = true
+		return downloadInstallResult{}, errors.Join(errDownloadIdentityAmbiguous, identityErr, installErr)
+	}
 
-	// Ownership transfers only after the platform operation explicitly reports
-	// visibility. Abort may still clean a fallback source name, but can never
-	// remove destination after this terminal transition.
+	// Ownership transfers only after the final name is proven to identify the
+	// held verified file. Abort can never remove destination after this state.
 	target.state = downloadTargetInstalled
+	cleanupErr := target.removeTemporaryIfOwned()
 	parentErr := target.operations.syncParent(target.directory)
-	_ = os.Remove(target.temporaryPath)
+	closeErr := target.identity.close()
 	result := downloadInstallResult{Visible: true, Durable: parentErr == nil}
-	if parentErr != nil && installErr != nil {
-		return result, errors.Join(parentErr, installErr)
+	return result, errors.Join(parentErr, installErr, cleanupErr, closeErr)
+}
+
+func (target *downloadTarget) removeTemporaryIfOwned() error {
+	matches, err := target.identity.matches(target.temporaryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	if parentErr != nil {
-		return result, parentErr
+	if err != nil || !matches {
+		target.ambiguous = true
+		return errors.Join(errDownloadIdentityAmbiguous, err)
 	}
-	return result, installErr
+	return os.Remove(target.temporaryPath)
 }
 
 func (target *downloadTarget) Abort() {
-	if target == nil || target.state == downloadTargetAborted {
+	if target == nil || target.state == downloadTargetAborted || target.state == downloadTargetInstalled {
 		return
 	}
 	if target.state == downloadTargetActive {
 		_ = target.file.Close()
+		target.state = downloadTargetClosed
 	}
-	_ = os.Remove(target.temporaryPath)
-	if target.state != downloadTargetInstalled {
-		target.state = downloadTargetAborted
+	if !target.ambiguous {
+		if target.operations.beforeAbort != nil {
+			if err := target.operations.beforeAbort(target.temporaryPath); err != nil {
+				target.ambiguous = true
+			}
+		}
+		if !target.ambiguous {
+			_ = target.removeTemporaryIfOwned()
+		}
 	}
+	_ = target.identity.close()
+	target.state = downloadTargetAborted
 }
 
 type failingWriter struct{ err error }

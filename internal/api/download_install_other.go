@@ -4,7 +4,7 @@ package api
 
 import "os"
 
-func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
+func atomicInstallDownloadNoReplace(_ *downloadFileIdentity, from, to string) (bool, error) {
 	if err := os.Link(from, to); err != nil {
 		return false, err
 	}
@@ -14,7 +14,7 @@ func atomicInstallDownloadNoReplace(from, to string) (bool, error) {
 	return true, nil
 }
 
-func atomicReplaceDownload(from, to string) (bool, error) {
+func atomicReplaceDownload(_ *downloadFileIdentity, from, to string) (bool, error) {
 	if err := os.Rename(from, to); err != nil {
 		return false, err
 	}
