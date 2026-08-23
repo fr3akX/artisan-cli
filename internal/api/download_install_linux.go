@@ -11,13 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func createAnonymousUnixDownloadSource(parentFD int, prefix string) (int, string, error) {
-	fd, err := unix.Openat(parentFD, ".", unix.O_RDWR|unix.O_CLOEXEC|unix.O_TMPFILE, 0o600)
+func createAnonymousUnixDownloadSource(parentFD int, target *downloadTarget, prefix string) (int, string, error) {
+	var fd int
+	var err error
+	if target.operations.openAnonymousSource != nil {
+		fd, err = target.operations.openAnonymousSource(parentFD)
+	} else {
+		fd, err = unix.Openat(parentFD, ".", unix.O_RDWR|unix.O_CLOEXEC|unix.O_TMPFILE, 0o600)
+	}
 	if err == nil {
 		return fd, "", nil
 	}
-	// Some filesystems disallow O_TMPFILE. Create relative to the held parent
-	// and unlink immediately; the descriptor remains the sole source identity.
+	// Some filesystems disallow O_TMPFILE. Retain the protected random source
+	// name: an ordinary inode cannot be unlinked and later relinked reliably via
+	// AT_EMPTY_PATH without elevated capabilities.
 	for attempt := 0; attempt < 100; attempt++ {
 		name, randomErr := randomDownloadName(prefix)
 		if randomErr != nil {
@@ -30,11 +37,7 @@ func createAnonymousUnixDownloadSource(parentFD int, prefix string) (int, string
 		if openErr != nil {
 			return -1, "", openErr
 		}
-		if unlinkErr := unix.Unlinkat(parentFD, name, 0); unlinkErr != nil {
-			_ = unix.Close(fd)
-			return -1, "", unlinkErr
-		}
-		return fd, "", nil
+		return fd, name, nil
 	}
 	return -1, "", errors.New("could not allocate held download source")
 }
@@ -50,8 +53,23 @@ func linkHeldLinuxDescriptor(sourceFD, parentFD int, name string) error {
 	return unix.Linkat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", sourceFD), parentFD, name, unix.AT_SYMLINK_FOLLOW)
 }
 
-func cloneHeldUnixDownloadSource(sourceFD, parentFD int, name string) error {
-	return linkHeldLinuxDescriptor(sourceFD, parentFD, name)
+func cloneHeldUnixDownloadSource(sourceFD int, sourceInfo os.FileInfo, parentFD int, name string, _ downloadOperations, register func(os.FileInfo) error) error {
+	if err := linkHeldLinuxDescriptor(sourceFD, parentFD, name); err != nil {
+		return err
+	}
+	// A hard link has the exact source identity. Register it before any later
+	// open/stat operation can fail so pre-native cleanup always owns the name.
+	if err := register(sourceInfo); err != nil {
+		return err
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	return errors.Join(statErr, register(info), closeErr)
 }
 
 func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, force bool) (downloadInstallResult, error) {
@@ -74,14 +92,16 @@ func (publication *heldUnixDownloadPublication) publishLinuxNoForce(target *down
 	if exact {
 		return resultAfterUnixExact(publication, target, errors.Join(nativeErr, hookErr, probeErr))
 	}
-	if nativeErr != nil && isLinuxExist(nativeErr) && hookErr == nil {
+	if nativeErr != nil && !target.nativeOperationInvoked && hookErr == nil {
+		return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
+	}
+	if nativeErr != nil && isLinuxExist(target.nativeOperationErr) && hookErr == nil {
 		if _, err := publication.relativeNodeIdentity(leaf); err == nil {
 			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, os.ErrExist
 		}
 	}
-	if nativeErr != nil && hookErr == nil && errors.Is(probeErr, unix.ENOENT) {
-		return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
-	}
+	// Once linkat may have executed, a missing requested leaf cannot prove that
+	// publication never occurred; it may have been removed before reconciliation.
 	return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr, probeErr)
 }
 
@@ -104,7 +124,10 @@ func (publication *heldUnixDownloadPublication) publishLinuxForce(target *downlo
 	var exchanged bool
 	nativeErr := publication.invokeNative(target, func() error {
 		if oldErr == nil {
-			err := unix.Renameat2(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, unix.RENAME_EXCHANGE)
+			err := error(unix.EOPNOTSUPP)
+			if !target.operations.forceBackupReplace {
+				err = unix.Renameat2(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf, unix.RENAME_EXCHANGE)
+			}
 			if err == nil {
 				exchanged = true
 				return nil
@@ -119,6 +142,9 @@ func (publication *heldUnixDownloadPublication) publishLinuxForce(target *downlo
 	hookErr := publication.afterNative(target)
 	_, exact, probeErr := publication.destinationExact(target, publication.candidateInfo)
 	if !exact {
+		if nativeErr != nil && !target.nativeOperationInvoked && hookErr == nil {
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
+		}
 		candidateStillExact := publication.relativeMatches(publication.candidateName, publication.candidateInfo)
 		oldStillExact := false
 		if oldErr == nil {
@@ -128,8 +154,7 @@ func (publication *heldUnixDownloadPublication) publishLinuxForce(target *downlo
 			oldStillExact = errors.Is(err, unix.ENOENT)
 		}
 		if nativeErr != nil && hookErr == nil && candidateStillExact && oldStillExact {
-			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
-			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, errors.Join(nativeErr, cleanupErr)
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
 		}
 		return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr, probeErr)
 	}
@@ -160,7 +185,11 @@ func (publication *heldUnixDownloadPublication) linuxBackupReplace(target *downl
 	if err := unix.Linkat(int(publication.parent.file.Fd()), leaf, int(publication.parent.file.Fd()), backup, 0); err != nil {
 		return err
 	}
+	publication.backupName = backup
 	backupIdentity, infoErr := publication.relativeNodeIdentity(backup)
+	if infoErr == nil {
+		publication.backupIdentity, publication.backupIdentitySet = backupIdentity, true
+	}
 	if infoErr != nil || backupIdentity != oldIdentity {
 		return errors.Join(errors.New("force backup identity could not be verified"), infoErr)
 	}
@@ -170,7 +199,12 @@ func (publication *heldUnixDownloadPublication) linuxBackupReplace(target *downl
 		// following is impossible through the regular-file cleanup helper.
 		return errors.Join(errors.New("force backup is not a regular file; retained"), infoErr)
 	}
-	publication.backupName, publication.backupInfo = backup, backupInfo
+	publication.backupInfo = backupInfo
+	if target.operations.afterBackupCreatedBeforeReplace != nil {
+		if err := target.operations.afterBackupCreatedBeforeReplace(target); err != nil {
+			return err
+		}
+	}
 	return unix.Renameat(int(publication.parent.file.Fd()), publication.candidateName, int(publication.parent.file.Fd()), leaf)
 }
 

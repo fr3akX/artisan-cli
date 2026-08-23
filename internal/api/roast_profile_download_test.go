@@ -416,6 +416,12 @@ func TestDownloadRoastProfileReportsAmbiguousPublicationSideEffects(t *testing.T
 	destination := filepath.Join(t.TempDir(), "ambiguous.alog")
 	published := destination + ".published"
 	client := profileClientWithTransport(t, body, sha, nil)
+	client.downloadOps.nativeOperation = func(operation func() error) error {
+		if err := operation(); err != nil {
+			return err
+		}
+		return errors.New("reported after operation")
+	}
 	client.downloadOps.afterNativeBeforeReconcile = func(*downloadTarget) error {
 		if err := os.Rename(destination, published); err != nil {
 			return err

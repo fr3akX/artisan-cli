@@ -573,6 +573,9 @@ func TestDownloadInventoryImageRetriesOnlyNetworkResponseReadFailures(t *testing
 }
 
 func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows durability is verified through the exact renamed handle")
+	}
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {
 			dir := t.TempDir()
@@ -611,6 +614,9 @@ func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
 }
 
 func TestDownloadInventoryImageParentSyncFailurePreservesInstalledDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows durability is verified through the exact renamed handle")
+	}
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {
 			dir := t.TempDir()
@@ -656,6 +662,12 @@ func TestDownloadInventoryImageReportsAmbiguousPublicationSideEffects(t *testing
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "secret", time.Second)
+	client.downloadOps.nativeOperation = func(operation func() error) error {
+		if err := operation(); err != nil {
+			return err
+		}
+		return errors.New("reported after operation")
+	}
 	client.downloadOps.afterNativeBeforeReconcile = func(*downloadTarget) error {
 		if err := os.Rename(destination, published); err != nil {
 			return err

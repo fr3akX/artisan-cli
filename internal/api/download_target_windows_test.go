@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsDownloadHeldParentPreventsParentRename(t *testing.T) {
@@ -53,6 +55,166 @@ func TestWindowsDownloadPublishesExactCreatedHandleAfterSourceNameSwap(t *testin
 	}
 	if contents, err := os.ReadFile(replacement); err != nil || string(contents) != "racer-source" {
 		t.Fatalf("racer source = %q, %v", contents, err)
+	}
+}
+
+func TestWindowsDownloadOperationErrorReconciliationAndNamedSourceCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation func(func() error) error
+		prepare   func(string) error
+		want      downloadPublicationState
+		wantBytes string
+	}{
+		{
+			name:      "no operation",
+			operation: func(func() error) error { return errors.New("native-no-op") },
+			want:      publicationNone,
+		},
+		{
+			name:      "collision",
+			operation: func(operation func() error) error { return operation() },
+			prepare:   func(destination string) error { return os.WriteFile(destination, []byte("competitor"), 0o600) },
+			want:      publicationNone,
+			wantBytes: "competitor",
+		},
+		{
+			name: "performed then error",
+			operation: func(operation func() error) error {
+				if err := operation(); err != nil {
+					return err
+				}
+				return errors.New("reported-after-operation")
+			},
+			want:      publicationExact,
+			wantBytes: "verified",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile.alog")
+			ops := defaultDownloadOperations()
+			ops.nativeOperation = func(operation func() error) error {
+				if test.prepare != nil {
+					if err := test.prepare(destination); err != nil {
+						return err
+					}
+				}
+				return test.operation(operation)
+			}
+			target, err := newDownloadTarget(destination, false, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			temporary := target.temporaryPath
+			_, _ = io.WriteString(target.Writer(), "verified")
+			result, installErr := target.Install(false)
+			if installErr == nil || result.Publication != test.want {
+				t.Fatalf("install=%#v,%v", result, installErr)
+			}
+			target.Abort() // deferred caller cleanup must be idempotent after every terminal result
+			if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned source leaked: %v", err)
+			}
+			if test.wantBytes != "" {
+				if contents, _ := os.ReadFile(destination); string(contents) != test.wantBytes {
+					t.Fatalf("destination=%q", contents)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsDownloadPerformedThenErrorAndPostNativeDisappearanceIsAmbiguous(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile.alog")
+	published := destination + ".published"
+	ops := defaultDownloadOperations()
+	ops.nativeOperation = func(operation func() error) error {
+		if err := operation(); err != nil {
+			return err
+		}
+		return errors.New("reported-after-operation")
+	}
+	ops.afterNativeBeforeReconcile = func(*downloadTarget) error { return os.Rename(destination, published) }
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "verified")
+	result, installErr := target.Install(false)
+	if installErr == nil || result.Publication != publicationAmbiguous || result.Visibility != visibilityAmbiguous {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	if contents, _ := os.ReadFile(published); string(contents) != "verified" {
+		t.Fatalf("published=%q", contents)
+	}
+}
+
+func TestWindowsDownloadAbortUsesExactHandleDispositionAndLeavesNoOwnedLeak(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "profile.alog")
+	target, err := newDownloadTarget(destination, false, defaultDownloadOperations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := target.temporaryPath
+	moved := owned + ".moved"
+	if err := os.Rename(owned, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(owned, []byte("competitor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target.Abort()
+	if contents, err := os.ReadFile(owned); err != nil || string(contents) != "competitor" {
+		t.Fatalf("competitor=%q,%v", contents, err)
+	}
+	if _, err := os.Lstat(moved); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact held source leaked: %v", err)
+	}
+}
+
+func TestWindowsDownloadForceUsesPOSIXReplaceAndClosesHandles(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile.alog")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := newDownloadTarget(destination, true, defaultDownloadOperations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := target.platform.(*heldWindowsDownloadPublication)
+	writerHandle := windows.Handle(platform.writer.Fd())
+	sourceHandle := windows.Handle(platform.source.Fd())
+	parentHandle := platform.parent
+	temporary := target.temporaryPath
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr != nil || result.Publication != publicationExact || !result.Visible() {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "new" {
+		t.Fatalf("destination=%q", contents)
+	}
+	if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary=%v", err)
+	}
+	for name, handle := range map[string]windows.Handle{"writer": writerHandle, "source": sourceHandle, "parent": parentHandle} {
+		if _, err := windowsDownloadInfo(handle); !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			t.Fatalf("%s handle remains open: %v", name, err)
+		}
+	}
+}
+
+func TestWindowsDispositionFallbackIsRestrictedToUnsupportedErrors(t *testing.T) {
+	for _, err := range []error{windows.ERROR_INVALID_FUNCTION, windows.ERROR_INVALID_PARAMETER, windows.ERROR_NOT_SUPPORTED, windows.ERROR_CALL_NOT_IMPLEMENTED} {
+		if !unsupportedWindowsDispositionEx(err) {
+			t.Fatalf("unsupported error rejected: %v", err)
+		}
+	}
+	for _, err := range []error{windows.ERROR_ACCESS_DENIED, windows.ERROR_SHARING_VIOLATION, windows.ERROR_LOCK_VIOLATION} {
+		if unsupportedWindowsDispositionEx(err) {
+			t.Fatalf("operational error would be hidden: %v", err)
+		}
 	}
 }
 

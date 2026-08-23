@@ -10,6 +10,75 @@ import (
 	"testing"
 )
 
+func TestDarwinDownloadPartialCandidateFailuresAreCleanedBeforeNative(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		inject func(*downloadOperations)
+	}{
+		{"copy", func(ops *downloadOperations) {
+			ops.copyCandidate = func(destination io.Writer, source io.Reader) (int64, error) {
+				buffer := make([]byte, 2)
+				count, _ := source.Read(buffer)
+				written, _ := destination.Write(buffer[:count])
+				return int64(written), errors.New("copy")
+			}
+		}},
+		{"sync", func(ops *downloadOperations) { ops.syncCandidate = func(*os.File) error { return errors.New("sync") } }},
+		{"hash", func(ops *downloadOperations) {
+			ops.digestCandidate = func(*os.File) (int64, [32]byte, error) { return 0, [32]byte{}, errors.New("hash") }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile")
+			ops := defaultDownloadOperations()
+			ops.forceCandidateCopy = true
+			test.inject(&ops)
+			target, err := newDownloadTarget(destination, false, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(target.Writer(), "new")
+			result, installErr := target.Install(false)
+			if installErr == nil || result.Publication != publicationNone {
+				t.Fatalf("install=%#v,%v", result, installErr)
+			}
+			entries, err := os.ReadDir(filepath.Dir(destination))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("partial candidate leaked: %v", entries)
+			}
+		})
+	}
+}
+
+func TestDarwinDownloadForceUsesPOSIXSwapAndCleansDisplacedDestination(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := newDownloadTarget(destination, true, defaultDownloadOperations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, installErr := target.Install(true)
+	if installErr != nil || result.Publication != publicationExact || !result.Visible() {
+		t.Fatalf("install=%#v,%v", result, installErr)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "new" {
+		t.Fatalf("destination=%q", contents)
+	}
+	entries, err := os.ReadDir(filepath.Dir(destination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("residue=%v", entries)
+	}
+}
+
 func TestDarwinDownloadParentSwapUsesHeldDirectory(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "downloads")

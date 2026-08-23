@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -36,22 +35,20 @@ func newHeldDownloadPublication(target *downloadTarget) (heldDownloadPublication
 	}
 	parentInfo, err := parent.Stat()
 	if err != nil || !parentInfo.IsDir() {
-		_ = parent.Close()
+		closeErr := parent.Close()
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, closeErr)
 		}
-		return nil, errors.New("download parent is not a directory")
+		return nil, errors.Join(errors.New("download parent is not a directory"), closeErr)
 	}
 	if target.operations.afterParentHeld != nil {
 		if err := target.operations.afterParentHeld(target); err != nil {
-			_ = parent.Close()
-			return nil, err
+			return nil, errors.Join(err, parent.Close())
 		}
 	}
 	current, currentErr := os.Lstat(target.directory)
 	if currentErr != nil || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(parentInfo, current) {
-		_ = parent.Close()
-		return nil, errors.Join(errDownloadIdentityAmbiguous, currentErr)
+		return nil, errors.Join(errDownloadIdentityAmbiguous, currentErr, parent.Close())
 	}
 	var writer *os.File
 	if target.operations.createTemp != nil {
@@ -60,19 +57,27 @@ func newHeldDownloadPublication(target *downloadTarget) (heldDownloadPublication
 		writer, err = os.CreateTemp(target.directory, "."+filepath.Base(target.destination)+".tmp-*")
 	}
 	if err != nil {
-		_ = parent.Close()
-		return nil, err
+		return nil, errors.Join(err, parent.Close())
 	}
 	info, err := writer.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		_ = writer.Close()
-		_ = parent.Close()
+		cleanupErr := cleanupNewOtherDownloadSource(writer.Name(), info)
+		closeErr := writer.Close()
+		parentCloseErr := parent.Close()
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, cleanupErr, closeErr, parentCloseErr)
 		}
-		return nil, errors.New("download source is not regular")
+		return nil, errors.Join(errors.New("download source is not regular"), cleanupErr, closeErr, parentCloseErr)
 	}
 	return &heldOtherDownloadPublication{parent: parent, parentInfo: parentInfo, parentPath: target.directory, writer: writer, sourceInfo: info, sourceName: filepath.Base(writer.Name())}, nil
+}
+
+func cleanupNewOtherDownloadSource(path string, want os.FileInfo) error {
+	info, err := os.Lstat(path)
+	if err != nil || want == nil || !info.Mode().IsRegular() || !os.SameFile(info, want) {
+		return errors.Join(errDownloadIdentityAmbiguous, err)
+	}
+	return os.Remove(path)
 }
 
 func (p *heldOtherDownloadPublication) writerFile() *os.File     { return p.writer }
@@ -97,7 +102,10 @@ func (p *heldOtherDownloadPublication) matches(name string, want os.FileInfo) bo
 	return err == nil && info.Mode().IsRegular() && os.SameFile(info, want)
 }
 func (p *heldOtherDownloadPublication) removeOwned(target *downloadTarget, name string, want os.FileInfo) error {
-	if !p.pathMatches() || !p.matches(name, want) {
+	if name == "" {
+		return nil
+	}
+	if want == nil || !p.pathMatches() || !p.matches(name, want) {
 		return errDownloadIdentityAmbiguous
 	}
 	if target.operations.afterCleanupCheck != nil {
@@ -111,7 +119,19 @@ func (p *heldOtherDownloadPublication) removeOwned(target *downloadTarget, name 
 	return os.Remove(filepath.Join(p.parentPath, name))
 }
 func (p *heldOtherDownloadPublication) abort(target *downloadTarget) error {
-	return p.removeOwned(target, p.sourceName, p.sourceInfo)
+	sourceErr := p.removeOwned(target, p.sourceName, p.sourceInfo)
+	candidateErr := p.removeOwned(target, p.candidate, p.candidateInfo)
+	backupErr := p.removeOwned(target, p.backup, p.backupInfo)
+	if sourceErr == nil {
+		p.sourceName = ""
+	}
+	if candidateErr == nil {
+		p.candidate = ""
+	}
+	if backupErr == nil {
+		p.backup = ""
+	}
+	return errors.Join(sourceErr, candidateErr, backupErr)
 }
 
 func otherRandomName(prefix string) (string, error) {
@@ -131,18 +151,22 @@ func (p *heldOtherDownloadPublication) copyCandidate(target *downloadTarget) err
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(candidate, io.NewSectionReader(p.writer, 0, 1<<63-1))
-	syncErr := candidate.Sync()
-	info, infoErr := candidate.Stat()
-	count, digest, hashErr := digestDownloadDescriptor(candidate)
-	closeErr := candidate.Close()
-	if err := errors.Join(copyErr, syncErr, infoErr, hashErr, closeErr); err != nil {
+	register := func(info os.FileInfo) error {
+		p.candidate, p.candidateInfo = name, info
+		return nil
+	}
+	// O_EXCL created the name. Track it before candidate stat/copy/sync/hash;
+	// the helper replaces the nil identity immediately after a successful stat.
+	if err := register(nil); err != nil {
+		return errors.Join(err, candidate.Close())
+	}
+	count, digest, err := copyHeldDownloadCandidate(p.writer, candidate, register, target.operations)
+	if err != nil {
 		return err
 	}
 	if count != target.sealedCount || digest != target.sealedDigest {
 		return errDownloadDigestMismatch
 	}
-	p.candidate, p.candidateInfo = name, info
 	return nil
 }
 func (p *heldOtherDownloadPublication) namedExact(name string, want os.FileInfo, count int64, digest [32]byte) bool {

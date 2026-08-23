@@ -34,29 +34,24 @@ func newHeldDownloadPublication(target *downloadTarget) (heldDownloadPublication
 	}
 	if target.operations.afterParentHeld != nil {
 		if err := target.operations.afterParentHeld(target); err != nil {
-			_ = windows.CloseHandle(parent)
-			return nil, err
+			return nil, errors.Join(err, windows.CloseHandle(parent))
 		}
 	}
 	writer, name, err := createWindowsDownloadSource(parent, target, "."+filepath.Base(target.destination)+".tmp-")
 	if err != nil {
-		_ = windows.CloseHandle(parent)
-		return nil, err
+		return nil, errors.Join(err, windows.CloseHandle(parent))
 	}
 	process := windows.CurrentProcess()
 	var duplicate windows.Handle
 	if err := windows.DuplicateHandle(process, windows.Handle(writer.Fd()), process, &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
-		_ = writer.Close()
-		_ = windows.CloseHandle(parent)
-		return nil, err
+		cleanupErr := disposeWindowsDownloadHandle(windows.Handle(writer.Fd()))
+		return nil, errors.Join(err, cleanupErr, writer.Close(), windows.CloseHandle(parent))
 	}
 	source := os.NewFile(uintptr(duplicate), writer.Name())
 	sourceInfo, err := windowsDownloadInfo(duplicate)
 	if err != nil {
-		_ = source.Close()
-		_ = writer.Close()
-		_ = windows.CloseHandle(parent)
-		return nil, err
+		cleanupErr := disposeWindowsDownloadHandle(duplicate)
+		return nil, errors.Join(err, cleanupErr, source.Close(), writer.Close(), windows.CloseHandle(parent))
 	}
 	return &heldWindowsDownloadPublication{parent: parent, parentInfo: info, parentPath: target.directory, writer: writer, source: source, sourceInfo: sourceInfo, sourceName: name}, nil
 }
@@ -72,11 +67,11 @@ func openWindowsDownloadParent(path string) (windows.Handle, windows.ByHandleFil
 	}
 	info, err := windowsDownloadInfo(handle)
 	if err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		_ = windows.CloseHandle(handle)
+		closeErr := windows.CloseHandle(handle)
 		if err != nil {
-			return windows.InvalidHandle, info, err
+			return windows.InvalidHandle, info, errors.Join(err, closeErr)
 		}
-		return windows.InvalidHandle, info, errors.New("download parent is not a directory")
+		return windows.InvalidHandle, info, errors.Join(errors.New("download parent is not a directory"), closeErr)
 	}
 	return handle, info, nil
 }
@@ -195,13 +190,28 @@ func (p *heldWindowsDownloadPublication) sourceNameMatches() bool {
 	return err == nil && sameWindowsDownloadInfo(info, p.sourceInfo)
 }
 func (p *heldWindowsDownloadPublication) abort(target *downloadTarget) error {
+	return disposeWindowsDownloadHandle(windows.Handle(p.source.Fd()))
+}
+
+func disposeWindowsDownloadHandle(handle windows.Handle) error {
 	// Disposition is applied to the exact retained handle, never a name.
 	flags := uint32(0x1 | 0x2 | 0x8) // DELETE | POSIX_SEMANTICS | ON_CLOSE
-	if err := windows.SetFileInformationByHandle(windows.Handle(p.source.Fd()), windows.FileDispositionInfoEx, (*byte)(unsafePointer(&flags)), uint32Size()); err == nil {
+	err := windows.SetFileInformationByHandle(handle, windows.FileDispositionInfoEx, (*byte)(unsafePointer(&flags)), uint32Size())
+	if err == nil {
 		return nil
 	}
+	if !unsupportedWindowsDispositionEx(err) {
+		return err
+	}
 	value := byte(1)
-	return windows.SetFileInformationByHandle(windows.Handle(p.source.Fd()), windows.FileDispositionInfo, &value, 1)
+	return windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &value, 1)
+}
+
+func unsupportedWindowsDispositionEx(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+		errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
+		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+		errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED)
 }
 
 // Helpers avoid exporting unsafe details outside the Windows implementation.

@@ -131,6 +131,38 @@ func TestDownloadTargetReconcilesOperationPerformedThenError(t *testing.T) {
 	}
 }
 
+func TestDownloadTargetPerformedThenErroredAndPostNativeDestinationDisappearsIsAmbiguous(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	ops := defaultDownloadOperations()
+	ops.nativeOperation = func(operation func() error) error {
+		if err := operation(); err != nil {
+			return err
+		}
+		return errors.New("reported after operation")
+	}
+	published := destination + ".published"
+	ops.afterNativeBeforeReconcile = func(*downloadTarget) error {
+		return os.Rename(destination, published)
+	}
+	target, err := newDownloadTarget(destination, false, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "exact")
+	result, err := target.Install(false)
+	if err == nil || result.Publication != publicationAmbiguous || result.Visibility != visibilityAmbiguous {
+		t.Fatalf("install = %#v, %v", result, err)
+	}
+	target.Abort()
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("requested destination unexpectedly exists: %v", err)
+	}
+	contents, _ := os.ReadFile(published)
+	if string(contents) != "exact" {
+		t.Fatalf("published residue = %q", contents)
+	}
+}
+
 func TestDownloadTargetPostNativeDestinationSwapIsAmbiguousAndCompetitorSurvives(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "profile")
 	ops := defaultDownloadOperations()

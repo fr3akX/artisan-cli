@@ -7,10 +7,169 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxDownloadCandidateRegistersImmediatelyAfterLink(t *testing.T) {
+	directory := t.TempDir()
+	source, err := os.CreateTemp(directory, "source-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	sourceInfo, err := source.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(parentFD)
+
+	candidate := "candidate"
+	moved := filepath.Join(directory, "candidate-moved")
+	registered := false
+	cloneErr := cloneHeldUnixDownloadSource(int(source.Fd()), sourceInfo, parentFD, candidate, defaultDownloadOperations(), func(info os.FileInfo) error {
+		registered = true
+		if info == nil || !os.SameFile(info, sourceInfo) {
+			t.Fatalf("registered identity=%v", info)
+		}
+		return os.Rename(filepath.Join(directory, candidate), moved)
+	})
+	if cloneErr == nil || !registered {
+		t.Fatalf("registered=%v err=%v", registered, cloneErr)
+	}
+	if info, err := os.Stat(moved); err != nil || !os.SameFile(info, sourceInfo) {
+		t.Fatalf("moved candidate identity=%v,%v", info, err)
+	}
+}
+
+func TestLinuxDownloadConstructorJoinsProtectionAndCleanupErrors(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "profile")
+	ops := defaultDownloadOperations()
+	ops.openAnonymousSource = func(int) (int, error) { return -1, unix.EOPNOTSUPP }
+	ops.protect = func(*os.File) error { return errors.New("protect-failed") }
+	ops.afterCleanupCheck = func(*downloadTarget, string) error { return errors.New("cleanup-failed") }
+	target, err := newDownloadTarget(destination, false, ops)
+	if target != nil || err == nil || !strings.Contains(err.Error(), "protect-failed") || !strings.Contains(err.Error(), "cleanup-failed") {
+		t.Fatalf("target=%#v err=%v", target, err)
+	}
+	entries, readErr := os.ReadDir(directory)
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("retained cleanup residue=%v,%v", entries, readErr)
+	}
+	if removeErr := os.Remove(filepath.Join(directory, entries[0].Name())); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+}
+
+func TestLinuxDownloadNamedFallbackCompletesNoForceAndForceSafely(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no-force", true: "force"}[force], func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "profile")
+			if force {
+				if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := defaultDownloadOperations()
+			ops.openAnonymousSource = func(int) (int, error) { return -1, unix.EOPNOTSUPP }
+			target, err := newDownloadTarget(destination, force, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			temporary := target.temporaryPath
+			if temporary == "" {
+				t.Fatal("named fallback source was not retained")
+			}
+			_, _ = io.WriteString(target.Writer(), "new")
+			result, err := target.Install(force)
+			if err != nil || result.Publication != publicationExact || !result.Visible() {
+				t.Fatalf("install=%#v,%v", result, err)
+			}
+			if contents, _ := os.ReadFile(destination); string(contents) != "new" {
+				t.Fatalf("destination=%q", contents)
+			}
+			if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("named source leaked: %v", err)
+			}
+		})
+	}
+}
+
+func TestLinuxDownloadPreNativeFailureCleansTrackedNamedSourceAndCandidateAndJoinsErrors(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDownloadOperations()
+	ops.openAnonymousSource = func(int) (int, error) { return -1, unix.EOPNOTSUPP }
+	ops.afterCandidateVerifiedBeforeNative = func(*downloadTarget) error { return errors.New("pre-native") }
+	var names []string
+	ops.afterCleanupCheck = func(_ *downloadTarget, name string) error {
+		names = append(names, name)
+		if strings.Contains(name, ".candidate-") {
+			return errors.New("candidate-cleanup")
+		}
+		return nil
+	}
+	target, err := newDownloadTarget(destination, true, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, err := target.Install(true)
+	if err == nil || result.Publication != publicationNone || !strings.Contains(err.Error(), "pre-native") || !strings.Contains(err.Error(), "candidate-cleanup") {
+		t.Fatalf("install=%#v,%v", result, err)
+	}
+	var sawSource, sawCandidate bool
+	for _, name := range names {
+		sawSource = sawSource || strings.Contains(name, ".tmp-")
+		sawCandidate = sawCandidate || strings.Contains(name, ".candidate-")
+	}
+	if !sawSource || !sawCandidate {
+		t.Fatalf("cleanup names=%v", names)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "old" {
+		t.Fatalf("destination=%q", contents)
+	}
+}
+
+func TestLinuxDownloadVerifiedNoPublicationCleansTrackedBackup(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "profile")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDownloadOperations()
+	ops.forceBackupReplace = true
+	ops.afterBackupCreatedBeforeReplace = func(*downloadTarget) error { return errors.New("replace failed") }
+	target, err := newDownloadTarget(destination, true, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(target.Writer(), "new")
+	result, err := target.Install(true)
+	if err == nil || result.Publication != publicationNone {
+		t.Fatalf("install=%#v,%v", result, err)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "old" {
+		t.Fatalf("destination=%q", contents)
+	}
+	entries, readErr := os.ReadDir(filepath.Dir(destination))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".backup-") || strings.Contains(entry.Name(), ".candidate-") || strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("tracked residue leaked: %s", entry.Name())
+		}
+	}
+}
 
 func TestLinuxDownloadParentSwapPublishesOnlyHeldParentAndReportsVisibilityAmbiguous(t *testing.T) {
 	root := t.TempDir()
@@ -94,11 +253,18 @@ func TestLinuxDownloadForceNoOperationErrorIsReconciledAndPreservesOldDestinatio
 	}
 	_, _ = io.WriteString(target.Writer(), "new")
 	result, err := target.Install(true)
-	if err == nil || result.Publication != publicationNone || result.Visibility != visibilityNotVisible {
-		t.Fatalf("install=%#v, %v", result, err)
+	if err == nil || result.Publication != publicationNone || result.Visibility != visibilityNotVisible || target.state != downloadTargetTerminalNone {
+		t.Fatalf("install=%#v state=%v, %v", result, target.state, err)
 	}
 	if contents, _ := os.ReadFile(destination); string(contents) != "old" {
 		t.Fatalf("old destination=%q", contents)
+	}
+	entries, readErr := os.ReadDir(filepath.Dir(destination))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(destination) {
+		t.Fatalf("owned residue leaked: %v", entries)
 	}
 }
 

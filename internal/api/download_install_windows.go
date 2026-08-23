@@ -35,14 +35,20 @@ func (p *heldWindowsDownloadPublication) publish(target *downloadTarget, force b
 		return downloadInstallResult{}, err
 	}
 	target.state = downloadTargetNativeAttempted
-	nativeErr := target.operations.nativeOperation(func() error { return p.renameExactSource(filepath.Base(target.destination), force) })
+	target.nativeOperationInvoked = false
+	target.nativeOperationErr = nil
+	nativeErr := target.operations.nativeOperation(func() error {
+		target.nativeOperationInvoked = true
+		target.nativeOperationErr = p.renameExactSource(filepath.Base(target.destination), force)
+		return target.nativeOperationErr
+	})
 	var hookErr error
 	if target.operations.afterNativeBeforeReconcile != nil {
 		hookErr = target.operations.afterNativeBeforeReconcile(target)
 	}
 	exact, destinationExists, probeErr := p.destinationExact(target)
 	if !exact {
-		if nativeErr != nil && !destinationExists && hookErr == nil {
+		if nativeErr != nil && !target.nativeOperationInvoked && hookErr == nil {
 			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
 		}
 		if nativeErr != nil && hookErr == nil && p.sourceNameMatches() {

@@ -59,13 +59,22 @@ func (result downloadInstallResult) Durable() bool {
 type downloadOperations struct {
 	// createTemp is a test-only source creation override. Platform defaults
 	// create relative to the already-held parent.
-	createTemp func(string, string) (*os.File, error)
-	protect    func(*os.File) error
-	writer     func(*os.File) io.Writer
-	resetFile  func(*os.File) error
-	syncFile   func(*os.File) error
-	closeFile  func(*os.File) error
-	flushFile  func(*os.File) error
+	createTemp      func(string, string) (*os.File, error)
+	protect         func(*os.File) error
+	writer          func(*os.File) io.Writer
+	resetFile       func(*os.File) error
+	syncFile        func(*os.File) error
+	closeFile       func(*os.File) error
+	flushFile       func(*os.File) error
+	copyCandidate   func(io.Writer, io.Reader) (int64, error)
+	syncCandidate   func(*os.File) error
+	digestCandidate func(*os.File) (int64, [sha256.Size]byte, error)
+
+	// Linux-only deterministic capability seams. Other platforms leave these
+	// unused while sharing the same operation bundle in common tests.
+	openAnonymousSource func(int) (int, error)
+	forceBackupReplace  bool
+	forceCandidateCopy  bool
 
 	// A non-nil syncParent is a deterministic fault seam; production syncs the
 	// retained parent descriptor/handle directly.
@@ -75,6 +84,7 @@ type downloadOperations struct {
 	afterCreatedHandleBeforeProtection func(*downloadTarget) error
 	afterSealedBeforeCandidate         func(*downloadTarget) error
 	afterCandidateVerifiedBeforeNative func(*downloadTarget) error
+	afterBackupCreatedBeforeReplace    func(*downloadTarget) error
 	afterNativeBeforeReconcile         func(*downloadTarget) error
 	afterCleanupCheck                  func(*downloadTarget, string) error
 
@@ -97,6 +107,9 @@ func defaultDownloadOperations() downloadOperations {
 		},
 		syncFile:        func(file *os.File) error { return file.Sync() },
 		closeFile:       func(file *os.File) error { return file.Close() },
+		copyCandidate:   io.Copy,
+		syncCandidate:   func(file *os.File) error { return file.Sync() },
+		digestCandidate: digestDownloadDescriptor,
 		nativeOperation: func(operation func() error) error { return operation() },
 	}
 }
@@ -108,6 +121,7 @@ const (
 	downloadTargetSealed
 	downloadTargetNativeAttempted
 	downloadTargetInstalledExact
+	downloadTargetTerminalNone
 	downloadTargetTerminalAmbiguous
 	downloadTargetAborted
 )
@@ -125,16 +139,18 @@ type heldDownloadPublication interface {
 // downloadTarget observes the exact successful write stream and delegates all
 // namespace operations to a platform object retaining the source and parent.
 type downloadTarget struct {
-	destination   string
-	directory     string
-	temporaryPath string
-	operations    downloadOperations
-	platform      heldDownloadPublication
-	state         downloadTargetState
-	observer      *observedTargetWriter
-	sealedCount   int64
-	sealedDigest  [sha256.Size]byte
-	writerClosed  bool
+	destination            string
+	directory              string
+	temporaryPath          string
+	operations             downloadOperations
+	platform               heldDownloadPublication
+	state                  downloadTargetState
+	observer               *observedTargetWriter
+	sealedCount            int64
+	sealedDigest           [sha256.Size]byte
+	writerClosed           bool
+	nativeOperationInvoked bool
+	nativeOperationErr     error
 }
 
 func newDownloadTarget(destination string, force bool, operations downloadOperations) (*downloadTarget, error) {
@@ -170,13 +186,13 @@ func newDownloadTarget(destination string, force bool, operations downloadOperat
 	target.temporaryPath = platform.temporaryPath()
 	if operations.afterCreatedHandleBeforeProtection != nil {
 		if err := operations.afterCreatedHandleBeforeProtection(target); err != nil {
-			target.Abort()
-			return nil, err
+			cleanupErr := target.abortOwned()
+			return nil, errors.Join(err, cleanupErr)
 		}
 	}
 	if err := operations.protect(platform.writerFile()); err != nil {
-		target.Abort()
-		return nil, err
+		cleanupErr := target.abortOwned()
+		return nil, errors.Join(err, cleanupErr)
 	}
 	target.observer = &observedTargetWriter{destination: operations.writer(platform.writerFile()), hash: sha256.New()}
 	return target, nil
@@ -222,6 +238,11 @@ func (target *downloadTarget) install(ctx context.Context, force bool) (result d
 	if target == nil || target.state != downloadTargetActive {
 		return result, errors.New("download target cannot be installed")
 	}
+	defer func() {
+		if returnErr != nil && (target.state == downloadTargetActive || target.state == downloadTargetSealed) {
+			returnErr = errors.Join(returnErr, target.abortOwned())
+		}
+	}()
 	if err := target.operations.syncFile(target.platform.writerFile()); err != nil {
 		return result, err
 	}
@@ -253,10 +274,21 @@ func (target *downloadTarget) install(ctx context.Context, force bool) (result d
 		return result, err
 	}
 	result, returnErr = target.platform.publish(target, force)
-	if result.Publication == publicationExact {
+	switch result.Publication {
+	case publicationExact:
 		target.state = downloadTargetInstalledExact
-	} else if result.Publication == publicationAmbiguous || target.state == downloadTargetNativeAttempted {
+	case publicationNone:
+		// A reconciled no-publication result is terminal and non-retryable, but
+		// it still authorizes identity-bound cleanup of every definitely-owned
+		// source, candidate, and backup.
+		target.state = downloadTargetTerminalNone
+		returnErr = errors.Join(returnErr, target.platform.abort(target))
+	case publicationAmbiguous:
 		target.state = downloadTargetTerminalAmbiguous
+	default:
+		if target.state == downloadTargetNativeAttempted {
+			target.state = downloadTargetTerminalAmbiguous
+		}
 	}
 	return result, errors.Join(returnErr, target.closeAll())
 }
@@ -292,18 +324,22 @@ func (target *downloadTarget) closeAll() error {
 	return errors.Join(target.closeWriter(), target.platform.close())
 }
 
-func (target *downloadTarget) Abort() {
+func (target *downloadTarget) abortOwned() error {
 	if target == nil || target.state == downloadTargetAborted || target.state == downloadTargetInstalledExact {
-		return
+		return nil
 	}
-	// A native attempt is terminal. Never infer that a destination name is
-	// safe to touch from the syscall return value.
-	if target.state != downloadTargetNativeAttempted && target.state != downloadTargetTerminalAmbiguous && target.platform != nil {
-		_ = target.platform.abort(target)
+	var cleanupErr error
+	// Ambiguity never authorizes destructive cleanup. Pre-native states do;
+	// terminal-none was already cleaned synchronously before handles closed.
+	if target.state != downloadTargetNativeAttempted && target.state != downloadTargetTerminalNone && target.state != downloadTargetTerminalAmbiguous && target.platform != nil {
+		cleanupErr = target.platform.abort(target)
 	}
-	_ = target.closeAll()
+	closeErr := target.closeAll()
 	target.state = downloadTargetAborted
+	return errors.Join(cleanupErr, closeErr)
 }
+
+func (target *downloadTarget) Abort() { _ = target.abortOwned() }
 
 func digestDownloadDescriptor(file *os.File) (int64, [sha256.Size]byte, error) {
 	var digest [sha256.Size]byte

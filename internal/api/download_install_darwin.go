@@ -4,14 +4,13 @@ package api
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
 
-func createAnonymousUnixDownloadSource(parentFD int, prefix string) (int, string, error) {
+func createAnonymousUnixDownloadSource(parentFD int, _ *downloadTarget, prefix string) (int, string, error) {
 	for attempt := 0; attempt < 100; attempt++ {
 		name, err := randomDownloadName(prefix)
 		if err != nil {
@@ -33,28 +32,68 @@ func createAnonymousUnixDownloadSource(parentFD int, prefix string) (int, string
 	return -1, "", errors.New("could not allocate held download source")
 }
 
-func cloneHeldUnixDownloadSource(sourceFD, parentFD int, name string) error {
-	if err := unix.Fclonefileat(sourceFD, parentFD, name, 0); err == nil {
-		return nil
-	} else if !errors.Is(err, unix.ENOTSUP) && !errors.Is(err, unix.EXDEV) && !errors.Is(err, unix.EINVAL) {
-		return err
+func cloneHeldUnixDownloadSource(sourceFD int, _ os.FileInfo, parentFD int, name string, operations downloadOperations, register func(os.FileInfo) error) error {
+	registerExisting := func() (bool, error) {
+		fd, openErr := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if errors.Is(openErr, unix.ENOENT) {
+			return false, nil
+		}
+		if openErr != nil {
+			return false, openErr
+		}
+		file := os.NewFile(uintptr(fd), name)
+		info, statErr := file.Stat()
+		closeErr := file.Close()
+		return true, errors.Join(statErr, register(info), closeErr)
 	}
-	fd, err := unix.Openat(parentFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return err
+
+	if !operations.forceCandidateCopy {
+		cloneErr := unix.Fclonefileat(sourceFD, parentFD, name, 0)
+		if cloneErr == nil {
+			// The clone name now exists but its distinct inode identity has not yet
+			// been captured. Track the name conservatively before opening it.
+			if err := register(nil); err != nil {
+				return err
+			}
+		}
+		created, registerErr := registerExisting()
+		if cloneErr == nil {
+			return registerErr
+		}
+		if registerErr != nil {
+			// The failed clone may still have created a name that could not be
+			// reopened. Track it conservatively even though cleanup cannot infer an
+			// identity from the name alone.
+			return errors.Join(cloneErr, registerErr, register(nil))
+		}
+		if created {
+			// Even a failed clone can leave a partial candidate. registerExisting
+			// captured its identity for the pre-native cleanup path.
+			return cloneErr
+		}
+		if !errors.Is(cloneErr, unix.ENOTSUP) && !errors.Is(cloneErr, unix.EXDEV) && !errors.Is(cloneErr, unix.EINVAL) {
+			return cloneErr
+		}
 	}
-	candidate := os.NewFile(uintptr(fd), name)
+
 	duplicate, duplicateErr := unix.Dup(sourceFD)
 	if duplicateErr != nil {
-		_ = candidate.Close()
 		return duplicateErr
 	}
 	source := os.NewFile(uintptr(duplicate), "held-source-copy")
-	_, copyErr := io.Copy(candidate, io.NewSectionReader(source, 0, 1<<63-1))
-	sourceCloseErr := source.Close()
-	syncErr := candidate.Sync()
-	closeErr := candidate.Close()
-	return errors.Join(copyErr, sourceCloseErr, syncErr, closeErr)
+	fd, err := unix.Openat(parentFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return errors.Join(err, source.Close())
+	}
+	candidate := os.NewFile(uintptr(fd), name)
+	// O_EXCL created the name. Register it before stat/copy/sync/hash can fail;
+	// copyHeldDownloadCandidate replaces the nil identity after a successful stat.
+	registerErr := register(nil)
+	if registerErr != nil {
+		return errors.Join(registerErr, candidate.Close(), source.Close())
+	}
+	_, _, copyErr := copyHeldDownloadCandidate(source, candidate, register, operations)
+	return errors.Join(copyErr, source.Close())
 }
 
 func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, force bool) (downloadInstallResult, error) {
@@ -81,14 +120,14 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 		if exact {
 			return resultAfterUnixExact(publication, target, errors.Join(nativeErr, hookErr, probeErr))
 		}
-		if (errors.Is(nativeErr, unix.EEXIST) || errors.Is(nativeErr, os.ErrExist)) && hookErr == nil {
-			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
-			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, errors.Join(os.ErrExist, cleanupErr)
+		if nativeErr != nil && !target.nativeOperationInvoked && hookErr == nil {
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
 		}
-		if nativeErr != nil && hookErr == nil && errors.Is(probeErr, unix.ENOENT) {
-			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
-			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, errors.Join(nativeErr, cleanupErr)
+		if (errors.Is(target.nativeOperationErr, unix.EEXIST) || errors.Is(target.nativeOperationErr, os.ErrExist)) && hookErr == nil && publication.relativeMatches(publication.candidateName, publication.candidateInfo) {
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, os.ErrExist
 		}
+		// A missing requested leaf after rename may mean publication occurred and
+		// was removed before reconciliation; it is never proof of no publication.
 		return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr, probeErr)
 	}
 
@@ -116,6 +155,9 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 	hookErr := publication.afterNative(target)
 	_, exact, probeErr := publication.destinationExact(target, publication.candidateInfo)
 	if !exact {
+		if nativeErr != nil && !target.nativeOperationInvoked && hookErr == nil {
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
+		}
 		candidateStillExact := publication.relativeMatches(publication.candidateName, publication.candidateInfo)
 		oldStillExact := false
 		if oldErr == nil {
@@ -125,8 +167,7 @@ func (publication *heldUnixDownloadPublication) publish(target *downloadTarget, 
 			oldStillExact = errors.Is(err, unix.ENOENT)
 		}
 		if nativeErr != nil && hookErr == nil && candidateStillExact && oldStillExact {
-			cleanupErr := publication.removeOwnedName(target, publication.candidateName, publication.candidateInfo)
-			return downloadInstallResult{}, errors.Join(nativeErr, cleanupErr)
+			return downloadInstallResult{Publication: publicationNone, Visibility: visibilityNotVisible, Durability: durabilityNotApplicable}, nativeErr
 		}
 		return downloadInstallResult{Publication: publicationAmbiguous, Visibility: visibilityAmbiguous, Durability: durabilityUncertain}, errors.Join(errDownloadIdentityAmbiguous, nativeErr, hookErr, probeErr)
 	}
