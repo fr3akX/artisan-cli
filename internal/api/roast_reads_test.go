@@ -393,11 +393,62 @@ func TestPublicRoastAggregateMethodsEnforceExactItemBoundary(t *testing.T) {
 					}
 					return
 				}
-				if failure == nil || failure.Code != "pagination_limit_exceeded" || failure.ExitCode != 9 || count != 0 || requests != 101 {
+				if failure == nil || failure.Code != "pagination_limit_exceeded" || failure.ExitCode != 9 || count != 0 || requests != 100 {
 					t.Fatalf("count=%d failure=%#v requests=%d", count, failure, requests)
 				}
 			})
 		}
+	}
+}
+
+func TestPublicRoastAggregateMethodsStopAtItemCeilingWhenContinuationProvesOverflow(t *testing.T) {
+	tests := []struct {
+		name string
+		item string
+		call func(*Client) *output.Error
+	}{
+		{
+			name: "roasts", item: validRoastListItemJSON(),
+			call: func(client *Client) *output.Error {
+				_, failure := client.ListAllRoasts(context.Background(), RoastListOptions{Limit: maxRoastPageItems})
+				return failure
+			},
+		},
+		{
+			name: "revisions", item: validRoastRevisionJSON(),
+			call: func(client *Client) *output.Error {
+				_, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{Limit: maxRoastPageItems})
+				return failure
+			},
+		},
+		{
+			name: "comments", item: validDeletedCommentJSON(),
+			call: func(client *Client) *output.Error {
+				_, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{Limit: maxRoastPageItems})
+				return failure
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			authenticatedRequests := 0
+			client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Header.Get("Authorization") == "Bearer roast-test-token" {
+					authenticatedRequests++
+				}
+				next := strconv.Quote(strconv.Itoa(requests))
+				writeRoastJSON(w, `{"items":[`+repeatRoastJSONItem(tt.item, maxRoastPageItems)+`],"next_cursor":`+next+`}`)
+			})
+			failure := tt.call(client)
+			if failure == nil || failure.Code != "pagination_limit_exceeded" || failure.ExitCode != 9 {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if requests != 100 || authenticatedRequests != 100 {
+				t.Fatalf("requests=%d authenticated=%d, want exactly 100 each", requests, authenticatedRequests)
+			}
+		})
 	}
 }
 

@@ -330,7 +330,8 @@ func collectRoastPages[T any](initialCursor string, maxItems int, fetch func(str
 		if len(pageItems) == 0 && (nextCursor != nil || pages > 1) {
 			return nil, &output.Error{ExitCode: 9, Code: "invalid_server_response", Message: "The server returned a roast page without pagination progress"}
 		}
-		if len(pageItems) > maxItems-len(items) {
+		remainingItems := maxItems - len(items)
+		if len(pageItems) > remainingItems || len(pageItems) == remainingItems && nextCursor != nil {
 			return nil, &output.Error{ExitCode: 9, Code: "pagination_limit_exceeded", Message: "Roast pagination exceeded the 10000 item safety limit"}
 		}
 		items = append(items, pageItems...)
