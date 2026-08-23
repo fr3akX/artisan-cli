@@ -7,10 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/fr3akX/artisan-cli/internal/output"
-	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
 const (
@@ -18,30 +16,6 @@ const (
 	MaxInventoryImages    = 8
 	maxImageDownloadBytes = int64(10 << 20)
 )
-
-type downloadOperations struct {
-	createTemp       func(string, string) (*os.File, error)
-	protect          func(*os.File) error
-	writer           func(*os.File) io.Writer
-	syncFile         func(*os.File) error
-	closeFile        func(*os.File) error
-	installNoReplace func(string, string) (bool, error)
-	replace          func(string, string) (bool, error)
-	syncParent       func(string) error
-}
-
-func defaultDownloadOperations() downloadOperations {
-	return downloadOperations{
-		createTemp:       os.CreateTemp,
-		protect:          securefile.ProtectPrivateFile,
-		writer:           func(file *os.File) io.Writer { return file },
-		syncFile:         func(file *os.File) error { return file.Sync() },
-		closeFile:        func(file *os.File) error { return file.Close() },
-		installNoReplace: atomicInstallDownloadNoReplace,
-		replace:          atomicReplaceDownload,
-		syncParent:       securefile.SyncParentDirectory,
-	}
-}
 
 // InventoryImagePatch preserves field presence, including caption and alt-text
 // clears represented by JSON null.
@@ -375,36 +349,21 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	if variant != "display" && variant != "thumbnail" {
 		return result, mutationUsage("invalid_image_variant", "Image variant must be display or thumbnail")
 	}
-	if destination == "" || filepath.Base(destination) == "." || filepath.Base(destination) == string(filepath.Separator) {
-		return result, mutationUsage("invalid_destination", "Image download requires a destination file path")
-	}
-	if !force {
-		if _, err := os.Lstat(destination); err == nil {
-			return result, destinationExistsFailure()
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return result, localStorageFailure("Unable to store the image download safely")
+	target, err := newDownloadTarget(destination, force, c.downloadOps)
+	if err != nil {
+		if errors.Is(err, errInvalidDownloadDestination) {
+			return result, mutationUsage("invalid_destination", "Image download requires a destination file path")
 		}
+		if errors.Is(err, os.ErrExist) {
+			return result, destinationExistsFailure()
+		}
+		return result, localStorageFailure("Unable to store the image download safely")
 	}
+	defer target.Abort()
 
 	endpoint, err := c.endpointURL(inventoryReadRoot+"/bean-lots/"+lotID+"/images/"+imageID+"/"+variant, nil)
 	if err != nil {
 		return result, localFailure("invalid_request", "A valid API path is required")
-	}
-	directory := filepath.Dir(destination)
-	temporary, err := c.downloadOps.createTemp(directory, "."+filepath.Base(destination)+".tmp-*")
-	if err != nil {
-		return result, localStorageFailure("Unable to store the image download safely")
-	}
-	temporaryPath := temporary.Name()
-	temporaryClosed := false
-	defer func() {
-		if !temporaryClosed {
-			_ = temporary.Close()
-		}
-		_ = os.Remove(temporaryPath)
-	}()
-	if err := c.downloadOps.protect(temporary); err != nil {
-		return result, localStorageFailure("Unable to store the image download safely")
 	}
 
 	var downloaded int64
@@ -412,7 +371,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		if ctx.Err() != nil {
 			return result, contextOrNetworkFailure(ctx)
 		}
-		if err := resetDownloadTemp(temporary); err != nil {
+		if err := target.Reset(); err != nil {
 			return result, localStorageFailure("Unable to store the image download safely")
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -467,7 +426,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 			return result, invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
 		}
 		var readErr, writeErr error
-		downloaded, readErr, writeErr = copyDownloadResponse(c.downloadOps.writer(temporary), response.Body)
+		downloaded, readErr, writeErr = copyDownloadResponse(target.Writer(), response.Body)
 		closeErr := response.Body.Close()
 		if writeErr != nil {
 			return result, localStorageFailure("Unable to store the image download safely")
@@ -498,25 +457,13 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	if ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
-	if err := c.downloadOps.syncFile(temporary); err != nil {
-		return result, localStorageFailure("Unable to store the image download safely")
-	}
-	if err := c.downloadOps.closeFile(temporary); err != nil {
-		return result, localStorageFailure("Unable to store the image download safely")
-	}
-	temporaryClosed = true
-	if ctx.Err() != nil {
+	installed, err := target.InstallContext(ctx, force)
+	installedResult := ImageDownload{Path: destination, Variant: variant, Bytes: downloaded}
+	if !installed.Visible && ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
-	var installed bool
-	if force {
-		installed, err = c.downloadOps.replace(temporaryPath, destination)
-	} else {
-		installed, err = c.downloadOps.installNoReplace(temporaryPath, destination)
-	}
-	installedResult := ImageDownload{Path: destination, Variant: variant, Bytes: downloaded}
-	if installed {
-		if syncErr := c.downloadOps.syncParent(directory); syncErr != nil {
+	if installed.Visible {
+		if !installed.Durable {
 			return installedResult, localStorageFailure("The image download is installed, but storage durability is uncertain")
 		}
 		if err != nil {
@@ -524,7 +471,7 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 		}
 		return installedResult, nil
 	}
-	if err != nil && errors.Is(err, os.ErrExist) {
+	if errors.Is(err, os.ErrExist) {
 		return result, destinationExistsFailure()
 	}
 	return result, localStorageFailure("Unable to store the image download safely")
@@ -561,14 +508,6 @@ func copyDownloadResponse(destination io.Writer, source io.Reader) (written int6
 		}
 	}
 	return written, nil, nil
-}
-
-func resetDownloadTemp(file *os.File) error {
-	if err := file.Truncate(0); err != nil {
-		return err
-	}
-	_, err := file.Seek(0, io.SeekStart)
-	return err
 }
 
 func localStorageFailure(message string) *output.Error {
