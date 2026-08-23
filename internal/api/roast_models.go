@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"regexp"
 	"strings"
@@ -18,9 +19,10 @@ const (
 )
 
 var (
-	canonicalRoastUUID = regexp.MustCompile(`^[0-9a-f]{12}[1-8][0-9a-f]{3}[89ab][0-9a-f]{15}$`)
-	canonicalSHA256    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	errInvalidRoast    = errors.New("invalid roast response")
+	canonicalRoastUUID    = regexp.MustCompile(`^[0-9a-f]{12}[1-8][0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	canonicalSHA256       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	canonicalAwareRFC3339 = regexp.MustCompile(`^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
+	errInvalidRoast       = errors.New("invalid roast response")
 )
 
 // RoastLabel is a label assigned to a private roast.
@@ -114,7 +116,7 @@ type CommentPage struct {
 func (value *RoastLabel) UnmarshalJSON(data []byte) error {
 	type wire RoastLabel
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, nil, "label_uuid", "name", "color", "archived"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, nil, "label_uuid", "name", "color", "archived"); err != nil {
 		return err
 	}
 	*value = RoastLabel(decoded)
@@ -124,7 +126,7 @@ func (value *RoastLabel) UnmarshalJSON(data []byte) error {
 func (value *RoastRevision) UnmarshalJSON(data []byte) error {
 	type wire RoastRevision
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded,
+	if err := decodeRequiredRoastObject(data, &decoded,
 		[]string{"parse_diagnostic_code", "parse_diagnostic_message"},
 		"revision_number", "sha256", "byte_size", "parser_version", "parse_state",
 		"parse_diagnostic_code", "parse_diagnostic_message", "uploaded_at", "metadata",
@@ -141,7 +143,7 @@ func (value *RoastRevision) UnmarshalJSON(data []byte) error {
 func (value *RoastListItem) UnmarshalJSON(data []byte) error {
 	type wire RoastListItem
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded,
+	if err := decodeRequiredRoastObject(data, &decoded,
 		[]string{"roast_at", "title", "batch_prefix", "batch_number", "batch_position", "operator", "machine", "machine_setup", "temperature_unit", "duration_seconds", "green_weight_kg", "roasted_weight_kg"},
 		"roast_uuid", "state", "roast_at", "title", "batch_prefix", "batch_number",
 		"batch_position", "operator", "machine", "machine_setup", "temperature_unit",
@@ -159,7 +161,7 @@ func (value *RoastListItem) UnmarshalJSON(data []byte) error {
 func (value *RoastLinks) UnmarshalJSON(data []byte) error {
 	type wire RoastLinks
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, nil, "self", "chart", "revisions"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, nil, "self", "chart", "revisions"); err != nil {
 		return err
 	}
 	*value = RoastLinks(decoded)
@@ -177,7 +179,7 @@ func (value *RoastDetail) UnmarshalJSON(data []byte) error {
 		Links           RoastLinks      `json:"links"`
 	}
 	var decoded detailFields
-	if err := decodeRequiredObject(data, &decoded, []string{"current_revision"}, "current_metadata", "current_revision", "links"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, []string{"current_revision"}, "current_metadata", "current_revision", "links"); err != nil {
 		return err
 	}
 	if !isJSONObject(decoded.CurrentMetadata) {
@@ -190,7 +192,7 @@ func (value *RoastDetail) UnmarshalJSON(data []byte) error {
 func (value *CommentView) UnmarshalJSON(data []byte) error {
 	type wire CommentView
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded,
+	if err := decodeRequiredRoastObject(data, &decoded,
 		[]string{"body", "edited_at", "deleted_at"},
 		"comment_uuid", "roast_uuid", "author_nickname", "body", "created_at", "edited_at",
 		"deleted_at", "is_deleted", "can_edit", "can_delete"); err != nil {
@@ -203,7 +205,7 @@ func (value *CommentView) UnmarshalJSON(data []byte) error {
 func (value *RoastPage) UnmarshalJSON(data []byte) error {
 	type wire RoastPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
 		return err
 	}
 	if err := rejectNullArrayElements(data, "items"); err != nil {
@@ -216,7 +218,7 @@ func (value *RoastPage) UnmarshalJSON(data []byte) error {
 func (value *RoastRevisionPage) UnmarshalJSON(data []byte) error {
 	type wire RoastRevisionPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
 		return err
 	}
 	if err := rejectNullArrayElements(data, "items"); err != nil {
@@ -229,7 +231,7 @@ func (value *RoastRevisionPage) UnmarshalJSON(data []byte) error {
 func (value *CommentPage) UnmarshalJSON(data []byte) error {
 	type wire CommentPage
 	var decoded wire
-	if err := decodeRequiredObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
+	if err := decodeRequiredRoastObject(data, &decoded, []string{"next_cursor"}, "items", "next_cursor"); err != nil {
 		return err
 	}
 	if err := rejectNullArrayElements(data, "items"); err != nil {
@@ -290,9 +292,16 @@ func (value RoastDetail) validate() error {
 		if value.RevisionCount != 0 || value.CurrentRevision != nil {
 			return errInvalidRoast
 		}
-	case "parsed", "parse_failed":
+	case "parsed":
 		if value.RevisionCount < 1 || value.CurrentRevision == nil ||
-			value.CurrentRevision.RevisionNumber != value.RevisionCount {
+			value.CurrentRevision.RevisionNumber != value.RevisionCount ||
+			value.CurrentRevision.ParseState != "parsed" {
+			return errInvalidRoast
+		}
+	case "parse_failed":
+		if value.RevisionCount < 1 || value.CurrentRevision == nil ||
+			value.CurrentRevision.RevisionNumber != value.RevisionCount ||
+			value.CurrentRevision.ParseState != "failed" {
 			return errInvalidRoast
 		}
 	default:
@@ -312,29 +321,97 @@ func (value CommentView) validate() error {
 		return errInvalidRoast
 	}
 	if value.IsDeleted {
-		if value.Body != nil || value.DeletedAt == nil || value.CanEdit {
+		if value.Body != nil || value.DeletedAt == nil {
 			return errInvalidRoast
 		}
-	} else {
-		if value.Body == nil || value.DeletedAt != nil || !validCommentBody(*value.Body) || value.CanEdit != value.CanDelete {
-			return errInvalidRoast
-		}
+	} else if value.Body == nil || value.DeletedAt != nil || !validCommentBody(*value.Body) {
+		return errInvalidRoast
 	}
-	if value.CanEdit && !value.CanDelete {
+	if value.CanEdit || value.CanDelete {
 		return errInvalidRoast
 	}
 	return nil
 }
 
 func validateRoastPage[T any](items []T, next *string) error {
-	if items == nil || (next != nil && (*next == "" || len(*next) > 4096)) {
+	if items == nil || (next != nil && (len(items) == 0 || *next == "" || len(*next) > maxRoastCursorBytes)) {
+		return errInvalidRoast
+	}
+	return nil
+}
+
+func decodeRequiredRoastObject(data []byte, destination any, nullable []string, required ...string) error {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return errInvalidRoast
+	}
+	return decodeRequiredObject(data, destination, nullable, required...)
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := consumeUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return errInvalidRoast
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errInvalidRoast
+			}
+			if _, exists := seen[key]; exists {
+				return errInvalidRoast
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return errInvalidRoast
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return errInvalidRoast
+		}
+	default:
 		return errInvalidRoast
 	}
 	return nil
 }
 
 func isJSONObject(raw json.RawMessage) bool {
-	if len(raw) == 0 || !utf8.Valid(raw) || validateJSONStringSurrogateEscapes(raw) != nil {
+	if len(raw) == 0 || !utf8.Valid(raw) || validateJSONStringSurrogateEscapes(raw) != nil || rejectDuplicateJSONKeys(raw) != nil {
 		return false
 	}
 	var object map[string]json.RawMessage
@@ -342,14 +419,11 @@ func isJSONObject(raw json.RawMessage) bool {
 }
 
 func validAwareTimestamp(value string) bool {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil || parsed.Year() < 1 {
+	if !canonicalAwareRFC3339.MatchString(value) {
 		return false
 	}
-	// RFC3339 requires an explicit offset or Z. This check also prevents a
-	// future parser relaxation from accepting timezone-naive values.
-	separator := strings.LastIndexAny(value, "Zz+-")
-	return separator > strings.IndexByte(value, 'T')
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil && parsed.Year() >= 1
 }
 
 func validOptionalAwareTimestamp(value *string) bool {

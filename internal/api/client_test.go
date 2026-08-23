@@ -18,17 +18,22 @@ import (
 
 func TestClientResponseValidatorReceivesClonedHeadersBeforeSuccessDecode(t *testing.T) {
 	const token = "response-validator-secret-token"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Add("X-Contract", "one")
-		w.Header().Add("X-Contract", "two")
-		_, _ = io.WriteString(w, `{"value":"ok"}`)
-	}))
-	defer server.Close()
-	client, err := NewClient(server.URL, token, time.Second)
+	const serverURL = "http://127.0.0.1"
+	transportHeader := http.Header{
+		"Content-Type": []string{"application/json"},
+		"X-Contract":   []string{"one", "two"},
+	}
+	client, err := NewClient(serverURL, token, time.Second)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     transportHeader,
+			Body:       io.NopCloser(strings.NewReader(`{"value":"ok"}`)),
+		}, nil
+	})
 	called := false
 	var response struct {
 		Value string `json:"value"`
@@ -41,21 +46,28 @@ func TestClientResponseValidatorReceivesClonedHeadersBeforeSuccessDecode(t *test
 				t.Fatalf("validator status/header = %d/%#v", status, header)
 			}
 			for name, values := range header {
-				if strings.Contains(name, token) || strings.Contains(name, server.URL) {
+				if strings.Contains(name, token) || strings.Contains(name, serverURL) {
 					t.Fatalf("validator received secret-bearing header name %q", name)
 				}
 				for _, value := range values {
-					if strings.Contains(value, token) || strings.Contains(value, server.URL) {
+					if strings.Contains(value, token) || strings.Contains(value, serverURL) {
 						t.Fatalf("validator received secret-bearing header value")
 					}
 				}
 			}
 			header.Set("X-Contract", "mutated-clone")
+			header.Add("X-Callback-Only", "value")
 			return nil
 		},
 	}, &response)
 	if failure != nil || !called || response.Value != "ok" {
 		t.Fatalf("Do() response=%#v failure=%#v called=%v", response, failure, called)
+	}
+	if got := transportHeader.Values("X-Contract"); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Fatalf("transport X-Contract mutated through validator: %#v", got)
+	}
+	if _, exists := transportHeader["X-Callback-Only"]; exists {
+		t.Fatalf("transport header gained callback-only value: %#v", transportHeader)
 	}
 }
 

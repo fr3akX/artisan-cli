@@ -186,7 +186,7 @@ func roastListQuery(options RoastListOptions) (url.Values, *output.Error) {
 		return nil, failure
 	}
 	if options.Search != "" {
-		if !validRoastFilterText(options.Search, 200) {
+		if strings.ContainsRune(options.Search, '\x00') || !validRoastFilterText(options.Search, 200) {
 			return nil, invalidRoastFilter()
 		}
 		query.Set("search", options.Search)
@@ -257,8 +257,11 @@ func normalizeRoastFilterTime(raw string) (*time.Time, *output.Error) {
 	if !utf8.ValidString(raw) || strings.TrimSpace(raw) != raw {
 		return nil, invalidRoastFilter()
 	}
+	if !validAwareTimestamp(raw) {
+		return nil, invalidRoastFilter()
+	}
 	parsed, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil || parsed.Year() < 1 || !validAwareTimestamp(raw) {
+	if err != nil {
 		return nil, invalidRoastFilter()
 	}
 	return &parsed, nil
@@ -288,6 +291,9 @@ func collectRoastPages[T any](initialCursor string, maxItems int, fetch func(str
 		pageItems, nextCursor, failure := fetch(cursor)
 		if failure != nil {
 			return nil, failure
+		}
+		if nextCursor != nil && len(pageItems) == 0 {
+			return nil, &output.Error{ExitCode: 9, Code: "invalid_server_response", Message: "The server returned an empty roast page with a continuation cursor"}
 		}
 		if len(pageItems) > maxItems-len(items) {
 			return nil, &output.Error{ExitCode: 9, Code: "pagination_limit_exceeded", Message: "Roast pagination exceeded the 10000 item safety limit"}

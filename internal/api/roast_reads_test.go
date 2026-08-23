@@ -87,6 +87,24 @@ func TestListRoastsMapsEveryFilterAndCanonicalizesTimes(t *testing.T) {
 	}
 }
 
+func TestRoastFilterCanonicalizesValidRFC3339Boundaries(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "2026-01-01T00:00:00Z", want: "2026-01-01T00:00:00Z"},
+		{raw: "2024-02-29T23:59:59.1+23:59", want: "2024-02-29T00:00:59.1Z"},
+		{raw: "2026-12-31T23:59:59.999999999-23:59", want: "2027-01-01T23:58:59.999999999Z"},
+		{raw: "2026-01-01T00:00:00+00:00", want: "2026-01-01T00:00:00Z"},
+	}
+	for _, tt := range tests {
+		query, failure := roastListQuery(RoastListOptions{RoastAtFrom: tt.raw})
+		if failure != nil || query.Get("roast_at_from") != tt.want {
+			t.Errorf("roastListQuery(%q) = %q, %#v; want %q", tt.raw, query.Get("roast_at_from"), failure, tt.want)
+		}
+	}
+}
+
 func TestListRoastsOmitsZeroValues(t *testing.T) {
 	var query url.Values
 	client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -108,10 +126,16 @@ func TestValidateRoastListOptionsRejectsInvalidFiltersBeforeNetwork(t *testing.T
 		writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
 	})
 	invalid := []RoastListOptions{
-		{Limit: -1}, {Limit: 101}, {Cursor: strings.Repeat("x", 4097)},
-		{Search: strings.Repeat("x", 201)}, {Machine: strings.Repeat("x", 101)},
+		{Limit: -1}, {Limit: 101}, {Cursor: strings.Repeat("x", 513)},
+		{Search: strings.Repeat("x", 201)}, {Search: "review\x00hidden"}, {Machine: strings.Repeat("x", 101)},
 		{State: "deleted"}, {LabelID: "invalid"},
 		{RoastAtFrom: "2026-08-23T12:00:00"},
+		{RoastAtFrom: "2026-08-23T12:00:00+24:00"},
+		{RoastAtFrom: "2026-08-23T12:00:00+01:60"},
+		{RoastAtFrom: "2026-08-23T12:00:00,1Z"},
+		{RoastAtFrom: "2026-08-23T12:00:00.1234567890Z"},
+		{RoastAtFrom: "2026-08-23t12:00:00Z"},
+		{RoastAtFrom: "2026-08-23T12:00:00z"},
 		{RoastAtFrom: "2026-08-23T12:00:00+00:00", RoastAtTo: "2026-08-23T11:59:59Z"},
 	}
 	for _, options := range invalid {
@@ -228,13 +252,13 @@ func TestAllRoastReadsFollowCursorsPreserveFiltersAndBoundTraversal(t *testing.T
 	client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
 		listQueries = append(listQueries, r.URL.Query())
 		if r.URL.Query().Get("cursor") == "" {
-			writeRoastJSON(w, `{"items":[],"next_cursor":"next"}`)
+			writeRoastJSON(w, `{"items":[`+validRoastListItemJSON()+`],"next_cursor":"next"}`)
 			return
 		}
-		writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+		writeRoastJSON(w, `{"items":[`+validRoastListItemJSON()+`],"next_cursor":null}`)
 	})
 	page, failure := client.ListAllRoasts(context.Background(), RoastListOptions{Limit: 1, Search: "review", State: "parsed"})
-	if failure != nil || page.NextCursor != nil || len(listQueries) != 2 {
+	if failure != nil || page.NextCursor != nil || len(page.Items) != 2 || len(listQueries) != 2 {
 		t.Fatalf("page=%#v failure=%#v queries=%#v", page, failure, listQueries)
 	}
 	for _, query := range listQueries {
@@ -258,7 +282,7 @@ func TestAllRoastReadsFollowCursorsPreserveFiltersAndBoundTraversal(t *testing.T
 	calls := 0
 	_, failure = collectRoastPages("", MaxRoastAggregateItems, func(string) ([]int, *string, *output.Error) {
 		calls++
-		return nil, stringPointer(fmt.Sprintf("cursor-%d", calls)), nil
+		return []int{calls}, stringPointer(fmt.Sprintf("cursor-%d", calls)), nil
 	})
 	if failure == nil || failure.Code != "pagination_page_limit_exceeded" || calls != MaxRoastAggregatePages {
 		t.Fatalf("page bound failure=%#v calls=%d", failure, calls)
@@ -270,10 +294,20 @@ func TestAllRoastRevisionAndCommentReadsReturnNoCursor(t *testing.T) {
 	client := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
 		calls[r.URL.Path]++
 		if r.URL.Query().Get("cursor") == "" {
-			writeRoastJSON(w, `{"items":[],"next_cursor":"next"}`)
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/revisions"):
+				writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":"next"}`)
+			case strings.HasSuffix(r.URL.Path, "/comments"):
+				writeRoastJSON(w, `{"items":[`+validDeletedCommentJSON()+`],"next_cursor":"next"}`)
+			}
 			return
 		}
-		writeRoastJSON(w, `{"items":[],"next_cursor":null}`)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/revisions"):
+			writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":null}`)
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			writeRoastJSON(w, `{"items":[`+validDeletedCommentJSON()+`],"next_cursor":null}`)
+		}
 	})
 	revisions, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{})
 	if failure != nil || revisions.NextCursor != nil {
@@ -285,6 +319,101 @@ func TestAllRoastRevisionAndCommentReadsReturnNoCursor(t *testing.T) {
 	}
 	if calls["/api/v1/roasts/"+roastUUID+"/revisions"] != 2 || calls["/api/v1/roasts/"+roastUUID+"/comments"] != 2 {
 		t.Fatalf("calls = %#v", calls)
+	}
+}
+
+func TestRoastAggregateReadsRejectEmptyContinuationPagesWithoutFollowing(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*Client) *output.Error
+	}{
+		{name: "roasts", call: func(client *Client) *output.Error {
+			_, failure := client.ListAllRoasts(context.Background(), RoastListOptions{})
+			return failure
+		}},
+		{name: "revisions", call: func(client *Client) *output.Error {
+			_, failure := client.AllRoastRevisions(context.Background(), roastUUID, PageOptions{})
+			return failure
+		}},
+		{name: "comments", call: func(client *Client) *output.Error {
+			_, failure := client.AllRoastComments(context.Background(), roastUUID, PageOptions{})
+			return failure
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			client := roastAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				writeRoastJSON(w, `{"items":[],"next_cursor":"next"}`)
+			})
+			failure := tt.call(client)
+			if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
+			}
+		})
+	}
+}
+
+func TestRoastResponseCursorMatchesRequestByteContract(t *testing.T) {
+	requestClient := roastAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := len(r.URL.Query().Get("cursor")); got != 512 {
+			t.Fatalf("request cursor bytes = %d, want 512", got)
+		}
+		writeRoastJSON(w, `{"items":[`+validRoastListItemJSON()+`],"next_cursor":null}`)
+	})
+	if _, failure := requestClient.ListRoasts(context.Background(), RoastListOptions{Cursor: strings.Repeat("x", 512)}); failure != nil {
+		t.Fatalf("512-byte request cursor rejected: %#v", failure)
+	}
+
+	pages := []struct {
+		name string
+		item string
+		call func(*Client) (*string, *output.Error)
+	}{
+		{name: "roasts", item: validRoastListItemJSON(), call: func(client *Client) (*string, *output.Error) {
+			page, failure := client.ListRoasts(context.Background(), RoastListOptions{})
+			return page.NextCursor, failure
+		}},
+		{name: "revisions", item: validRoastRevisionJSON(), call: func(client *Client) (*string, *output.Error) {
+			page, failure := client.RoastRevisions(context.Background(), roastUUID, PageOptions{})
+			return page.NextCursor, failure
+		}},
+		{name: "comments", item: validDeletedCommentJSON(), call: func(client *Client) (*string, *output.Error) {
+			page, failure := client.RoastComments(context.Background(), roastUUID, PageOptions{})
+			return page.NextCursor, failure
+		}},
+	}
+	for _, page := range pages {
+		for _, length := range []int{512, 513} {
+			t.Run(page.name+"/"+fmt.Sprint(length), func(t *testing.T) {
+				client := roastAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+					writeRoastJSON(w, `{"items":[`+page.item+`],"next_cursor":"`+strings.Repeat("x", length)+`"}`)
+				})
+				nextCursor, failure := page.call(client)
+				if length == 512 {
+					if failure != nil || nextCursor == nil || len(*nextCursor) != 512 {
+						t.Fatalf("next cursor = %#v, failure = %#v", nextCursor, failure)
+					}
+					return
+				}
+				if failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+					t.Fatalf("failure = %#v", failure)
+				}
+			})
+		}
+	}
+}
+
+func TestRoastReadsRejectDuplicateJSONKeysAsInvalidServerResponse(t *testing.T) {
+	client := roastAPIClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeRoastJSON(w, `{"items":[],"items":[],"next_cursor":null}`)
+	})
+	if _, failure := client.ListRoasts(context.Background(), RoastListOptions{}); failure == nil || failure.Code != "invalid_server_response" || failure.ExitCode != 9 {
+		t.Fatalf("failure = %#v", failure)
 	}
 }
 
@@ -312,6 +441,41 @@ func TestRoastReadsRejectRedirectMalformedResponseAndSecretReflection(t *testing
 				t.Fatalf("failure = %#v", failure)
 			}
 		})
+	}
+}
+
+func TestRoastReadsAllowConfiguredServerURLInArbitraryResponseData(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/roasts":
+			item := strings.Replace(validRoastListItemJSON(), `"title":"Review roast"`, `"title":"`+server.URL+`"`, 1)
+			writeRoastJSON(w, `{"items":[`+item+`],"next_cursor":null}`)
+		case "/api/v1/roasts/" + roastUUID:
+			detail := strings.Replace(validRoastDetailJSON(), `"roast":"private"`, `"roast":"`+server.URL+`"`, 1)
+			writeRoastJSON(w, detail)
+		case "/api/v1/roasts/" + roastUUID + "/comments":
+			comment := strings.Replace(validDeletedCommentJSON(), `"body":null`, `"body":"`+server.URL+`"`, 1)
+			comment = strings.Replace(comment, `"deleted_at":"`+roastTimestamp2+`"`, `"deleted_at":null`, 1)
+			comment = strings.Replace(comment, `"is_deleted":true`, `"is_deleted":false`, 1)
+			writeRoastJSON(w, `{"items":[`+comment+`],"next_cursor":null}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "url-data-token", time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if _, failure := client.ListRoasts(context.Background(), RoastListOptions{}); failure != nil {
+		t.Fatalf("title containing server URL rejected: %#v", failure)
+	}
+	if _, failure := client.Roast(context.Background(), roastUUID); failure != nil {
+		t.Fatalf("metadata containing server URL rejected: %#v", failure)
+	}
+	if _, failure := client.RoastComments(context.Background(), roastUUID, PageOptions{}); failure != nil {
+		t.Fatalf("comment containing server URL rejected: %#v", failure)
 	}
 }
 

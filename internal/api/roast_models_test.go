@@ -159,11 +159,18 @@ func TestRoastDetailRejectsStateCountAndCurrentRevisionIncoherence(t *testing.T)
 	if err := json.Unmarshal([]byte(awaiting), &RoastDetail{}); err != nil {
 		t.Fatalf("valid awaiting detail rejected: %v", err)
 	}
+	parseFailed := strings.Replace(validRoastDetailJSON(), `"state":"parsed"`, `"state":"parse_failed"`, 1)
+	parseFailed = strings.Replace(parseFailed, `"parse_state":"parsed"`, `"parse_state":"failed"`, 1)
+	if err := json.Unmarshal([]byte(parseFailed), &RoastDetail{}); err != nil {
+		t.Fatalf("valid parse-failed detail rejected: %v", err)
+	}
 	for _, payload := range []string{
 		strings.Replace(validRoastDetailJSON(), `"revision_count":1`, `"revision_count":2`, 1),
 		strings.Replace(validRoastDetailJSON(), `"current_revision":`+validRoastRevisionJSON(), `"current_revision":null`, 1),
 		strings.Replace(awaiting, `"revision_count":0`, `"revision_count":1`, 1),
 		strings.Replace(awaiting, `"current_revision":null`, `"current_revision":`+validRoastRevisionJSON(), 1),
+		strings.Replace(validRoastDetailJSON(), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1),
+		strings.Replace(validRoastDetailJSON(), `"state":"parsed"`, `"state":"parse_failed"`, 1),
 	} {
 		if err := json.Unmarshal([]byte(payload), &RoastDetail{}); err == nil {
 			t.Fatalf("accepted incoherent detail: %s", payload)
@@ -209,11 +216,97 @@ func TestCommentModelRejectsIdentityDeletionAndPermissionIncoherence(t *testing.
 		strings.Replace(active, `"body":"Evidence"`, `"body":null`, 1),
 		strings.Replace(active, `"can_edit":false,"can_delete":false`, `"can_edit":true,"can_delete":false`, 1),
 		strings.Replace(active, `"can_edit":false,"can_delete":false`, `"can_edit":false,"can_delete":true`, 1),
+		strings.Replace(active, `"can_edit":false,"can_delete":false`, `"can_edit":true,"can_delete":true`, 1),
 		strings.Replace(validDeletedCommentJSON(), `"can_edit":false`, `"can_edit":true`, 1),
+		strings.Replace(validDeletedCommentJSON(), `"can_delete":false`, `"can_delete":true`, 1),
 	} {
 		var comment CommentView
 		if err := json.Unmarshal([]byte(payload), &comment); err == nil {
 			t.Fatalf("accepted incoherent comment: %s", payload)
+		}
+	}
+}
+
+func TestRoastModelsRejectDuplicateJSONKeysAtEveryTypedResponseLevel(t *testing.T) {
+	duplicateLabel := strings.Replace(validRoastListItemJSON(), `"name":"Review"`, `"name":"first","name":"Review"`, 1)
+	duplicateRevision := strings.Replace(validRoastRevisionJSON(), `"sha256":"`+roastSHA256+`"`, `"sha256":"`+roastSHA256+`","sha256":"`+roastSHA256+`"`, 1)
+	duplicateLink := strings.Replace(validRoastDetailJSON(), `"self":"/api/v1/roasts/`, `"self":"ignored","self":"/api/v1/roasts/`, 1)
+	tests := []struct {
+		name    string
+		payload string
+		target  any
+	}{
+		{name: "roast item", payload: strings.Replace(validRoastListItemJSON(), `"state":"parsed"`, `"state":"parsed","state":"parsed"`, 1), target: &RoastListItem{}},
+		{name: "roast detail", payload: strings.Replace(validRoastDetailJSON(), `"current_metadata":`, `"current_metadata":{},"current_metadata":`, 1), target: &RoastDetail{}},
+		{name: "label", payload: duplicateLabel, target: &RoastListItem{}},
+		{name: "current revision", payload: strings.Replace(validRoastDetailJSON(), validRoastRevisionJSON(), duplicateRevision, 1), target: &RoastDetail{}},
+		{name: "links", payload: duplicateLink, target: &RoastDetail{}},
+		{name: "revision", payload: duplicateRevision, target: &RoastRevision{}},
+		{name: "comment", payload: strings.Replace(validDeletedCommentJSON(), `"body":null`, `"body":null,"body":null`, 1), target: &CommentView{}},
+		{name: "roast page", payload: `{"items":[],"items":[],"next_cursor":null}`, target: &RoastPage{}},
+		{name: "revision page", payload: `{"items":[],"items":[],"next_cursor":null}`, target: &RoastRevisionPage{}},
+		{name: "comment page", payload: `{"items":[],"items":[],"next_cursor":null}`, target: &CommentPage{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tt.payload), tt.target); err == nil {
+				t.Fatalf("accepted duplicate key payload: %s", tt.payload)
+			}
+		})
+	}
+}
+
+func TestRoastPagesRequireProgressAndUseTheRequestCursorByteLimit(t *testing.T) {
+	pages := []struct {
+		name   string
+		item   string
+		target func() any
+	}{
+		{name: "roasts", item: validRoastListItemJSON(), target: func() any { return &RoastPage{} }},
+		{name: "revisions", item: validRoastRevisionJSON(), target: func() any { return &RoastRevisionPage{} }},
+		{name: "comments", item: validDeletedCommentJSON(), target: func() any { return &CommentPage{} }},
+	}
+	for _, page := range pages {
+		t.Run(page.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(`{"items":[],"next_cursor":"next"}`), page.target()); err == nil {
+				t.Fatal("accepted an empty page with a continuation cursor")
+			}
+			validPage := `{"items":[` + page.item + `],"next_cursor":"` + strings.Repeat("x", 512) + `"}`
+			if err := json.Unmarshal([]byte(validPage), page.target()); err != nil {
+				t.Fatalf("512-byte response cursor rejected: %v", err)
+			}
+			invalidPage := `{"items":[` + page.item + `],"next_cursor":"` + strings.Repeat("x", 513) + `"}`
+			if err := json.Unmarshal([]byte(invalidPage), page.target()); err == nil {
+				t.Fatal("513-byte response cursor accepted")
+			}
+		})
+	}
+}
+
+func TestStrictTimezoneAwareRFC3339Validation(t *testing.T) {
+	valid := []string{
+		"2026-01-01T00:00:00Z",
+		"2024-02-29T23:59:59.1+23:59",
+		"2026-12-31T23:59:59.999999999-23:59",
+		"2026-01-01T00:00:00+00:00",
+	}
+	for _, value := range valid {
+		if !validAwareTimestamp(value) {
+			t.Errorf("validAwareTimestamp(%q) = false", value)
+		}
+	}
+	invalid := []string{
+		"2026-01-01T00:00:00+24:00",
+		"2026-01-01T00:00:00+01:60",
+		"2026-01-01T00:00:00,1Z",
+		"2026-01-01T00:00:00.1234567890Z",
+		"2026-01-01t00:00:00Z",
+		"2026-01-01T00:00:00z",
+		"2026-01-01T00:00:00",
+	}
+	for _, value := range invalid {
+		if validAwareTimestamp(value) {
+			t.Errorf("validAwareTimestamp(%q) = true", value)
 		}
 	}
 }
