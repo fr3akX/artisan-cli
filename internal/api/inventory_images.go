@@ -459,17 +459,20 @@ func (c *Client) DownloadInventoryImage(ctx context.Context, rawLotID, rawImageI
 	}
 	installed, err := target.InstallContext(ctx, force)
 	installedResult := ImageDownload{Path: destination, Variant: variant, Bytes: downloaded}
-	if !installed.Visible && ctx.Err() != nil {
+	if installed.Publication == publicationNone && ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
-	if installed.Visible {
-		if !installed.Durable {
+	if installed.Visible() {
+		if !installed.Durable() {
 			return installedResult, localStorageFailure("The image download is installed, but storage durability is uncertain")
 		}
 		if err != nil {
 			return installedResult, localStorageFailure("The image download is installed, but a local storage operation did not complete")
 		}
 		return installedResult, nil
+	}
+	if installed.Publication != publicationNone {
+		return installedResult, localStorageFailure("The image download may have been published, but its requested path identity is uncertain")
 	}
 	if errors.Is(err, os.ErrExist) {
 		return result, destinationExistsFailure()

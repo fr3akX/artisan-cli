@@ -3,86 +3,207 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
+	"unsafe"
 
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 	"golang.org/x/sys/windows"
 )
 
-// downloadFileIdentity retains a DELETE-capable handle and Windows file ID so
-// publication renames the verified object rather than reopening its path.
-type downloadFileIdentity struct {
-	handle windows.Handle
-	info   windows.ByHandleFileInformation
+type heldWindowsDownloadPublication struct {
+	parent     windows.Handle
+	parentInfo windows.ByHandleFileInformation
+	parentPath string
+	writer     *os.File
+	source     *os.File
+	sourceInfo windows.ByHandleFileInformation
+	sourceName string
+	closed     bool
 }
 
-func captureDownloadFileIdentity(file *os.File) (*downloadFileIdentity, error) {
-	path, err := windows.UTF16PtrFromString(file.Name())
+func protectDownloadFile(file *os.File) error { return securefile.ProtectPrivateFile(file) }
+
+func newHeldDownloadPublication(target *downloadTarget) (heldDownloadPublication, error) {
+	parent, info, err := openWindowsDownloadParent(target.directory)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := windows.CreateFile(
-		path,
-		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	if target.operations.afterParentHeld != nil {
+		if err := target.operations.afterParentHeld(target); err != nil {
+			_ = windows.CloseHandle(parent)
+			return nil, err
+		}
+	}
+	writer, name, err := createWindowsDownloadSource(parent, target, "."+filepath.Base(target.destination)+".tmp-")
 	if err != nil {
+		_ = windows.CloseHandle(parent)
 		return nil, err
 	}
-	info, err := downloadWindowsFileInfo(handle)
+	process := windows.CurrentProcess()
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(process, windows.Handle(writer.Fd()), process, &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		_ = writer.Close()
+		_ = windows.CloseHandle(parent)
+		return nil, err
+	}
+	source := os.NewFile(uintptr(duplicate), writer.Name())
+	sourceInfo, err := windowsDownloadInfo(duplicate)
 	if err != nil {
+		_ = source.Close()
+		_ = writer.Close()
+		_ = windows.CloseHandle(parent)
+		return nil, err
+	}
+	return &heldWindowsDownloadPublication{parent: parent, parentInfo: info, parentPath: target.directory, writer: writer, source: source, sourceInfo: sourceInfo, sourceName: name}, nil
+}
+
+func openWindowsDownloadParent(path string) (windows.Handle, windows.ByHandleFileInformation, error) {
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, windows.ByHandleFileInformation{}, err
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return windows.InvalidHandle, windows.ByHandleFileInformation{}, err
+	}
+	info, err := windowsDownloadInfo(handle)
+	if err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		_ = windows.CloseHandle(handle)
-		return nil, err
+		if err != nil {
+			return windows.InvalidHandle, info, err
+		}
+		return windows.InvalidHandle, info, errors.New("download parent is not a directory")
 	}
-	return &downloadFileIdentity{handle: handle, info: info}, nil
+	return handle, info, nil
 }
 
-func downloadWindowsFileInfo(handle windows.Handle) (windows.ByHandleFileInformation, error) {
+func createWindowsDownloadSource(parent windows.Handle, target *downloadTarget, prefix string) (*os.File, string, error) {
+	if target.operations.createTemp != nil {
+		file, err := target.operations.createTemp(target.directory, prefix+"*")
+		return file, filepath.Base(fileName(file)), err
+	}
+	for attempt := 0; attempt < 100; attempt++ {
+		var value [16]byte
+		if _, err := rand.Read(value[:]); err != nil {
+			return nil, "", err
+		}
+		name := prefix + hex.EncodeToString(value[:])
+		objectName, err := windows.NewNTUnicodeString(name)
+		if err != nil {
+			return nil, "", err
+		}
+		attributes := &windows.OBJECT_ATTRIBUTES{
+			Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+			RootDirectory: parent,
+			ObjectName:    objectName,
+			Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		}
+		var status windows.IO_STATUS_BLOCK
+		var handle windows.Handle
+		err = windows.NtCreateFile(&handle,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE|windows.READ_CONTROL|windows.WRITE_DAC|windows.SYNCHRONIZE,
+			attributes, &status, nil, windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			windows.FILE_CREATE,
+			windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_WRITE_THROUGH|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+			0, 0)
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return os.NewFile(uintptr(handle), filepath.Join(target.directory, name)), name, nil
+	}
+	return nil, "", errors.New("could not allocate held download source")
+}
+
+func fileName(file *os.File) string {
+	if file == nil {
+		return ""
+	}
+	return file.Name()
+}
+func windowsDownloadInfo(handle windows.Handle) (windows.ByHandleFileInformation, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return info, err
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		return info, errors.New("download temporary is reparse or not a regular file")
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return info, errors.New("download object is a reparse point")
 	}
 	return info, nil
 }
-
-func sameDownloadWindowsFile(left, right windows.ByHandleFileInformation) bool {
-	return left.VolumeSerialNumber == right.VolumeSerialNumber && left.FileIndexHigh == right.FileIndexHigh && left.FileIndexLow == right.FileIndexLow
+func sameWindowsDownloadInfo(a, b windows.ByHandleFileInformation) bool {
+	return a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileIndexHigh == b.FileIndexHigh && a.FileIndexLow == b.FileIndexLow
 }
-
-func (identity *downloadFileIdentity) matches(path string) (bool, error) {
-	pointer, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return false, err
-	}
-	handle, err := windows.CreateFile(
-		pointer,
-		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return false, err
-	}
-	defer windows.CloseHandle(handle)
-	info, err := downloadWindowsFileInfo(handle)
-	return err == nil && sameDownloadWindowsFile(identity.info, info), err
+func (p *heldWindowsDownloadPublication) writerFile() *os.File     { return p.writer }
+func (p *heldWindowsDownloadPublication) heldSourceFile() *os.File { return p.source }
+func (p *heldWindowsDownloadPublication) temporaryPath() string {
+	return filepath.Join(p.parentPath, p.sourceName)
 }
-
-func (identity *downloadFileIdentity) close() error {
-	if identity == nil || identity.handle == windows.InvalidHandle {
+func (p *heldWindowsDownloadPublication) closeWriterBeforePublish() bool { return true }
+func (p *heldWindowsDownloadPublication) close() error {
+	if p.closed {
 		return nil
 	}
-	err := windows.CloseHandle(identity.handle)
-	identity.handle = windows.InvalidHandle
-	return err
+	p.closed = true
+	var sourceErr error
+	if p.source != nil {
+		sourceErr = p.source.Close()
+		p.source = nil
+	}
+	return errors.Join(sourceErr, windows.CloseHandle(p.parent))
 }
+func (p *heldWindowsDownloadPublication) pathMatches() bool {
+	handle, info, err := openWindowsDownloadParent(p.parentPath)
+	if err != nil {
+		return false
+	}
+	_ = windows.CloseHandle(handle)
+	return sameWindowsDownloadInfo(p.parentInfo, info)
+}
+func openWindowsDownloadRelative(parent windows.Handle, name string, access, share uint32) (windows.Handle, error) {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: parent,
+		ObjectName: objectName, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var status windows.IO_STATUS_BLOCK
+	var handle windows.Handle
+	err = windows.NtCreateFile(&handle, access|windows.SYNCHRONIZE, attributes, &status, nil,
+		windows.FILE_ATTRIBUTE_NORMAL, share, windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0, 0)
+	return handle, err
+}
+
+func (p *heldWindowsDownloadPublication) sourceNameMatches() bool {
+	handle, err := openWindowsDownloadRelative(p.parent, p.sourceName, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	info, err := windowsDownloadInfo(handle)
+	return err == nil && sameWindowsDownloadInfo(info, p.sourceInfo)
+}
+func (p *heldWindowsDownloadPublication) abort(target *downloadTarget) error {
+	// Disposition is applied to the exact retained handle, never a name.
+	flags := uint32(0x1 | 0x2 | 0x8) // DELETE | POSIX_SEMANTICS | ON_CLOSE
+	if err := windows.SetFileInformationByHandle(windows.Handle(p.source.Fd()), windows.FileDispositionInfoEx, (*byte)(unsafePointer(&flags)), uint32Size()); err == nil {
+		return nil
+	}
+	value := byte(1)
+	return windows.SetFileInformationByHandle(windows.Handle(p.source.Fd()), windows.FileDispositionInfo, &value, 1)
+}
+
+// Helpers avoid exporting unsafe details outside the Windows implementation.
+func unsafePointer(value *uint32) *byte { return (*byte)(unsafe.Pointer(value)) }
+func uint32Size() uint32                { return uint32(unsafe.Sizeof(uint32(0))) }

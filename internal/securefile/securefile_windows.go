@@ -108,7 +108,9 @@ func openWindowsObject(path string, directory, verify bool) (*os.File, error) {
 }
 
 func protectPrivate(file *os.File, directory bool) error {
-	if err := applyPrivateACL(file.Name(), directory); err != nil {
+	// Bind protection to the exact opened object. A same-account namespace
+	// replacement must never redirect ACL changes to another file.
+	if err := applyPrivateACLHandle(windows.Handle(file.Fd()), directory); err != nil {
 		return err
 	}
 	return verifyPrivateHandle(windows.Handle(file.Fd()), directory)

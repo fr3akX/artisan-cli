@@ -159,17 +159,20 @@ func (c *Client) DownloadRoastProfile(ctx context.Context, rawRoastUUID string, 
 		Bytes: downloaded, SHA256: revision.SHA256,
 	}
 	installed, err := target.InstallContext(ctx, force)
-	if !installed.Visible && ctx.Err() != nil {
+	if installed.Publication == publicationNone && ctx.Err() != nil {
 		return result, contextOrNetworkFailure(ctx)
 	}
-	if installed.Visible {
-		if !installed.Durable {
+	if installed.Visible() {
+		if !installed.Durable() {
 			return installedResult, profileStorageFailure("The roast profile is installed, but storage durability is uncertain")
 		}
 		if err != nil {
 			return installedResult, profileStorageFailure("The roast profile is installed, but a local storage operation did not complete")
 		}
 		return installedResult, nil
+	}
+	if installed.Publication != publicationNone {
+		return installedResult, profileStorageFailure("The roast profile may have been published, but its requested path identity is uncertain")
 	}
 	if errors.Is(err, os.ErrExist) {
 		return result, destinationExistsFailure()

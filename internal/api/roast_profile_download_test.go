@@ -379,71 +379,25 @@ func TestDownloadRoastProfileCancellationClosesBodyWithoutRetryOrVisibility(t *t
 	assertNoDownloadTemps(t, destination)
 }
 
-func TestDownloadRoastProfileAbortRetainsSwappedTemporaryNamesAndClosesBody(t *testing.T) {
-	body := []byte("verified-profile")
-	sha := profileSHA(body)
-	destination := filepath.Join(t.TempDir(), "abort-source-swap.alog")
-	var closes atomic.Int32
-	client := profileClientWithTransport(t, body, sha, func(response *http.Response) {
-		response.Header.Set("X-Checksum-SHA256", strings.Repeat("a", 64))
-		response.Body = &failingDownloadReadCloser{data: body, closes: &closes}
-	})
-	var replacementPath, heldPath string
-	client.downloadOps.beforeAbort = func(source string) error {
-		replacementPath = source
-		heldPath = source + ".held"
-		if err := os.Rename(source, heldPath); err != nil {
-			return err
-		}
-		return os.WriteFile(source, []byte("racer-replacement"), 0o600)
-	}
-	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure == nil || failure.Code != "invalid_server_response" {
-		t.Fatalf("failure = %#v", failure)
-	}
-	if closes.Load() != 1 {
-		t.Fatalf("body closes = %d", closes.Load())
-	}
-	if contents, err := os.ReadFile(replacementPath); err != nil || string(contents) != "racer-replacement" {
-		t.Fatalf("replacement = %q, %v", contents, err)
-	}
-	if contents, err := os.ReadFile(heldPath); err != nil || len(contents) != 0 {
-		t.Fatalf("held verified temporary = %q, %v", contents, err)
-	}
-	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("destination visible: %v", err)
-	}
-}
-
-func TestDownloadRoastProfilePropagatesTemporarySourceIdentitySwapSafely(t *testing.T) {
+func TestDownloadRoastProfileRejectsHeldSourceMutationBeforePublication(t *testing.T) {
 	body := []byte("verified-profile")
 	sha := profileSHA(body)
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no force", true: "force existing"}[force], func(t *testing.T) {
-			destination := filepath.Join(t.TempDir(), "source-swap.alog")
+			destination := filepath.Join(t.TempDir(), "source-mutation.alog")
 			if force {
 				if err := os.WriteFile(destination, []byte("existing-destination"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
 			client := profileClientWithTransport(t, body, sha, nil)
-			var replacementPath, heldPath string
-			client.downloadOps.beforeInstall = func(source, _ string) error {
-				replacementPath = source
-				heldPath = source + ".held"
-				if err := os.Rename(source, heldPath); err != nil {
-					return err
-				}
-				return os.WriteFile(source, []byte("unverified-racer"), 0o600)
+			client.downloadOps.afterSealedBeforeCandidate = func(target *downloadTarget) error {
+				_, err := target.heldSourceFile().WriteAt([]byte("MUTATION"), 0)
+				return err
 			}
 			result, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, force)
 			if failure == nil || result != (RoastProfileDownload{}) || failure.Code != "local_storage_error" {
 				t.Fatalf("result=%#v failure=%#v", result, failure)
-			}
-			if contents, err := os.ReadFile(replacementPath); err != nil || string(contents) != "unverified-racer" {
-				t.Fatalf("racer replacement = %q, %v", contents, err)
-			}
-			if contents, err := os.ReadFile(heldPath); err != nil || !bytes.Equal(contents, body) {
-				t.Fatalf("held verified residue = %q, %v", contents, err)
 			}
 			if force {
 				if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing-destination" {
@@ -453,6 +407,30 @@ func TestDownloadRoastProfilePropagatesTemporarySourceIdentitySwapSafely(t *test
 				t.Fatalf("destination visible: %v", err)
 			}
 		})
+	}
+}
+
+func TestDownloadRoastProfileReportsAmbiguousPublicationSideEffects(t *testing.T) {
+	body := []byte("complete-profile")
+	sha := profileSHA(body)
+	destination := filepath.Join(t.TempDir(), "ambiguous.alog")
+	published := destination + ".published"
+	client := profileClientWithTransport(t, body, sha, nil)
+	client.downloadOps.afterNativeBeforeReconcile = func(*downloadTarget) error {
+		if err := os.Rename(destination, published); err != nil {
+			return err
+		}
+		return os.WriteFile(destination, []byte("competitor"), 0o600)
+	}
+	result, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false)
+	if failure == nil || failure.Message != "The roast profile may have been published, but its requested path identity is uncertain" || result.Path != destination || result.SHA256 != sha {
+		t.Fatalf("result=%#v failure=%#v", result, failure)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "competitor" {
+		t.Fatalf("competitor=%q", contents)
+	}
+	if contents, _ := os.ReadFile(published); !bytes.Equal(contents, body) {
+		t.Fatalf("published=%q", contents)
 	}
 }
 
@@ -471,10 +449,10 @@ func TestDownloadRoastProfileInstallAndDurabilityFailuresPropagate(t *testing.T)
 			ops.closeFile = func(file *os.File) error { _ = file.Close(); return errors.New("close") }
 		}, wantMessage: "Unable to store the roast profile safely"},
 		{name: "no replace install", inject: func(ops *downloadOperations) {
-			ops.installNoReplace = func(*downloadFileIdentity, string, string) (bool, error) { return false, errors.New("install") }
+			ops.nativeOperation = func(func() error) error { return errors.New("install") }
 		}, wantMessage: "Unable to store the roast profile safely"},
 		{name: "force install", force: true, inject: func(ops *downloadOperations) {
-			ops.replace = func(*downloadFileIdentity, string, string) (bool, error) { return false, errors.New("replace") }
+			ops.nativeOperation = func(func() error) error { return errors.New("replace") }
 		}, wantMessage: "Unable to store the roast profile safely"},
 		{name: "parent sync visible", inject: func(ops *downloadOperations) {
 			ops.syncParent = func(string) error { return errors.New("parent sync") }
@@ -521,17 +499,7 @@ func TestDownloadRoastProfileUsesPrivateTemporaryAndInstalledFile(t *testing.T) 
 	body := []byte("private-profile")
 	sha := profileSHA(body)
 	destination := filepath.Join(t.TempDir(), "private.alog")
-	client := profileClientWithTransport(t, body, sha, func(response *http.Response) {
-		matches, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*"))
-		if err != nil || len(matches) != 1 {
-			t.Fatalf("temporary matches = %v, %v", matches, err)
-		}
-		file, openErr := securefile.OpenPrivate(matches[0])
-		if openErr != nil {
-			t.Fatalf("temporary private contract: %v", openErr)
-		}
-		_ = file.Close()
-	})
+	client := profileClientWithTransport(t, body, sha, nil)
 	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure != nil {
 		t.Fatal(failure)
 	}
@@ -564,12 +532,11 @@ func TestDownloadRoastProfileInstallRacePreservesCompetitor(t *testing.T) {
 	sha := profileSHA(body)
 	destination := filepath.Join(t.TempDir(), "race.alog")
 	client := profileClientWithTransport(t, body, sha, nil)
-	defaults := client.downloadOps
-	client.downloadOps.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
-		if err := os.WriteFile(to, []byte("competitor"), 0o600); err != nil {
-			return false, err
+	client.downloadOps.nativeOperation = func(operation func() error) error {
+		if err := os.WriteFile(destination, []byte("competitor"), 0o600); err != nil {
+			return err
 		}
-		return defaults.installNoReplace(identity, from, to)
+		return operation()
 	}
 	if _, failure := client.DownloadRoastProfile(context.Background(), roastUUID, 1, destination, false); failure == nil || failure.Message != "Destination already exists; use --force to replace it" {
 		t.Fatalf("failure = %#v", failure)

@@ -352,8 +352,15 @@ func TestDownloadInventoryImageStreamsPrivateWebPAtomically(t *testing.T) {
 			t.Errorf("request = %s %q", r.URL.Path, r.Header.Get("Authorization"))
 		}
 		temps, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*"))
-		if err != nil || len(temps) != 1 {
-			t.Errorf("active temporary files = %v, %v", temps, err)
+		wantTemps := 1
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			wantTemps = 0
+		}
+		if err != nil || len(temps) != wantTemps {
+			t.Errorf("active temporary files = %v, want %d, %v", temps, wantTemps, err)
+		} else if wantTemps == 0 {
+			// Linux O_TMPFILE and Darwin's immediately-unlinked descriptor
+			// intentionally leave no source pathname to inspect or race.
 		} else if runtime.GOOS == "windows" {
 			file, openErr := securefile.OpenPrivate(temps[0])
 			if openErr != nil {
@@ -486,8 +493,8 @@ func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *test
 			name:         "no-replace install",
 			wantRequests: 1,
 			inject: func(client *Client) {
-				client.downloadOps.installNoReplace = func(*downloadFileIdentity, string, string) (bool, error) {
-					return false, errors.New("install local-secret destination-secret")
+				client.downloadOps.nativeOperation = func(func() error) error {
+					return errors.New("install local-secret destination-secret")
 				}
 			},
 		},
@@ -496,8 +503,8 @@ func TestDownloadInventoryImageSeparatesLocalStorageFailuresWithoutRetry(t *test
 			wantRequests: 1,
 			force:        true,
 			inject: func(client *Client) {
-				client.downloadOps.replace = func(*downloadFileIdentity, string, string) (bool, error) {
-					return false, errors.New("replace local-secret destination-secret")
+				client.downloadOps.nativeOperation = func(func() error) error {
+					return errors.New("replace local-secret destination-secret")
 				}
 			},
 		},
@@ -565,20 +572,12 @@ func TestDownloadInventoryImageRetriesOnlyNetworkResponseReadFailures(t *testing
 	assertNoDownloadTemps(t, destination)
 }
 
-func TestDownloadInventoryImageSyncsParentAfterInstallInExactOrder(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		force    bool
-		fallback bool
-	}{
-		{name: "no replace"},
-		{name: "force replace", force: true},
-		{name: "hard link fallback", fallback: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+func TestDownloadInventoryImageSyncsParentAfterNativeInstall(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no replace", true: "force"}[force], func(t *testing.T) {
 			dir := t.TempDir()
 			destination := filepath.Join(dir, "durable.webp")
-			if test.force {
+			if force {
 				if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -591,54 +590,22 @@ func TestDownloadInventoryImageSyncsParentAfterInstallInExactOrder(t *testing.T)
 			client, _ := NewClient(server.URL, "secret", time.Second)
 			defaults := client.downloadOps
 			var events []string
-			client.downloadOps.syncFile = func(file *os.File) error {
-				events = append(events, "sync-file")
-				return defaults.syncFile(file)
-			}
-			client.downloadOps.closeFile = func(file *os.File) error {
-				events = append(events, "close-file")
-				return defaults.closeFile(file)
-			}
+			client.downloadOps.syncFile = func(file *os.File) error { events = append(events, "sync-file"); return defaults.syncFile(file) }
+			client.downloadOps.closeFile = func(file *os.File) error { events = append(events, "close-file"); return defaults.closeFile(file) }
+			client.downloadOps.nativeOperation = func(operation func() error) error { events = append(events, "native"); return operation() }
 			client.downloadOps.syncParent = func(path string) error {
 				events = append(events, "sync-parent")
 				if path != dir {
-					t.Fatalf("sync parent = %q, want %q", path, dir)
+					t.Fatalf("parent=%q", path)
 				}
-				return defaults.syncParent(path)
+				return nil
 			}
-			if test.force {
-				client.downloadOps.replace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
-					events = append(events, "install")
-					return defaults.replace(identity, from, to)
-				}
-			} else if test.fallback {
-				client.downloadOps.installNoReplace = func(_ *downloadFileIdentity, from, to string) (bool, error) {
-					events = append(events, "install")
-					if err := os.Link(from, to); err != nil {
-						return false, err
-					}
-					if err := os.Remove(from); err != nil {
-						return true, err
-					}
-					return true, nil
-				}
-			} else {
-				client.downloadOps.installNoReplace = func(identity *downloadFileIdentity, from, to string) (bool, error) {
-					events = append(events, "install")
-					return defaults.installNoReplace(identity, from, to)
-				}
-			}
-			if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, test.force); failure != nil {
+			if _, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, force); failure != nil {
 				t.Fatal(failure)
 			}
-			if !reflect.DeepEqual(events, []string{"sync-file", "close-file", "install", "sync-parent"}) {
-				t.Fatalf("events = %v", events)
+			if !reflect.DeepEqual(events, []string{"sync-file", "close-file", "native", "sync-parent"}) {
+				t.Fatalf("events=%v", events)
 			}
-			contents, _ := os.ReadFile(destination)
-			if string(contents) != "durable" {
-				t.Fatalf("destination = %q", contents)
-			}
-			assertNoDownloadTemps(t, destination)
 		})
 	}
 }
@@ -680,40 +647,56 @@ func TestDownloadInventoryImageParentSyncFailurePreservesInstalledDestination(t 
 	}
 }
 
-func TestDownloadInventoryImageSyncsFallbackMetadataEvenWhenCleanupFails(t *testing.T) {
-	dir := t.TempDir()
-	destination := filepath.Join(dir, "fallback.webp")
+func TestDownloadInventoryImageReportsAmbiguousPublicationSideEffects(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "ambiguous.webp")
+	published := destination + ".published"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/webp")
-		_, _ = io.WriteString(w, "fallback")
+		_, _ = io.WriteString(w, "installed")
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, "secret", time.Second)
-	defaults := client.downloadOps
-	var parentSynced atomic.Bool
-	client.downloadOps.installNoReplace = func(_ *downloadFileIdentity, from, to string) (bool, error) {
-		if err := os.Link(from, to); err != nil {
-			return false, err
+	client.downloadOps.afterNativeBeforeReconcile = func(*downloadTarget) error {
+		if err := os.Rename(destination, published); err != nil {
+			return err
 		}
-		return true, errors.New("temporary link cleanup failed")
+		return os.WriteFile(destination, []byte("competitor"), 0o600)
 	}
-	client.downloadOps.syncParent = func(path string) error {
-		parentSynced.Store(true)
-		return defaults.syncParent(path)
+	result, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false)
+	assertLocalStorageFailure(t, failure, "The image download may have been published, but its requested path identity is uncertain")
+	if result.Path != destination || result.Bytes != int64(len("installed")) {
+		t.Fatalf("result=%#v", result)
+	}
+	if contents, _ := os.ReadFile(destination); string(contents) != "competitor" {
+		t.Fatalf("competitor=%q", contents)
+	}
+	if contents, _ := os.ReadFile(published); string(contents) != "installed" {
+		t.Fatalf("published=%q", contents)
+	}
+}
+
+func TestDownloadInventoryImageNativePerformedThenErrorReportsInstalled(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "performed.webp")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = io.WriteString(w, "installed")
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL, "secret", time.Second)
+	client.downloadOps.nativeOperation = func(operation func() error) error {
+		if err := operation(); err != nil {
+			return err
+		}
+		return errors.New("post-native")
 	}
 	result, failure := client.DownloadInventoryImage(context.Background(), mutationLotID, commandAPIImageID, "display", destination, false)
 	assertLocalStorageFailure(t, failure, "The image download is installed, but a local storage operation did not complete")
-	if result.Path != destination || result.Bytes != int64(len("fallback")) {
-		t.Fatalf("installed result = %#v", result)
+	if result.Path != destination {
+		t.Fatalf("result=%#v", result)
 	}
-	if !parentSynced.Load() {
-		t.Fatal("fallback metadata was not synced")
+	if contents, err := os.ReadFile(destination); err != nil || string(contents) != "installed" {
+		t.Fatalf("contents=%q err=%v", contents, err)
 	}
-	contents, err := os.ReadFile(destination)
-	if err != nil || string(contents) != "fallback" {
-		t.Fatalf("destination = %q, %v", contents, err)
-	}
-	assertNoDownloadTemps(t, destination)
 }
 
 func TestDownloadInventoryImageNoClobberPrecheckAndInstallRace(t *testing.T) {

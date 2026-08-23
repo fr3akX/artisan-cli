@@ -3,57 +3,366 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/fr3akX/artisan-cli/internal/securefile"
 	"golang.org/x/sys/unix"
 )
 
-// downloadFileIdentity keeps an independent descriptor and immutable file
-// identity for the verified temporary through native publication.
-type downloadFileIdentity struct {
+type heldUnixDownloadParent struct {
 	file *os.File
 	info os.FileInfo
+	path string
 }
 
-func captureDownloadFileIdentity(file *os.File) (*downloadFileIdentity, error) {
-	fd, err := unix.Dup(int(file.Fd()))
+type unixDownloadNodeIdentity struct {
+	device uint64
+	inode  uint64
+	mode   uint32
+}
+
+type heldUnixDownloadPublication struct {
+	parent        *heldUnixDownloadParent
+	writer        *os.File
+	source        *os.File
+	sourceInfo    os.FileInfo
+	sourceName    string
+	candidateName string
+	candidateInfo os.FileInfo
+	backupName    string
+	backupInfo    os.FileInfo
+	closed        bool
+}
+
+func protectDownloadFile(file *os.File) error { return securefile.ProtectPrivateFile(file) }
+
+func newHeldDownloadPublication(target *downloadTarget) (heldDownloadPublication, error) {
+	parent, err := openHeldUnixDownloadParent(target.directory)
 	if err != nil {
 		return nil, err
 	}
-	unix.CloseOnExec(fd)
-	held := os.NewFile(uintptr(fd), file.Name())
-	info, err := held.Stat()
+	publication := &heldUnixDownloadPublication{parent: parent}
+	if target.operations.afterParentHeld != nil {
+		if err := target.operations.afterParentHeld(target); err != nil {
+			_ = parent.close()
+			return nil, err
+		}
+	}
+	writer, source, sourceInfo, sourceName, err := createHeldUnixDownloadSource(parent, target, "."+filepath.Base(target.destination)+".tmp-")
 	if err != nil {
-		_ = held.Close()
+		_ = parent.close()
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		_ = held.Close()
-		return nil, errors.New("download temporary is not a regular file")
-	}
-	return &downloadFileIdentity{file: held, info: info}, nil
+	publication.writer, publication.source, publication.sourceInfo, publication.sourceName = writer, source, sourceInfo, sourceName
+	return publication, nil
 }
 
-func (identity *downloadFileIdentity) matches(path string) (bool, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+func openHeldUnixDownloadParent(path string) (*heldUnixDownloadParent, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
 	info, err := file.Stat()
-	if err != nil {
-		return false, err
+	if err != nil || !info.IsDir() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("download destination parent is not a directory")
 	}
-	return info.Mode().IsRegular() && os.SameFile(identity.info, info), nil
+	return &heldUnixDownloadParent{file: file, info: info, path: path}, nil
 }
 
-func (identity *downloadFileIdentity) close() error {
-	if identity == nil || identity.file == nil {
+func (parent *heldUnixDownloadParent) close() error {
+	if parent == nil || parent.file == nil {
 		return nil
 	}
-	err := identity.file.Close()
-	identity.file = nil
+	err := parent.file.Close()
+	parent.file = nil
 	return err
+}
+
+func (parent *heldUnixDownloadParent) pathMatches() bool {
+	info, err := os.Lstat(parent.path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(parent.info, info) {
+		return false
+	}
+	other, err := openHeldUnixDownloadParent(parent.path)
+	if err != nil {
+		return false
+	}
+	defer other.close()
+	return os.SameFile(parent.info, other.info)
+}
+
+func createHeldUnixDownloadSource(parent *heldUnixDownloadParent, target *downloadTarget, prefix string) (*os.File, *os.File, os.FileInfo, string, error) {
+	if target.operations.createTemp != nil {
+		writer, err := target.operations.createTemp(parent.path, prefix+"*")
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
+		fd, err := unix.Dup(int(writer.Fd()))
+		if err != nil {
+			_ = writer.Close()
+			return nil, nil, nil, "", err
+		}
+		unix.CloseOnExec(fd)
+		source := os.NewFile(uintptr(fd), writer.Name())
+		info, err := source.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			_ = source.Close()
+			_ = writer.Close()
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			return nil, nil, nil, "", errors.New("download source is not regular")
+		}
+		return writer, source, info, filepath.Base(writer.Name()), nil
+	}
+	fd, name, err := createAnonymousUnixDownloadSource(int(parent.file.Fd()), prefix)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	// Keep the descriptor returned by O_TMPFILE as the publication source;
+	// some kernels refuse AT_EMPTY_PATH linking through a duplicate after the
+	// original descriptor is closed. The duplicate is the writable os.File.
+	source := os.NewFile(uintptr(fd), filepath.Join(parent.path, name))
+	duplicate, err := unix.Dup(fd)
+	if err != nil {
+		_ = source.Close()
+		return nil, nil, nil, "", err
+	}
+	unix.CloseOnExec(duplicate)
+	writer := os.NewFile(uintptr(duplicate), source.Name())
+	info, err := source.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = source.Close()
+		_ = writer.Close()
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
+		return nil, nil, nil, "", errors.New("download source is not regular")
+	}
+	return writer, source, info, name, nil
+}
+
+func randomDownloadName(prefix string) (string, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(bytes[:]), nil
+}
+
+func (publication *heldUnixDownloadPublication) writerFile() *os.File     { return publication.writer }
+func (publication *heldUnixDownloadPublication) heldSourceFile() *os.File { return publication.source }
+func (publication *heldUnixDownloadPublication) temporaryPath() string {
+	if publication.sourceName == "" {
+		return ""
+	}
+	return filepath.Join(publication.parent.path, publication.sourceName)
+}
+func (publication *heldUnixDownloadPublication) closeWriterBeforePublish() bool { return true }
+
+func (publication *heldUnixDownloadPublication) close() error {
+	if publication == nil || publication.closed {
+		return nil
+	}
+	publication.closed = true
+	var sourceErr error
+	if publication.source != nil {
+		sourceErr = publication.source.Close()
+		publication.source = nil
+	}
+	return errors.Join(sourceErr, publication.parent.close())
+}
+
+func (publication *heldUnixDownloadPublication) abort(target *downloadTarget) error {
+	if publication.sourceName == "" {
+		return nil
+	}
+	return publication.removeOwnedName(target, publication.sourceName, publication.sourceInfo)
+}
+
+func (publication *heldUnixDownloadPublication) relativeNodeIdentity(name string) (unixDownloadNodeIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(publication.parent.file.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return unixDownloadNodeIdentity{}, err
+	}
+	return unixDownloadNodeIdentity{device: uint64(stat.Dev), inode: stat.Ino, mode: uint32(stat.Mode)}, nil
+}
+
+func (publication *heldUnixDownloadPublication) nodeMatches(name string, want unixDownloadNodeIdentity) bool {
+	got, err := publication.relativeNodeIdentity(name)
+	return err == nil && got == want
+}
+
+func (publication *heldUnixDownloadPublication) removeOwnedNode(target *downloadTarget, name string, want unixDownloadNodeIdentity) error {
+	if !publication.nodeMatches(name, want) {
+		return errDownloadIdentityAmbiguous
+	}
+	if target.operations.afterCleanupCheck != nil {
+		if err := target.operations.afterCleanupCheck(target, name); err != nil {
+			return err
+		}
+	}
+	if !publication.nodeMatches(name, want) {
+		return errDownloadIdentityAmbiguous
+	}
+	if err := unix.Unlinkat(int(publication.parent.file.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	return nil
+}
+
+func (publication *heldUnixDownloadPublication) relativeInfo(name string) (os.FileInfo, error) {
+	fd, err := unix.Openat(int(publication.parent.file.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	return file.Stat()
+}
+
+func (publication *heldUnixDownloadPublication) relativeMatches(name string, want os.FileInfo) bool {
+	info, err := publication.relativeInfo(name)
+	return err == nil && info.Mode().IsRegular() && os.SameFile(info, want)
+}
+
+func (publication *heldUnixDownloadPublication) removeOwnedName(target *downloadTarget, name string, want os.FileInfo) error {
+	if name == "" || !publication.relativeMatches(name, want) {
+		return errDownloadIdentityAmbiguous
+	}
+	if target.operations.afterCleanupCheck != nil {
+		if err := target.operations.afterCleanupCheck(target, name); err != nil {
+			return err
+		}
+	}
+	if !publication.relativeMatches(name, want) {
+		return errDownloadIdentityAmbiguous
+	}
+	if err := unix.Unlinkat(int(publication.parent.file.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	return nil
+}
+
+func (publication *heldUnixDownloadPublication) openRelative(name string, write bool) (*os.File, os.FileInfo, error) {
+	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	if write {
+		flags = unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	}
+	fd, err := unix.Openat(int(publication.parent.file.Fd()), name, flags, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errors.New("download publication object is not regular")
+	}
+	return file, info, nil
+}
+
+func (publication *heldUnixDownloadPublication) verifyRelativeDigest(name string, count int64, digest [32]byte) (os.FileInfo, bool, error) {
+	file, info, err := publication.openRelative(name, false)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	gotCount, gotDigest, err := digestDownloadDescriptor(file)
+	return info, err == nil && gotCount == count && gotDigest == digest, err
+}
+
+func (publication *heldUnixDownloadPublication) createCandidateFromSource(target *downloadTarget) error {
+	name, err := randomDownloadName("." + filepath.Base(target.destination) + ".candidate-")
+	if err != nil {
+		return err
+	}
+	if err := cloneHeldUnixDownloadSource(int(publication.source.Fd()), int(publication.parent.file.Fd()), name); err != nil {
+		return err
+	}
+	info, exact, err := publication.verifyRelativeDigest(name, target.sealedCount, target.sealedDigest)
+	if err != nil || !exact {
+		return errors.Join(errDownloadDigestMismatch, err)
+	}
+	publication.candidateName, publication.candidateInfo = name, info
+	return nil
+}
+
+func (publication *heldUnixDownloadPublication) invokeNative(target *downloadTarget, operation func() error) error {
+	target.state = downloadTargetNativeAttempted
+	return target.operations.nativeOperation(operation)
+}
+
+func (publication *heldUnixDownloadPublication) afterNative(target *downloadTarget) error {
+	if target.operations.afterNativeBeforeReconcile != nil {
+		return target.operations.afterNativeBeforeReconcile(target)
+	}
+	return nil
+}
+
+func (publication *heldUnixDownloadPublication) syncParent(target *downloadTarget) error {
+	if target.operations.syncParent != nil {
+		return target.operations.syncParent(publication.parent.path)
+	}
+	return publication.parent.file.Sync()
+}
+
+func visibilityForUnixParent(parent *heldUnixDownloadParent, exact bool) downloadVisibilityState {
+	if !exact {
+		return visibilityAmbiguous
+	}
+	if parent.pathMatches() {
+		return visibilityExact
+	}
+	return visibilityAmbiguous
+}
+
+func resultAfterUnixExact(publication *heldUnixDownloadPublication, target *downloadTarget, priorErr error) (downloadInstallResult, error) {
+	result := downloadInstallResult{Publication: publicationExact, Visibility: visibilityForUnixParent(publication.parent, true), Durability: durabilityExact}
+	var sourceCleanupErr error
+	if publication.sourceName != "" {
+		sourceCleanupErr = publication.removeOwnedName(target, publication.sourceName, publication.sourceInfo)
+	}
+	syncErr := publication.syncParent(target)
+	if syncErr != nil {
+		result.Durability = durabilityUncertain
+	}
+	return result, errors.Join(priorErr, sourceCleanupErr, syncErr)
+}
+
+func (publication *heldUnixDownloadPublication) destinationExact(target *downloadTarget) (os.FileInfo, bool, error) {
+	return publication.verifyRelativeDigest(filepath.Base(target.destination), target.sealedCount, target.sealedDigest)
+}
+
+func (publication *heldUnixDownloadPublication) checkCandidateAfterHook(target *downloadTarget) error {
+	if target.operations.afterCandidateVerifiedBeforeNative != nil {
+		if err := target.operations.afterCandidateVerifiedBeforeNative(target); err != nil {
+			return err
+		}
+	}
+	if !publication.relativeMatches(publication.candidateName, publication.candidateInfo) {
+		return errDownloadIdentityAmbiguous
+	}
+	_, exact, err := publication.verifyRelativeDigest(publication.candidateName, target.sealedCount, target.sealedDigest)
+	if err != nil || !exact {
+		return errors.Join(errDownloadDigestMismatch, err)
+	}
+	return target.verifyHeldSource()
+}
+
+func retainedResidueError(name string, err error) error {
+	return errors.Join(fmt.Errorf("download residue %q retained because identity is uncertain", name), err)
 }
