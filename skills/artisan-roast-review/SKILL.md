@@ -43,7 +43,7 @@ Generate a cryptographically random, separator-free absent single-component char
 artisan --json --server "$TRUSTED_SERVER" roast chart download "$ROAST_UUID" "$CHART_FILE"
 ```
 
-After chart download succeeds, require the chart child to be visible through the original retained directory handle; open it no-follow and record its stable identity before treating it as owned evidence. A mismatch or absence is terminal: stop and report residue.
+After every chart download command outcome—success, nonzero including `local_storage_error`, or ambiguous transport—when no concurrent same-credential or administrator namespace mutation is active or suspected, inspect the selected originally absent relative child name no-follow through the retained directory handle. Require the chart child to be visible through the original retained directory handle. If a new regular child is present, open it no-follow and record its stable identity, then mark it owned for cleanup even when the chart command returned an error. A child mismatch or absence is terminal. Missing, non-regular, ambiguous, or unprovable child identity is terminal: stop and report the possible private residue. If namespace mutation is active or suspected, do not inspect or delete; stop and report the possible private residue. Only command success plus accepted ownership permits chart analysis; every command error stops analysis after the ownership inspection.
 
 Download raw bytes only when the chart needs corroboration or the human requested raw inspection. Generate a new cryptographically random, separator-free absent single-component profile name. Verify the profile name is absent relative to the retained directory handle. Immediately before invoking this no-force command, again verify no-follow that the path-visible private directory still matches the recorded stable identity; stop and report residue on any mismatch.
 
@@ -51,7 +51,9 @@ Download raw bytes only when the chart needs corroboration or the human requeste
 artisan --json --server "$TRUSTED_SERVER" roast profile download "$ROAST_UUID" "$REVISION_NUMBER" "$PROFILE_FILE"
 ```
 
-After profile download succeeds, require the profile child to be visible through the original retained directory handle; open it no-follow and record its stable identity before treating it as owned evidence. A mismatch or absence is terminal: stop and report residue. Stop on any other acquisition or evidence failure.
+After every profile download command outcome—success, nonzero including `local_storage_error`, or ambiguous transport—when no concurrent same-credential or administrator namespace mutation is active or suspected, inspect the selected originally absent relative profile child name no-follow through the retained directory handle. Require the profile child to be visible through the original retained directory handle. If a new regular child is present, open it no-follow and record its stable identity, then mark it owned for cleanup even when the profile command returned an error. Missing, non-regular, ambiguous, or unprovable child identity is terminal: stop and report the possible private residue. If namespace mutation is active or suspected, do not inspect or delete; stop and report the possible private residue. Only command success plus accepted ownership permits profile analysis; every command error stops analysis after the ownership inspection.
+
+Never retry a chart or profile download. Stop on any other acquisition or evidence failure.
 
 ## Analyze evidence
 

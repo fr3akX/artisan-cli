@@ -246,7 +246,7 @@ func canonicalRoastReviewCommands() []string {
 	}
 }
 
-func TestRoastReviewAcquisitionDestinationsAreAbsentBeforeAndOwnedAfterDownload(t *testing.T) {
+func TestRoastReviewAcquisitionDestinationsAreAbsentBeforeAndOwnedAfterEveryDownloadOutcome(t *testing.T) {
 	text := string(readRoastReviewSkill(t))
 	acquisitionStart := strings.Index(text, "## Acquire one revision safely")
 	acquisitionEnd := strings.Index(text, "## Analyze evidence")
@@ -258,22 +258,73 @@ func TestRoastReviewAcquisitionDestinationsAreAbsentBeforeAndOwnedAfterDownload(
 		t.Fatal("acquisition still requires pre-creating chart/profile destinations")
 	}
 	for _, workflow := range []struct {
-		name       string
-		absence    string
-		command    string
-		ownedAfter string
+		name        string
+		absence     string
+		command     string
+		allOutcomes string
+		mutatorGate string
+		ownedOnErr  string
+		successGate string
 	}{
-		{name: "chart", absence: "verify that name is absent relative to the retained directory handle", command: `artisan --json --server "$TRUSTED_SERVER" roast chart download`, ownedAfter: "After chart download succeeds, require the chart child to be visible through the original retained directory handle"},
-		{name: "profile", absence: "Verify the profile name is absent relative to the retained directory handle", command: `artisan --json --server "$TRUSTED_SERVER" roast profile download`, ownedAfter: "After profile download succeeds, require the profile child to be visible through the original retained directory handle"},
+		{
+			name:        "chart",
+			absence:     "verify that name is absent relative to the retained directory handle",
+			command:     `artisan --json --server "$TRUSTED_SERVER" roast chart download`,
+			allOutcomes: "After every chart download command outcome",
+			mutatorGate: "when no concurrent same-credential or administrator namespace mutation is active or suspected",
+			ownedOnErr:  "mark it owned for cleanup even when the chart command returned an error",
+			successGate: "Only command success plus accepted ownership permits chart analysis",
+		},
+		{
+			name:        "profile",
+			absence:     "Verify the profile name is absent relative to the retained directory handle",
+			command:     `artisan --json --server "$TRUSTED_SERVER" roast profile download`,
+			allOutcomes: "After every profile download command outcome",
+			mutatorGate: "when no concurrent same-credential or administrator namespace mutation is active or suspected",
+			ownedOnErr:  "mark it owned for cleanup even when the profile command returned an error",
+			successGate: "Only command success plus accepted ownership permits profile analysis",
+		},
 	} {
 		t.Run(workflow.name, func(t *testing.T) {
 			absentAt := strings.Index(acquisition, workflow.absence)
 			commandAt := strings.Index(acquisition, workflow.command)
-			ownedAt := strings.Index(acquisition, workflow.ownedAfter)
-			if absentAt < 0 || commandAt < 0 || ownedAt < 0 || !(absentAt < commandAt && commandAt < ownedAt) {
-				t.Fatalf("workflow ordering absent=%d command=%d owned=%d", absentAt, commandAt, ownedAt)
+			outcomesAt := strings.Index(acquisition, workflow.allOutcomes)
+			mutatorAt := -1
+			if outcomesAt >= 0 {
+				mutatorAt = strings.Index(acquisition[outcomesAt:], workflow.mutatorGate)
+				if mutatorAt >= 0 {
+					mutatorAt += outcomesAt
+				}
+			}
+			ownedAt := strings.Index(acquisition, workflow.ownedOnErr)
+			gateAt := strings.Index(acquisition, workflow.successGate)
+			if absentAt < 0 || commandAt < 0 || outcomesAt < 0 || mutatorAt < 0 || ownedAt < 0 || gateAt < 0 ||
+				!(absentAt < commandAt && commandAt < outcomesAt && outcomesAt < mutatorAt && mutatorAt < ownedAt && ownedAt < gateAt) {
+				t.Fatalf("workflow ordering absent=%d command=%d outcomes=%d mutator=%d owned=%d gate=%d", absentAt, commandAt, outcomesAt, mutatorAt, ownedAt, gateAt)
 			}
 		})
+	}
+	for _, required := range []string{
+		"success, nonzero including `local_storage_error`, or ambiguous transport",
+		"selected originally absent relative child name no-follow through the retained directory handle",
+		"new regular child",
+		"Missing, non-regular, ambiguous, or unprovable child identity is terminal",
+		"when no concurrent same-credential or administrator namespace mutation is active or suspected",
+		"Never retry a chart or profile download",
+	} {
+		if !strings.Contains(acquisition, required) {
+			t.Errorf("acquisition outcome contract is missing %q", required)
+		}
+	}
+}
+
+func TestRoastReviewDownloadFailureDoesNotChangeSinglePostReplayRule(t *testing.T) {
+	text := string(readRoastReviewSkill(t))
+	if strings.Count(text, "Never retry a chart or profile download") != 1 {
+		t.Fatal("download no-retry rule must be stated exactly once")
+	}
+	if strings.Count(text, "On transport ambiguity, rerun this command unchanged.") != 1 {
+		t.Fatal("review post must retain exactly one unchanged transport-ambiguity replay rule")
 	}
 }
 
@@ -305,7 +356,10 @@ func TestRoastReviewSkillCommandAllowlistRejectsEveryWrappedMutation(t *testing.
 		{name: "dollar variable", command: "$ARTISAN roast show id"},
 		{name: "braced variable", command: "${ARTISAN} roast show id"},
 		{name: "case insensitive", command: "ArTiSaN roast show id"},
-		{name: "quoted composition", command: `art""isan roast show id`},
+		{name: "empty quoted composition", command: `art""isan roast show id`},
+		{name: "double quoted composition", command: `art"i"san roast show id`},
+		{name: "single quoted composition", command: `'art'i'san' roast show id`},
+		{name: "mixed quoted composition", command: `a"rt"'is'an roast show id`},
 		{name: "backslash composition", command: `a\rtisan roast show id`},
 		{name: "empty variable composition", command: `art${EMPTY}isan roast show id`},
 	}
@@ -332,6 +386,27 @@ func TestAutomatedArtisanCommandDetectionScansFenceAndImperativeForms(t *testing
 		"Execute `artisan roast show inline-id`.\n"
 	got := automatedArtisanCommands(text)
 	want := []string{"artisan roast show id", "artisan roast show indented-id", "artisan roast show prose-id", "artisan roast show use-id", "artisan roast show inline-id"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detected commands = %q, want %q", got, want)
+	}
+}
+
+func TestAutomatedArtisanCommandDetectionScansMarkdownImperativesAndShellQuoteComposition(t *testing.T) {
+	text := "- Run art\"i\"san roast show dash-id.\n" +
+		"* Execute 'art'i'san' roast show star-id.\n" +
+		"1. Run a\"rt\"'is'an roast show numbered-dot-id.\n" +
+		"2) Execute ar'ti's\"a\"n roast show numbered-paren-id.\n" +
+		"> Run art'i'\"s\"an roast show quoted-id.\n" +
+		"> - Execute `art\"i\"san roast show nested-id`.\n"
+	got := automatedArtisanCommands(text)
+	want := []string{
+		`art"i"san roast show dash-id`,
+		`'art'i'san' roast show star-id`,
+		`a"rt"'is'an roast show numbered-dot-id`,
+		`ar'ti's"a"n roast show numbered-paren-id`,
+		`art'i'"s"an roast show quoted-id`,
+		`art"i"san roast show nested-id`,
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("detected commands = %q, want %q", got, want)
 	}
@@ -420,7 +495,8 @@ func proseSentences(line string) []string {
 
 func proseArtisanCommands(sentence string) []string {
 	var commands []string
-	remainder := sentence
+	imperative := stripMarkdownImperativePrefix(sentence)
+	remainder := imperative
 	foundInline := false
 	for {
 		start := strings.IndexByte(remainder, '`')
@@ -435,17 +511,17 @@ func proseArtisanCommands(sentence string) []string {
 		inline := strings.TrimSpace(remainder[:end])
 		if shellLineInvokesArtisan(inline) {
 			foundInline = true
-			if !isExactNegatedAuthLoginSentence(sentence) {
+			if !isExactNegatedAuthLoginSentence(imperative) {
 				commands = append(commands, inline)
 			}
 		}
 		remainder = remainder[end+1:]
 	}
-	if foundInline || !shellLineInvokesArtisan(sentence) || isExactNegatedAuthLoginSentence(sentence) {
+	if foundInline || !shellLineInvokesArtisan(imperative) || isExactNegatedAuthLoginSentence(imperative) {
 		return commands
 	}
 
-	trimmed := strings.TrimSpace(sentence)
+	trimmed := strings.TrimSpace(imperative)
 	lower := strings.ToLower(trimmed)
 	prefixes := []string{"run ", "rerun ", "use ", "execute ", "invoke ", "call ", "never run ", "must never run ", "do not run ", "must not run ", "don't run "}
 	for _, prefix := range prefixes {
@@ -467,18 +543,37 @@ func proseArtisanCommands(sentence string) []string {
 	return commands
 }
 
+func stripMarkdownImperativePrefix(sentence string) string {
+	value := strings.TrimSpace(sentence)
+	for {
+		previous := value
+		if strings.HasPrefix(value, ">") {
+			value = strings.TrimSpace(value[1:])
+		}
+		if len(value) >= 2 && strings.ContainsRune("-*+", rune(value[0])) && unicode.IsSpace(rune(value[1])) {
+			value = strings.TrimSpace(value[1:])
+		}
+		digits := 0
+		for digits < len(value) && value[digits] >= '0' && value[digits] <= '9' {
+			digits++
+		}
+		if digits > 0 && digits+1 < len(value) && (value[digits] == '.' || value[digits] == ')') && unicode.IsSpace(rune(value[digits+1])) {
+			value = strings.TrimSpace(value[digits+1:])
+		}
+		if value == previous {
+			return value
+		}
+	}
+}
+
 func shellLineInvokesArtisan(line string) bool {
 	// This is an explicit deterministic guard for known documentation forms,
-	// not a claim of complete shell parsing. Check the literal text first to
-	// retain path/wrapper detection, then normalize only the known shell token
-	// compositions covered by the contract.
-	if containsArtisanToken(line) {
-		return true
-	}
-	normalized := strings.ReplaceAll(strings.ReplaceAll(line, `""`, ""), `''`, "")
-	normalized = strings.ReplaceAll(normalized, `\`, "")
+	// not a claim of complete shell parsing. Normalize only the shell token
+	// compositions covered by the contract; retain literal detection for paths
+	// whose separators normalization removes.
+	normalized := strings.NewReplacer(`"`, "", `'`, "", `\`, "").Replace(line)
 	normalized = replaceFoldAll(normalized, "${EMPTY}", "")
-	return containsArtisanToken(normalized)
+	return containsArtisanToken(normalized) || containsArtisanToken(line)
 }
 
 func containsArtisanToken(line string) bool {
