@@ -472,6 +472,10 @@ func TestRoastReviewCommandGrammarFailsClosedOnTaskListsAndShellConstructions(t 
 	}{
 		{name: "unchecked task list", text: "- [ ] Run artisan inventory adjust lot-id 1.\n", want: "artisan inventory adjust lot-id 1"},
 		{name: "checked nested task list", text: "> - [x] Execute `artisan roast publish roast-id`.\n", want: "artisan roast publish roast-id"},
+		{name: "direct task list command", text: "- [ ] artisan inventory adjust lot-id 1.\n", want: "artisan inventory adjust lot-id 1"},
+		{name: "emphasized task list imperative", text: "- **Run** `artisan auth login`.\n", want: "artisan auth login"},
+		{name: "differently phrased list imperative", text: "- Then run artisan roast publish roast-id.\n", want: "artisan roast publish roast-id"},
+		{name: "task list ANSI C quote", text: "> - [x] art$'i'san auth login.\n", want: "art$'i'san auth login"},
 		{name: "ANSI C quote", text: "Call art$'i'san auth login.\n", want: "art$'i'san auth login"},
 		{name: "variable construction", text: "```bash\nA=art; ${A}isan inventory adjust lot-id 1\n```\n", want: "A=art; ${A}isan inventory adjust lot-id 1"},
 		{name: "backslash continuation", text: "~~~sh\nartisan inventory \\\nadjust lot-id 1\n~~~\n", want: "artisan inventory adjust lot-id 1"},
@@ -641,7 +645,9 @@ func proseSentences(line string) []string {
 }
 
 func proseCommandCandidate(sentence string) (string, bool) {
-	imperative := stripMarkdownImperativePrefix(sentence)
+	unprefixed := stripMarkdownImperativePrefix(sentence)
+	structuredImperative := unprefixed != strings.TrimSpace(sentence)
+	imperative := normalizeLeadingMarkdownEmphasis(unprefixed)
 	if isExactNegatedAuthLoginSentence(imperative) {
 		return "", false
 	}
@@ -653,16 +659,85 @@ func proseCommandCandidate(sentence string) (string, bool) {
 		"execute ", "invoke ", "call ", "rerun ", "run ", "use ",
 	}
 	for _, prefix := range prefixes {
-		if !strings.HasPrefix(lower, prefix) {
-			continue
+		if strings.HasPrefix(lower, prefix) {
+			return cleanProseCommandCandidate(trimmed[len(prefix):])
 		}
-		command := strings.TrimRight(strings.TrimSpace(trimmed[len(prefix):]), ".!?")
-		if len(command) >= 2 && command[0] == '`' && command[len(command)-1] == '`' && strings.Count(command, "`") == 2 {
-			command = strings.TrimSpace(command[1 : len(command)-1])
+	}
+	if structuredImperative {
+		if command, ok := commandAfterImperativeWord(trimmed); ok {
+			return cleanProseCommandCandidate(command)
 		}
-		return command, command != ""
+		if first, _, found := strings.Cut(trimmed, " "); found && looksLikeArtisanExecutable(first) {
+			return cleanProseCommandCandidate(trimmed)
+		}
 	}
 	return "", false
+}
+
+func normalizeLeadingMarkdownEmphasis(value string) string {
+	value = strings.TrimSpace(value)
+	for _, marker := range []string{"**", "__", "~~", "*", "_"} {
+		if !strings.HasPrefix(value, marker) {
+			continue
+		}
+		remainder := value[len(marker):]
+		closing := strings.Index(remainder, marker)
+		if closing < 0 {
+			continue
+		}
+		word := remainder[:closing]
+		suffix := remainder[closing+len(marker):]
+		if suffix == "" || !unicode.IsSpace(rune(suffix[0])) || !isImperativeWord(word) {
+			continue
+		}
+		return word + suffix
+	}
+	return value
+}
+
+func commandAfterImperativeWord(value string) (string, bool) {
+	lower := strings.ToLower(value)
+	for _, word := range []string{"execute", "invoke", "call", "rerun", "run", "use"} {
+		needle := " " + word + " "
+		if index := strings.Index(" "+lower, needle); index >= 0 {
+			start := index + len(word) + 1
+			if start < len(value) {
+				return value[start:], true
+			}
+		}
+	}
+	return "", false
+}
+
+func isImperativeWord(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	for _, word := range []string{"execute", "invoke", "call", "rerun", "run", "use"} {
+		if lower == word {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeArtisanExecutable(value string) bool {
+	normalized := strings.Map(func(character rune) rune {
+		if strings.ContainsRune("'\"\\$", character) {
+			return -1
+		}
+		return character
+	}, value)
+	if separator := strings.LastIndexAny(normalized, `/\\`); separator >= 0 {
+		normalized = normalized[separator+1:]
+	}
+	return strings.EqualFold(normalized, "artisan")
+}
+
+func cleanProseCommandCandidate(value string) (string, bool) {
+	command := strings.TrimRight(strings.TrimSpace(value), ".!?")
+	if len(command) >= 2 && command[0] == '`' && command[len(command)-1] == '`' && strings.Count(command, "`") == 2 {
+		command = strings.TrimSpace(command[1 : len(command)-1])
+	}
+	return command, command != ""
 }
 
 func stripMarkdownImperativePrefix(sentence string) string {
