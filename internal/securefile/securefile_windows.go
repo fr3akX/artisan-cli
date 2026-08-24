@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+var reOpenFileProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
 
 // OpenPrivate opens a file without traversing a final reparse point and
 // verifies the DACL on the exact handle used for subsequent reads.
@@ -108,12 +111,40 @@ func openWindowsObject(path string, directory, verify bool) (*os.File, error) {
 }
 
 func protectPrivate(file *os.File, directory bool) error {
-	// Bind protection to the exact opened object. A same-account namespace
-	// replacement must never redirect ACL changes to another file.
-	if err := applyPrivateACLHandle(windows.Handle(file.Fd()), directory); err != nil {
+	// Ordinary os.File handles do not request WRITE_DAC. Reopen the existing
+	// file object with the security rights needed to apply and verify its DACL;
+	// never resolve file.Name(), which may now identify a replacement object.
+	handle, err := reopenPrivateHandle(windows.Handle(file.Fd()), directory)
+	if err != nil {
 		return err
 	}
-	return verifyPrivateHandle(windows.Handle(file.Fd()), directory)
+	defer windows.CloseHandle(handle)
+	if err := applyPrivateACLHandle(handle, directory); err != nil {
+		return err
+	}
+	return verifyPrivateHandle(handle, directory)
+}
+
+func reopenPrivateHandle(handle windows.Handle, directory bool) (windows.Handle, error) {
+	access, share, flags := privateReopenParameters(directory)
+	result, _, callErr := reOpenFileProc.Call(uintptr(handle), uintptr(access), uintptr(share), uintptr(flags))
+	if windows.Handle(result) == windows.InvalidHandle {
+		if callErr == syscall.Errno(0) {
+			callErr = windows.ERROR_INVALID_HANDLE
+		}
+		return windows.InvalidHandle, fmt.Errorf("reopen private object with DACL access: %w", callErr)
+	}
+	return windows.Handle(result), nil
+}
+
+func privateReopenParameters(directory bool) (access, share, flags uint32) {
+	access = windows.GENERIC_READ | windows.READ_CONTROL | windows.WRITE_DAC
+	share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+	flags = windows.FILE_FLAG_OPEN_REPARSE_POINT
+	if directory {
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	return access, share, flags
 }
 
 func applyPrivateACL(path string, directory bool) error {

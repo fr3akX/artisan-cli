@@ -38,7 +38,7 @@ func TestWindowsSnapshotPathForms(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsWindowsJunctionComponent(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	target := filepath.Join(root, "target")
 	junction := filepath.Join(root, "junction")
 	if err := os.Mkdir(target, 0o700); err != nil {
@@ -56,7 +56,7 @@ func TestReadRegularSnapshotRejectsWindowsJunctionComponent(t *testing.T) {
 }
 
 func TestReadRegularSnapshotWindowsHandleSharingAllowsDetectableReplacement(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "review")
 	replacement := filepath.Join(root, "replacement")
 	if err := os.WriteFile(path, []byte("first body"), 0o600); err != nil {

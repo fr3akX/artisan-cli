@@ -47,7 +47,7 @@ func TestCanonicalRoastReviewKeyExactContract(t *testing.T) {
 }
 
 func TestReadRoastReviewFileNormalizesOnlySurroundingUnicodeWhitespace(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "review.txt")
+	path := filepath.Join(canonicalTestTempDir(t), "review.txt")
 	input := "\u2003\n" + validReviewBody + "\n\u2002"
 	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestReadRoastReviewFileRejectsHostileBodies(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "review.txt")
+			path := filepath.Join(canonicalTestTempDir(t), "review.txt")
 			if err := os.WriteFile(path, test.contents, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +110,7 @@ func TestReadRoastReviewFileRejectsHostileBodies(t *testing.T) {
 }
 
 func TestReadRoastReviewFileRejectsUnsafePath(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	real := filepath.Join(root, "real")
 	link := filepath.Join(root, "link")
 	if err := os.WriteFile(real, []byte(validReviewBody), 0o600); err != nil {

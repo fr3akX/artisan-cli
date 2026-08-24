@@ -12,6 +12,99 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestPrivateReopenParametersRequestExactSecurityAndSharingRights(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		directory bool
+		wantFlags uint32
+	}{
+		{name: "file", wantFlags: windows.FILE_FLAG_OPEN_REPARSE_POINT},
+		{name: "directory", directory: true, wantFlags: windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			access, share, flags := privateReopenParameters(test.directory)
+			wantAccess := uint32(windows.GENERIC_READ | windows.READ_CONTROL | windows.WRITE_DAC)
+			wantShare := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+			if access != wantAccess || share != wantShare || flags != test.wantFlags {
+				t.Fatalf("privateReopenParameters(%t) = access %#x share %#x flags %#x, want %#x %#x %#x", test.directory, access, share, flags, wantAccess, wantShare, test.wantFlags)
+			}
+		})
+	}
+}
+
+func TestProtectPrivateReopensOrdinaryHandlesWithDACLAccess(t *testing.T) {
+	directoryPath := filepath.Join(t.TempDir(), "private-directory")
+	if err := os.Mkdir(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.Open(directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := protectPrivate(directory, true); err != nil {
+		t.Fatalf("protect ordinary directory handle: %v", err)
+	}
+	if err := verifyPrivateHandle(windows.Handle(directory.Fd()), true); err != nil {
+		t.Fatalf("verify protected ordinary directory handle: %v", err)
+	}
+
+	filePath := filepath.Join(directoryPath, "private-file")
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := protectPrivate(file, false); err != nil {
+		t.Fatalf("protect ordinary file handle: %v", err)
+	}
+	if err := verifyPrivateHandle(windows.Handle(file.Fd()), false); err != nil {
+		t.Fatalf("verify protected ordinary file handle: %v", err)
+	}
+}
+
+func TestProtectPrivateReopenRemainsBoundAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private-file")
+	heldPath := filepath.Join(root, "held-private-file")
+	if err := os.WriteFile(path, []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pathPointer, windows.GENERIC_READ|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	if err := os.Rename(path, heldPath); err != nil {
+		t.Fatalf("rename opened fixture: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := protectPrivate(file, false); err != nil {
+		t.Fatalf("protect renamed opened object: %v", err)
+	}
+	if err := verifyPrivateHandle(windows.Handle(file.Fd()), false); err != nil {
+		t.Fatalf("verify renamed opened object: %v", err)
+	}
+	replacement, err := openWindowsObject(path, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := verifyPrivateHandle(windows.Handle(replacement.Fd()), false); err == nil {
+		t.Fatal("path replacement received the held object's private DACL")
+	}
+}
+
 func TestAppliedPrivateACLNativeNormalization(t *testing.T) {
 	tests := []struct {
 		name      string

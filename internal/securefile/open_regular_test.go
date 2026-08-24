@@ -10,7 +10,7 @@ import (
 )
 
 func TestReadRegularSnapshotReadsNestedNonPrivateRegularFile(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	directory := filepath.Join(root, "one", "two")
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestReadRegularSnapshotReadsNestedNonPrivateRegularFile(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsInvalidSizesAndNonregularSources(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	empty := filepath.Join(root, "empty")
 	large := filepath.Join(root, "large")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
@@ -69,7 +69,7 @@ func TestReadRegularSnapshotRejectsInvalidSizesAndNonregularSources(t *testing.T
 }
 
 func TestReadRegularSnapshotRejectsFinalAndParentLinks(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	realDirectory := filepath.Join(root, "real")
 	if err := os.Mkdir(realDirectory, 0o700); err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestReadRegularSnapshotRejectsFinalAndParentLinks(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsReplacementBeforeFinalOpen(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "review")
 	replacement := filepath.Join(root, "replacement")
 	if err := os.WriteFile(path, []byte("first body"), 0o600); err != nil {
@@ -124,7 +124,7 @@ func TestReadRegularSnapshotRejectsReplacementBeforeFinalOpen(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsParentReplacementAfterOpen(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	parent := filepath.Join(root, "parent")
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestReadRegularSnapshotRejectsParentReplacementAfterOpen(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsPathReplacementDuringRead(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "review")
 	replacement := filepath.Join(root, "replacement")
 	if err := os.WriteFile(path, []byte("first body"), 0o600); err != nil {
@@ -184,7 +184,7 @@ func TestReadRegularSnapshotRejectsPathReplacementDuringRead(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsSameSizeChangeDuringRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "review")
+	path := filepath.Join(canonicalTestTempDir(t), "review")
 	if err := os.WriteFile(path, []byte("abcdefgh"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestReadRegularSnapshotRejectsSameSizeChangeDuringRead(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsShortRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "review")
+	path := filepath.Join(canonicalTestTempDir(t), "review")
 	if err := os.WriteFile(path, []byte("abcdefgh"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestReadRegularSnapshotRejectsDevice(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsPathReplacementAfterOpen(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "review")
 	if err := os.WriteFile(path, []byte("first body"), 0o600); err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestReadRegularSnapshotRejectsInPlaceSizeAndModtimeChanges(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "review")
+			path := filepath.Join(canonicalTestTempDir(t), "review")
 			if err := os.WriteFile(path, []byte("stable body"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -305,8 +305,8 @@ func TestReadRegularSnapshotRejectsRelativePathWhenCurrentDirectoryChanges(t *te
 	if err != nil {
 		t.Fatalf("get current directory: %v", err)
 	}
-	firstRoot := t.TempDir()
-	secondRoot := t.TempDir()
+	firstRoot := canonicalTestTempDir(t)
+	secondRoot := canonicalTestTempDir(t)
 	for _, root := range []string{firstRoot, secondRoot} {
 		if err := os.WriteFile(filepath.Join(root, "review"), []byte("stable body"), 0o600); err != nil {
 			t.Fatalf("write relative fixture: %v", err)
@@ -346,7 +346,7 @@ func replaceSnapshotPathForTest(replacement, path string) error {
 }
 
 func TestReadRegularSnapshotErrorsNeverContainPathOrContents(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "do-not-reflect-review-path")
 	if err := os.WriteFile(path, []byte("do-not-reflect-review-content"), 0o600); err != nil {
 		t.Fatal(err)

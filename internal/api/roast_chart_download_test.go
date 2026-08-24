@@ -564,20 +564,19 @@ func TestDownloadRoastChartRevisionFenceRejectsSameSHAPreNativeReparse(t *testin
 				t.Fatal(err)
 			}
 			client := chartClient(t, compressed, nil)
-			var preparationFinished atomic.Bool
 			var detailReads atomic.Int32
-			client.downloadOps.afterCandidateVerifiedBeforeNative = func(*downloadTarget) error {
-				preparationFinished.Store(true)
-				return nil
+			var nativeInvoked atomic.Bool
+			client.downloadOps.nativeOperation = func(operation func() error) error {
+				nativeInvoked.Store(true)
+				return operation()
 			}
 			client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				switch request.URL.Path {
 				case "/api/v1/roasts/" + roastUUID:
-					detailReads.Add(1)
-					if preparationFinished.Load() {
-						return jsonHTTPResponse(http.StatusOK, test.afterDetail), nil
+					if detailReads.Add(1) == 1 {
+						return jsonHTTPResponse(http.StatusOK, validRoastDetailJSON()), nil
 					}
-					return jsonHTTPResponse(http.StatusOK, validRoastDetailJSON()), nil
+					return jsonHTTPResponse(http.StatusOK, test.afterDetail), nil
 				case "/api/v1/roasts/" + roastUUID + "/chart":
 					return chartHTTPResponse(compressed), nil
 				default:
@@ -585,8 +584,8 @@ func TestDownloadRoastChartRevisionFenceRejectsSameSHAPreNativeReparse(t *testin
 				}
 			})
 			_, failure := client.DownloadRoastChart(context.Background(), roastUUID, destination, true)
-			if !preparationFinished.Load() || detailReads.Load() != 2 || failure == nil || failure.Code != test.wantCode {
-				t.Fatalf("prepared=%v detailReads=%d failure=%#v", preparationFinished.Load(), detailReads.Load(), failure)
+			if detailReads.Load() != 2 || nativeInvoked.Load() || failure == nil || failure.Code != test.wantCode {
+				t.Fatalf("detailReads=%d nativeInvoked=%v failure=%#v", detailReads.Load(), nativeInvoked.Load(), failure)
 			}
 			if contents, err := os.ReadFile(destination); err != nil || string(contents) != "existing" {
 				t.Fatalf("destination = %q, %v", contents, err)
@@ -750,8 +749,12 @@ func TestDownloadRoastChartRefusesRedirectAndCancellationWithoutVisibility(t *te
 		if _, failure := client.DownloadRoastChart(ctx, roastUUID, destination, false); failure == nil || failure.Code != "interrupted" || failure.ExitCode != 130 {
 			t.Fatalf("failure = %#v", failure)
 		}
+		deadline := time.Now().Add(time.Second)
+		for !blocked.closed.Load() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
 		if !blocked.closed.Load() {
-			t.Fatal("body not closed")
+			t.Fatal("body not closed after cancellation completed")
 		}
 		assertMissingFileAndTemps(t, destination)
 	})

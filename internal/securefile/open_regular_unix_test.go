@@ -14,7 +14,7 @@ import (
 )
 
 func TestReadRegularSnapshotRejectsExplicitParentTraversal(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	path := filepath.Join(root, "review")
 	if err := os.WriteFile(path, []byte("private body"), 0o600); err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestReadRegularSnapshotRejectsExplicitParentTraversal(t *testing.T) {
 }
 
 func TestReadRegularSnapshotRejectsFIFONonblocking(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "review-fifo")
+	path := filepath.Join(canonicalTestTempDir(t), "review-fifo")
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Skipf("FIFO prerequisite unavailable: %v", err)
 	}

@@ -271,7 +271,7 @@ func TestRoastChartStaleRevisionPreservesForcedDestination(t *testing.T) {
 
 func TestRoastReviewPostParsesFileBeforeConfigurationPostsWithoutPromptAndRendersReplay(t *testing.T) {
 	body := commandReviewBody()
-	bodyPath := filepath.Join(t.TempDir(), "review.txt")
+	bodyPath := filepath.Join(canonicalTestTempDir(t), "review.txt")
 	if err := os.WriteFile(bodyPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestRoastReviewPostParsesFileBeforeConfigurationPostsWithoutPromptAndRender
 
 func TestRoastReviewPostAcceptsAbsentAndRejectsMutatedOrDuplicateSecurityHeaders(t *testing.T) {
 	body := commandReviewBody()
-	bodyPath := filepath.Join(t.TempDir(), "review.txt")
+	bodyPath := filepath.Join(canonicalTestTempDir(t), "review.txt")
 	if err := os.WriteFile(bodyPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestRoastReviewPostAcceptsAbsentAndRejectsMutatedOrDuplicateSecurityHeaders
 }
 
 func TestRoastLocalValidationPrecedesConfigurationAndNetwork(t *testing.T) {
-	validBody := filepath.Join(t.TempDir(), "review.txt")
+	validBody := filepath.Join(canonicalTestTempDir(t), "review.txt")
 	if err := os.WriteFile(validBody, []byte(commandReviewBody()), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +391,7 @@ func TestRoastLocalValidationPrecedesConfigurationAndNetwork(t *testing.T) {
 		{[]string{"--json", "roast", "profile", "download", commandRoastID, "zero", "out"}, "invalid_revision_number"},
 		{[]string{"--json", "roast", "profile", "download", commandRoastID, "0", "out"}, "invalid_revision_number"},
 		{[]string{"--json", "roast", "review", "post", commandRoastID, "--revision-sha256", strings.Repeat("A", 64), "--template-version", api.ReviewTemplateVersion, "--body-file", validBody}, "invalid_review_file"},
-		{[]string{"--json", "roast", "review", "post", commandRoastID, "--revision-sha256", commandRoastSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", filepath.Join(t.TempDir(), "missing")}, "invalid_review_file"},
+		{[]string{"--json", "roast", "review", "post", commandRoastID, "--revision-sha256", commandRoastSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", filepath.Join(canonicalTestTempDir(t), "missing")}, "invalid_review_file"},
 	} {
 		runtime := Runtime{ConfigDir: "\x00", Getenv: func(string) string {
 			t.Fatal("local validation loaded configuration")

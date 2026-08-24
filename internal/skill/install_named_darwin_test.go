@@ -18,10 +18,10 @@ import (
 func TestDarwinNamedInstallsApplyLocationRaceAndDurabilityProtection(t *testing.T) {
 	for _, name := range Names() {
 		t.Run(name+"/root swap", func(t *testing.T) {
-			parent := t.TempDir()
+			parent := canonicalTempDir(t)
 			root := filepath.Join(parent, "root")
 			opened := filepath.Join(parent, "opened-root")
-			outside := t.TempDir()
+			outside := canonicalTempDir(t)
 			if err := os.Mkdir(root, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -45,10 +45,10 @@ func TestDarwinNamedInstallsApplyLocationRaceAndDurabilityProtection(t *testing.
 		})
 
 		t.Run(name+"/location swap", func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			visible := filepath.Join(root, name)
 			opened := filepath.Join(root, name+"-opened")
-			outside := t.TempDir()
+			outside := canonicalTempDir(t)
 			if err := os.Mkdir(visible, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -72,9 +72,9 @@ func TestDarwinNamedInstallsApplyLocationRaceAndDurabilityProtection(t *testing.
 		})
 
 		t.Run(name+"/target race", func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			directory := filepath.Join(root, name)
-			outside := filepath.Join(t.TempDir(), "outside")
+			outside := filepath.Join(canonicalTempDir(t), "outside")
 			if err := os.Mkdir(directory, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +94,7 @@ func TestDarwinNamedInstallsApplyLocationRaceAndDurabilityProtection(t *testing.
 		})
 
 		t.Run(name+"/durability", func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 				t.Fatal(err)
 			}

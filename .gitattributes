@@ -7,5 +7,6 @@
 *.ps1 text eol=lf
 *.py text eol=lf
 *.ref text eol=lf
+integration/testdata/review-profile.alog text eol=lf
 *.mod text eol=lf
 *.sum text eol=lf

@@ -5,6 +5,7 @@ package command
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,9 @@ func TestRoastDownloadsMapUnavailableWorkingDirectoryToLocalStorage(t *testing.T
 		t.Fatal(err)
 	}
 	if _, err := os.Getwd(); err == nil {
+		if runtime.GOOS == "darwin" {
+			t.Skip("Darwin retained a usable cwd after unlink; unavailable-cwd behavior cannot be exercised by this fixture")
+		}
 		t.Fatal("removed working directory remained available")
 	}
 

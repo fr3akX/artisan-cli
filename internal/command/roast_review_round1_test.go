@@ -301,7 +301,7 @@ func TestCobraRoastExecutesEveryLegacySingleDashFlagAndDashPath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	working := t.TempDir()
+	working := canonicalTestTempDir(t)
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

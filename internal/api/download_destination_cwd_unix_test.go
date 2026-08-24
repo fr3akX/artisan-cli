@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -63,6 +64,9 @@ func withUnavailableDownloadWorkingDirectory(t *testing.T, run func(error)) {
 	}
 	_, getwdErr := os.Getwd()
 	if getwdErr == nil {
+		if runtime.GOOS == "darwin" {
+			t.Skip("Darwin retained a usable cwd after unlink; unavailable-cwd behavior cannot be exercised by this fixture")
+		}
 		t.Fatal("removed working directory remained available")
 	}
 	run(getwdErr)
