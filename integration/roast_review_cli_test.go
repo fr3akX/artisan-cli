@@ -63,6 +63,7 @@ func TestCLIErrorEnvelopeStrictWireContract(t *testing.T) {
 		"missing error":        `{"ok":false}`,
 		"missing code":         `{"ok":false,"error":{"message":"Destination already exists","http_status":null}}`,
 		"missing message":      `{"ok":false,"error":{"code":"local_storage_error"}}`,
+		"explicit null HTTP":   `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
 		"extra envelope field": `{"ok":false,"extra":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
 		"extra error field":    `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null,"detail":"unsafe"}}`,
 		"wrong ok value":       `{"ok":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
@@ -800,19 +801,27 @@ func decodeCLIErrorEnvelope(contents []byte) (cliErrorEnvelope, error) {
 	var wire struct {
 		OK    *bool `json:"ok"`
 		Error *struct {
-			Code       *string `json:"code"`
-			Message    *string `json:"message"`
-			HTTPStatus *int    `json:"http_status"`
+			Code       *string         `json:"code"`
+			Message    *string         `json:"message"`
+			HTTPStatus json.RawMessage `json:"http_status"`
 		} `json:"error"`
 	}
-	if err := decodeExactlyOneJSON(contents, &wire, true); err != nil || wire.OK == nil || *wire.OK || wire.Error == nil || wire.Error.Code == nil || wire.Error.Message == nil || wire.Error.HTTPStatus != nil && (*wire.Error.HTTPStatus < 100 || *wire.Error.HTTPStatus > 599) {
+	if err := decodeExactlyOneJSON(contents, &wire, true); err != nil || wire.OK == nil || *wire.OK || wire.Error == nil || wire.Error.Code == nil || wire.Error.Message == nil {
 		return cliErrorEnvelope{}, errors.New("CLI error response did not match its strict wire contract")
+	}
+	var httpStatus *int
+	if wire.Error.HTTPStatus != nil {
+		var status int
+		if bytes.Equal(bytes.TrimSpace(wire.Error.HTTPStatus), []byte("null")) || json.Unmarshal(wire.Error.HTTPStatus, &status) != nil || status < 100 || status > 599 {
+			return cliErrorEnvelope{}, errors.New("CLI error response did not match its strict wire contract")
+		}
+		httpStatus = &status
 	}
 	var envelope cliErrorEnvelope
 	envelope.OK = *wire.OK
 	envelope.Error.Code = *wire.Error.Code
 	envelope.Error.Message = *wire.Error.Message
-	envelope.Error.HTTPStatus = wire.Error.HTTPStatus
+	envelope.Error.HTTPStatus = httpStatus
 	return envelope, nil
 }
 
