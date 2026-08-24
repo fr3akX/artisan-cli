@@ -121,9 +121,59 @@ func TestDownloadRoastChartReportsHeldCanonicalAbsoluteDestinationForRelativePat
 	if failure != nil {
 		t.Fatal(failure)
 	}
-	absoluteDestination := filepath.Join(workingDirectory, relativeDestination)
+	absoluteDestination, err := filepath.Abs(relativeDestination)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Path != absoluteDestination || !filepath.IsAbs(result.Path) {
 		t.Fatalf("reported path = %q, want canonical held destination %q", result.Path, absoluteDestination)
+	}
+	contents, err := os.ReadFile(relativeDestination)
+	if err != nil || !bytes.Equal(contents, raw) {
+		t.Fatalf("installed relative destination = %d bytes, %v", len(contents), err)
+	}
+	assertNoDownloadTemps(t, relativeDestination)
+}
+
+func TestDownloadRoastChartReportsCanonicalAbsoluteDestinationFromSymlinkSpelledWorkingDirectory(t *testing.T) {
+	originalWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	realWorkingDirectory := filepath.Join(root, "real-working-directory")
+	if err := os.MkdirAll(filepath.Join(realWorkingDirectory, "relative"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlinkWorkingDirectory := filepath.Join(root, "symlink-working-directory")
+	if err := os.Symlink(realWorkingDirectory, symlinkWorkingDirectory); err != nil {
+		t.Skipf("working-directory symlinks are unavailable: %v", err)
+	}
+	if err := os.Chdir(symlinkWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(originalWorkingDirectory); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+
+	raw := []byte(validChartJSON)
+	client := chartClient(t, deterministicGzip(t, raw), nil)
+	relativeDestination := filepath.Join("relative", "chart.json")
+	absoluteDestination, err := filepath.Abs(relativeDestination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, failure := client.DownloadRoastChart(context.Background(), roastUUID, relativeDestination, false)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	if result.Path != absoluteDestination || !filepath.IsAbs(result.Path) {
+		t.Fatalf("reported path = %q, want canonical held destination %q", result.Path, absoluteDestination)
+	}
+	if lexicalDestination := filepath.Join(symlinkWorkingDirectory, relativeDestination); lexicalDestination == absoluteDestination {
+		t.Log("platform retained the symlink spelling in its absolute working directory")
 	}
 	contents, err := os.ReadFile(relativeDestination)
 	if err != nil || !bytes.Equal(contents, raw) {

@@ -66,26 +66,22 @@ async def _inspect(roast_uuid: uuid.UUID) -> dict[str, object]:
     factory = create_session_factory(engine)
     try:
         async with factory() as session:
-            organization = await session.scalar(
-                select(Organization).where(
-                    Organization.slug == _FIXED_ORGANIZATION_SLUG
-                )
-            )
-            if organization is None:
-                raise RuntimeError("fixed disposable organization is absent")
             roast = await session.scalar(
-                select(Roast).where(
-                    Roast.organization_id == organization.id,
+                select(Roast)
+                .join(Organization, Organization.id == Roast.organization_id)
+                .where(
+                    Organization.slug == _FIXED_ORGANIZATION_SLUG,
                     Roast.roast_uuid == roast_uuid,
                 )
             )
             if roast is None:
                 raise RuntimeError("disposable roast is absent")
+            organization_id = roast.organization_id
             comment_ids = list(
                 await session.scalars(
                     select(Comment.id)
                     .where(
-                        Comment.organization_id == organization.id,
+                        Comment.organization_id == organization_id,
                         Comment.roast_id == roast.id,
                     )
                     .order_by(Comment.id)
@@ -95,7 +91,7 @@ async def _inspect(roast_uuid: uuid.UUID) -> dict[str, object]:
                 await session.scalars(
                     select(RoastReviewComment.comment_id)
                     .where(
-                        RoastReviewComment.organization_id == organization.id,
+                        RoastReviewComment.organization_id == organization_id,
                         RoastReviewComment.roast_id == roast.id,
                     )
                     .order_by(RoastReviewComment.comment_id)
@@ -103,16 +99,25 @@ async def _inspect(roast_uuid: uuid.UUID) -> dict[str, object]:
             )
             audit_count = await session.scalar(
                 select(func.count(AuditEvent.id)).where(
-                    AuditEvent.organization_id == organization.id,
+                    AuditEvent.organization_id == organization_id,
                     AuditEvent.event_type == "comment.created",
                     AuditEvent.subject_type == "comment",
                     AuditEvent.subject_id.in_(comment_ids),
+                )
+            )
+            organization_comment_created_audit_count = await session.scalar(
+                select(func.count(AuditEvent.id)).where(
+                    AuditEvent.organization_id == organization_id,
+                    AuditEvent.event_type == "comment.created",
                 )
             )
             return {
                 "audit_count": int(audit_count or 0),
                 "comment_count": len(comment_ids),
                 "comment_ids": [value.hex for value in comment_ids],
+                "organization_comment_created_audit_count": int(
+                    organization_comment_created_audit_count or 0
+                ),
                 "slot_comment_ids": [value.hex for value in slot_comment_ids],
                 "slot_count": len(slot_comment_ids),
             }

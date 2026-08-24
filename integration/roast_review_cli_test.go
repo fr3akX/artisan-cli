@@ -412,6 +412,7 @@ func TestRoastReviewInspectorContract(t *testing.T) {
 		`ARTISAN_SERVER_E2E_DISPOSABLE`, `artisan-server-e2e-compose-v1`,
 		`/proc/1/environ`, `ARTISAN_E2E_EXPECTED_PROJECT`, `COMPOSE_PROJECT_NAME`,
 		`my-roastery`, `RoastReviewComment`, `comment.created`,
+		`organization_comment_created_audit_count`,
 		`json.dumps`, `sort_keys=True`,
 	} {
 		if !strings.Contains(text, required) {
@@ -422,6 +423,56 @@ func TestRoastReviewInspectorContract(t *testing.T) {
 		if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
 			t.Errorf("review inspector contains forbidden output material %q", forbidden)
 		}
+	}
+}
+
+func TestDecodeRoastReviewInspectionRequiresStrictCompleteCounts(t *testing.T) {
+	valid := `{"audit_count":1,"comment_count":1,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"organization_comment_created_audit_count":7,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`
+	inspection, err := decodeRoastReviewInspection([]byte(valid))
+	if err != nil || inspection.OrganizationCommentCreatedAuditCount != 7 || inspection.AuditCount != 1 {
+		t.Fatalf("valid inspection = (%+v, %v)", inspection, err)
+	}
+
+	invalid := []struct {
+		name     string
+		contents string
+	}{
+		{"missing organization audit count", `{"audit_count":1,"comment_count":1,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`},
+		{"null organization audit count", `{"audit_count":1,"comment_count":1,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"organization_comment_created_audit_count":null,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`},
+		{"negative organization audit count", `{"audit_count":1,"comment_count":1,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"organization_comment_created_audit_count":-1,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`},
+		{"comment count mismatch", `{"audit_count":1,"comment_count":0,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"organization_comment_created_audit_count":7,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`},
+		{"slot count mismatch", `{"audit_count":1,"comment_count":1,"comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"organization_comment_created_audit_count":7,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":0}`},
+		{"malformed comment identity", `{"audit_count":1,"comment_count":1,"comment_ids":["not-a-uuid"],"organization_comment_created_audit_count":7,"slot_comment_ids":["aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"],"slot_count":1}`},
+		{"unknown field", `{"audit_count":0,"comment_count":0,"comment_ids":[],"organization_comment_created_audit_count":7,"slot_comment_ids":[],"slot_count":0,"extra":true}`},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeRoastReviewInspection([]byte(test.contents)); err == nil {
+				t.Fatal("invalid inspection was accepted")
+			}
+		})
+	}
+}
+
+func TestRequireOrganizationCommentCreatedAuditDelta(t *testing.T) {
+	before := roastReviewInspection{OrganizationCommentCreatedAuditCount: 11}
+	if err := requireOrganizationCommentCreatedAuditDelta(before, roastReviewInspection{OrganizationCommentCreatedAuditCount: 12}, 1); err != nil {
+		t.Fatalf("exact audit delta was rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name  string
+		after int
+		want  int
+	}{
+		{"unexpected extra audit", 13, 1},
+		{"missing audit", 11, 1},
+		{"decreasing total", 10, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := requireOrganizationCommentCreatedAuditDelta(before, roastReviewInspection{OrganizationCommentCreatedAuditCount: test.after}, test.want); err == nil {
+				t.Fatal("invalid organization audit delta was accepted")
+			}
+		})
 	}
 }
 
@@ -668,11 +719,61 @@ type integrationReviewResult struct {
 }
 
 type roastReviewInspection struct {
-	AuditCount     int      `json:"audit_count"`
-	CommentCount   int      `json:"comment_count"`
-	CommentIDs     []string `json:"comment_ids"`
-	SlotCommentIDs []string `json:"slot_comment_ids"`
-	SlotCount      int      `json:"slot_count"`
+	AuditCount                           int      `json:"audit_count"`
+	CommentCount                         int      `json:"comment_count"`
+	CommentIDs                           []string `json:"comment_ids"`
+	OrganizationCommentCreatedAuditCount int      `json:"organization_comment_created_audit_count"`
+	SlotCommentIDs                       []string `json:"slot_comment_ids"`
+	SlotCount                            int      `json:"slot_count"`
+}
+
+func decodeRoastReviewInspection(contents []byte) (roastReviewInspection, error) {
+	var wire struct {
+		AuditCount                           *int      `json:"audit_count"`
+		CommentCount                         *int      `json:"comment_count"`
+		CommentIDs                           *[]string `json:"comment_ids"`
+		OrganizationCommentCreatedAuditCount *int      `json:"organization_comment_created_audit_count"`
+		SlotCommentIDs                       *[]string `json:"slot_comment_ids"`
+		SlotCount                            *int      `json:"slot_count"`
+	}
+	if err := decodeExactlyOneJSON(contents, &wire, true); err != nil ||
+		wire.AuditCount == nil || wire.CommentCount == nil || wire.CommentIDs == nil ||
+		wire.OrganizationCommentCreatedAuditCount == nil || wire.SlotCommentIDs == nil || wire.SlotCount == nil {
+		return roastReviewInspection{}, errors.New("review inspection did not match its strict wire contract")
+	}
+	if *wire.AuditCount < 0 || *wire.CommentCount < 0 || *wire.OrganizationCommentCreatedAuditCount < 0 || *wire.SlotCount < 0 ||
+		*wire.AuditCount > *wire.OrganizationCommentCreatedAuditCount || *wire.CommentCount != len(*wire.CommentIDs) || *wire.SlotCount != len(*wire.SlotCommentIDs) {
+		return roastReviewInspection{}, errors.New("review inspection counts were invalid")
+	}
+	for _, values := range [][]string{*wire.CommentIDs, *wire.SlotCommentIDs} {
+		seen := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			normalized, err := api.NormalizeRoastUUID(value)
+			if err != nil || normalized != value {
+				return roastReviewInspection{}, errors.New("review inspection contained an invalid comment identity")
+			}
+			if _, exists := seen[value]; exists {
+				return roastReviewInspection{}, errors.New("review inspection contained a duplicate comment identity")
+			}
+			seen[value] = struct{}{}
+		}
+	}
+	return roastReviewInspection{
+		AuditCount:                           *wire.AuditCount,
+		CommentCount:                         *wire.CommentCount,
+		CommentIDs:                           *wire.CommentIDs,
+		OrganizationCommentCreatedAuditCount: *wire.OrganizationCommentCreatedAuditCount,
+		SlotCommentIDs:                       *wire.SlotCommentIDs,
+		SlotCount:                            *wire.SlotCount,
+	}, nil
+}
+
+func requireOrganizationCommentCreatedAuditDelta(before, after roastReviewInspection, want int) error {
+	if want < 0 || before.OrganizationCommentCreatedAuditCount < 0 || after.OrganizationCommentCreatedAuditCount < before.OrganizationCommentCreatedAuditCount ||
+		after.OrganizationCommentCreatedAuditCount-before.OrganizationCommentCreatedAuditCount != want {
+		return errors.New("organization comment.created audit delta was not exact")
+	}
+	return nil
 }
 
 type inspectionProcessResult struct {
@@ -842,7 +943,12 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		{"roast", "review", "post", roastUUID, "--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberBodyPath},
 		{"roast", "review", "post", roastUUID, "--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", adminBodyPath},
 	}
+	concurrentAuditBefore := inspectRoastReviews(t, config, roastUUID, inspectionSecrets)
 	concurrentExecutions := runConcurrentReviewCommands([2]*cliRunner{memberRunner, adminRunner}, concurrentArguments)
+	concurrentAuditAfter := inspectRoastReviews(t, config, roastUUID, inspectionSecrets)
+	if err := requireOrganizationCommentCreatedAuditDelta(concurrentAuditBefore, concurrentAuditAfter, 1); err != nil {
+		t.Fatal(err)
+	}
 	for index, check := range []struct {
 		token  string
 		runner *cliRunner
@@ -861,7 +967,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	}
 	firstReview := assertConcurrentReviewPair(t, memberReview, adminReview, roastUUID, revisionOneSHA, memberBody, adminBody)
 	assertReviewComments(t, memberRunner, roastUUID, []integrationReviewResult{firstReview})
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{firstReview.Comment.CommentUUID})
+	assertInspection(t, concurrentAuditAfter, []string{firstReview.Comment.CommentUUID})
 
 	uploadRoastRevision(t, config, adminToken, roastUUID, revisionTwo, "review-"+runID+"-revision-2")
 	var oldReplay integrationReviewResult
@@ -890,12 +996,17 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	if staleUploadedTwo.RevisionNumber != 2 || staleUploadedTwo.SHA256 != digestHex(staleRevisionTwo) {
 		t.Fatalf("stale-proof uploaded revision two = %+v", staleUploadedTwo)
 	}
+	staleAuditBefore := inspectRoastReviews(t, config, staleRoastUUID, inspectionSecrets)
 	staleProxy.Release()
 	var staleExecution commandExecution
 	select {
 	case staleExecution = <-staleExecutionChannel:
 	case <-time.After(cliCommandTimeout):
 		t.Fatal("stale review CLI did not receive the authoritative server response")
+	}
+	staleAuditAfter := inspectRoastReviews(t, config, staleRoastUUID, inspectionSecrets)
+	if err := requireOrganizationCommentCreatedAuditDelta(staleAuditBefore, staleAuditAfter, 0); err != nil {
+		t.Fatal(err)
 	}
 	if err := assertTokenAbsent(config.reviewMemberToken, staleRunner.records, staleExecution.err); err != nil {
 		t.Fatal(err)
@@ -904,7 +1015,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	if staleExecution.overflow || staleExecution.timedOut || staleExecution.record.ExitCode != 7 || staleExecution.record.Stderr != "" || err != nil || staleEnvelope.Error.Code != "roast_revision_changed" || staleEnvelope.Error.HTTPStatus == nil || *staleEnvelope.Error.HTTPStatus != http.StatusConflict {
 		t.Fatalf("authoritative stale review result = execution %+v envelope %+v", staleExecution, staleEnvelope)
 	}
-	assertInspection(t, inspectRoastReviews(t, config, staleRoastUUID, inspectionSecrets), nil)
+	assertInspection(t, staleAuditAfter, nil)
 	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{firstReview.Comment.CommentUUID})
 
 	adminRevisionTwoBody := reviewBody(2, revisionTwoSHA, "Administrator revision-two analysis")
@@ -1438,8 +1549,8 @@ func inspectRoastReviews(t *testing.T, config liveConfig, roastUUID string, disp
 	if err := validateInspectionProcessResult(processResult, disposableSecrets); err != nil {
 		t.Fatal(err)
 	}
-	var result roastReviewInspection
-	if err := decodeExactlyOneJSON(stdout.Bytes(), &result, true); err != nil || result.CommentIDs == nil || result.SlotCommentIDs == nil {
+	result, err := decodeRoastReviewInspection(stdout.Bytes())
+	if err != nil {
 		t.Fatal("review inspection returned invalid bounded JSON")
 	}
 	return result
