@@ -200,7 +200,7 @@ func TestPostRoastReviewRetriesExactBodyAndKeyAndAcceptsReplay(t *testing.T) {
 	}
 }
 
-func TestPostRoastReviewReplaysCompletedOldRevisionAfterCurrentAdvances(t *testing.T) {
+func TestPostRoastReviewReplaysCompletedOldRevisionAfterCurrentAdvancesAndParseStateChanges(t *testing.T) {
 	newSHA := strings.Repeat("e", 64)
 	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
 	var revisionReads, posts atomic.Int32
@@ -210,7 +210,8 @@ func TestPostRoastReviewReplaysCompletedOldRevisionAfterCurrentAdvances(t *testi
 			writeRoastJSON(w, detail)
 		case "GET /api/v1/roasts/" + roastUUID + "/revisions":
 			revisionReads.Add(1)
-			writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":null}`)
+			failedRevision := strings.Replace(validRoastRevisionJSON(), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1)
+			writeRoastJSON(w, `{"items":[`+failedRevision+`],"next_cursor":null}`)
 		case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
 			posts.Add(1)
 			writeReviewResponse(w, true, "Earlier completed review")
@@ -262,10 +263,9 @@ func TestPostRoastReviewPostsVerifiedOldUnclaimedSlotAndMapsRevisionConflict(t *
 	}
 }
 
-func TestPostRoastReviewRejectsUnknownMismatchedOrNonparsedOldRevisionBeforePost(t *testing.T) {
+func TestPostRoastReviewRejectsUnknownOrMismatchedOldRevisionBeforePost(t *testing.T) {
 	newSHA := strings.Repeat("e", 64)
 	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
-	failedRevision := strings.Replace(validRoastRevisionJSON(), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1)
 	mismatchedRevision := strings.Replace(validRoastRevisionJSON(), roastSHA256, strings.Repeat("c", 64), 1)
 	thirdRevision := strings.Replace(validRoastRevisionJSON(), `"revision_number":1`, `"revision_number":3`, 1)
 	tests := []struct {
@@ -276,7 +276,6 @@ func TestPostRoastReviewRejectsUnknownMismatchedOrNonparsedOldRevisionBeforePost
 	}{
 		{name: "unknown revision number", page: `{"items":[],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
 		{name: "revision SHA mismatch", page: `{"items":[` + mismatchedRevision + `],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
-		{name: "revision was not parsed", page: `{"items":[` + failedRevision + `],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
 		{name: "repeated cursor is bounded", page: `{"items":[` + thirdRevision + `],"next_cursor":"same"}`, wantCode: "invalid_server_response", wantReads: 2},
 	}
 	for _, test := range tests {
@@ -301,6 +300,46 @@ func TestPostRoastReviewRejectsUnknownMismatchedOrNonparsedOldRevisionBeforePost
 				Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
 			})
 			if failure == nil || failure.Code != test.wantCode || revisionReads.Load() != test.wantReads || posts.Load() != 0 {
+				t.Fatalf("failure = %+v, revision reads = %d, posts = %d", failure, revisionReads.Load(), posts.Load())
+			}
+		})
+	}
+}
+
+func TestPostRoastReviewRejectsSameNumberDifferentSHAAndFutureRevisionBeforeLookupOrPost(t *testing.T) {
+	currentSHA := strings.Repeat("e", 64)
+	detail := roastDetailWithCurrentRevision(t, 2, currentSHA)
+	tests := []struct {
+		name           string
+		revisionNumber int64
+		sha            string
+	}{
+		{name: "same revision number with different SHA", revisionNumber: 2, sha: strings.Repeat("c", 64)},
+		{name: "future revision number", revisionNumber: 3, sha: strings.Repeat("d", 64)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var revisionReads, posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /api/v1/roasts/" + roastUUID:
+					writeRoastJSON(w, detail)
+				case "GET /api/v1/roasts/" + roastUUID + "/revisions":
+					revisionReads.Add(1)
+				case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
+					posts.Add(1)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer server.Close()
+
+			body := "AI roast analysis\nTemplate: " + ReviewTemplateVersion + "\nProfile revision: " + strconv.FormatInt(test.revisionNumber, 10) + " (" + test.sha + ")\n\nMeasured evidence."
+			client, _ := NewClient(server.URL, "ordered-revision-secret", time.Second)
+			_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+				Body: body, RevisionSHA256: test.sha, TemplateVersion: ReviewTemplateVersion,
+			})
+			if failure == nil || failure.Code != "roast_revision_changed" || revisionReads.Load() != 0 || posts.Load() != 0 {
 				t.Fatalf("failure = %+v, revision reads = %d, posts = %d", failure, revisionReads.Load(), posts.Load())
 			}
 		})
@@ -437,10 +476,26 @@ func TestPostRoastReviewMapsAPIAndMissingEndpointErrors(t *testing.T) {
 		{name: "permission", code: "permission_denied", status: http.StatusForbidden, want: "permission_denied"},
 		{name: "invalid review", code: "invalid_review", status: http.StatusUnprocessableEntity, want: "invalid_review"},
 		{name: "missing endpoint empty", status: http.StatusNotFound, body: "", want: "server_upgrade_required"},
-		{name: "missing endpoint plain text", status: http.StatusNotFound, body: "404 page not found", contentType: "text/plain", want: "server_upgrade_required"},
-		{name: "missing endpoint HTML", status: http.StatusNotFound, body: "<html><body>Not Found</body></html>", contentType: "text/html", want: "server_upgrade_required"},
-		{name: "plain text mislabeled as JSON", status: http.StatusNotFound, body: "404 page not found", contentType: "application/json", want: "invalid_server_response"},
-		{name: "framework detail not found", status: http.StatusNotFound, body: `{"detail":"Not Found"}`, contentType: "application/json", want: "server_upgrade_required"},
+		{name: "empty body with declared JSON MIME", status: http.StatusNotFound, body: "", contentType: "application/json", want: "invalid_server_response"},
+		{name: "missing endpoint Go default", status: http.StatusNotFound, body: "404 page not found\n", contentType: "text/plain; charset=utf-8", want: "server_upgrade_required"},
+		{name: "missing endpoint supported plain text", status: http.StatusNotFound, body: "Not Found", contentType: "text/plain", want: "server_upgrade_required"},
+		{name: "missing endpoint supported proxy HTML", status: http.StatusNotFound, body: "<html><body>Not Found</body></html>", contentType: "text/html; charset=UTF-8", want: "server_upgrade_required"},
+		{name: "framework detail not found", status: http.StatusNotFound, body: `{"detail":"Not Found"}`, contentType: "application/json; charset=utf-8", want: "server_upgrade_required"},
+		{name: "Go default with HTML MIME", status: http.StatusNotFound, body: "404 page not found\n", contentType: "text/html", want: "invalid_server_response"},
+		{name: "Go default with leading whitespace", status: http.StatusNotFound, body: " 404 page not found\n", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "supported plain text with newline", status: http.StatusNotFound, body: "Not Found\n", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "supported proxy HTML with newline", status: http.StatusNotFound, body: "<html><body>Not Found</body></html>\n", contentType: "text/html", want: "invalid_server_response"},
+		{name: "duplicate plain MIME", status: http.StatusNotFound, body: "Not Found", contentType: "text/plain, text/plain", want: "invalid_server_response"},
+		{name: "supported plain text with JSON MIME", status: http.StatusNotFound, body: "Not Found", contentType: "application/json", want: "invalid_server_response"},
+		{name: "supported HTML with plain MIME", status: http.StatusNotFound, body: "<html><body>Not Found</body></html>", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "arbitrary entity plain text", status: http.StatusNotFound, body: "Roast not found", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "authentication plain text", status: http.StatusNotFound, body: "Authentication required", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "maintenance plain text", status: http.StatusNotFound, body: "Service under maintenance", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "arbitrary HTML", status: http.StatusNotFound, body: "<html><body>Roast not found</body></html>", contentType: "text/html", want: "invalid_server_response"},
+		{name: "maintenance HTML", status: http.StatusNotFound, body: "<html><body>Maintenance</body></html>", contentType: "text/html", want: "invalid_server_response"},
+		{name: "whitespace only", status: http.StatusNotFound, body: " \n", contentType: "text/plain", want: "invalid_server_response"},
+		{name: "malformed UTF-8 plain text", status: http.StatusNotFound, body: string([]byte{0xff}), contentType: "text/plain", want: "invalid_server_response"},
+		{name: "JSON-looking scalar", status: http.StatusNotFound, body: `"Not Found"`, contentType: "application/json", want: "invalid_server_response"},
 		{name: "framework detail with extra field", status: http.StatusNotFound, body: `{"detail":"Not Found","extra":true}`, contentType: "application/json", want: "invalid_server_response"},
 		{name: "duplicate framework detail", status: http.StatusNotFound, body: `{"detail":"Not Found","detail":"Not Found"}`, contentType: "application/json", want: "invalid_server_response"},
 		{name: "malformed JSON looking", status: http.StatusNotFound, body: `{`, contentType: "application/json", want: "invalid_server_response"},
@@ -689,6 +744,106 @@ func TestPostRoastReviewRejectsSensitiveSuccessHeadersAndCommentFields(t *testin
 	}
 }
 
+func TestPostRoastReviewRejectsPartialAndSegmentedBodyReflection(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestBody string
+		mutate      func(http.ResponseWriter, string) string
+	}{
+		{name: "partial header value", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "Measured")
+			return activeCommentJSON(body)
+		}},
+		{name: "wrapped partial header value", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "prefix-Measured-suffix")
+			return activeCommentJSON(body)
+		}},
+		{name: "duplicate header value segmentation", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Add("Server", "Meas")
+			w.Header().Add("Server", "ured")
+			return activeCommentJSON(body)
+		}},
+		{name: "cross header segmentation", requestBody: validReviewBody + "\nMeasur e", mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "Measu")
+			w.Header().Set("Via", "r e")
+			return activeCommentJSON(body)
+		}},
+		{name: "partial comment field", requestBody: validReviewBody, mutate: func(_ http.ResponseWriter, body string) string {
+			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"Measured"`, 1)
+		}},
+		{name: "wrapped partial comment field", requestBody: validReviewBody, mutate: func(_ http.ResponseWriter, body string) string {
+			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"prefix-Measured-suffix"`, 1)
+		}},
+		{name: "cross comment field segmentation", requestBody: validReviewBody + "\n" + commentUUID[len(commentUUID)-4:] + roastUUID[:4], mutate: func(_ http.ResponseWriter, body string) string {
+			return activeCommentJSON(body)
+		}},
+		{name: "cross header and comment field segmentation", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "Meas")
+			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"ured"`, 1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					writeRoastJSON(w, validRoastDetailJSON())
+					return
+				}
+				setReviewHeaders(w, false)
+				w.Header().Set("Content-Type", "application/json")
+				responseBody := test.mutate(w, test.requestBody)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, responseBody)
+			}))
+			defer server.Close()
+
+			client, _ := NewClient(server.URL, "segmented-reflection-secret", time.Second)
+			_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+				Body: test.requestBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+			})
+			if failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %+v, want invalid_server_response", failure)
+			}
+		})
+	}
+}
+
+func TestPostRoastReviewRejectsMalformedOrOversizedOptionalResponseMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(http.ResponseWriter)
+	}{
+		{name: "duplicate Server", mutate: func(w http.ResponseWriter) { w.Header().Add("Server", "one"); w.Header().Add("Server", "two") }},
+		{name: "oversized Server", mutate: func(w http.ResponseWriter) { w.Header().Set("Server", strings.Repeat("a", 257)) }},
+		{name: "malformed Via", mutate: func(w http.ResponseWriter) { w.Header().Set("Via", "gateway-only") }},
+		{name: "malformed request ID", mutate: func(w http.ResponseWriter) { w.Header().Set("X-Request-ID", "has spaces") }},
+		{name: "malformed traceparent", mutate: func(w http.ResponseWriter) { w.Header().Set("traceparent", "00-short") }},
+		{name: "oversized tracestate", mutate: func(w http.ResponseWriter) { w.Header().Set("tracestate", "vendor="+strings.Repeat("a", 506)) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					writeRoastJSON(w, validRoastDetailJSON())
+					return
+				}
+				setReviewHeaders(w, false)
+				w.Header().Set("Content-Type", "application/json")
+				test.mutate(w)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, activeCommentJSON(validReviewBody))
+			}))
+			defer server.Close()
+
+			client, _ := NewClient(server.URL, "metadata-format-secret", time.Second)
+			_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion})
+			if failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %+v, want invalid_server_response", failure)
+			}
+		})
+	}
+}
+
 func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *testing.T) {
 	requestBody := validReviewBody + "\n" + ReviewTemplateVersion + "\n" + roastSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -723,6 +878,8 @@ func TestPostRoastReviewRejectsReflectionsInAllowedStandardHeaders(t *testing.T)
 		{name: "token", value: "allowed-header-token"},
 		{name: "server URL", value: "SERVER_URL"},
 		{name: "review body line", value: "prefix Measured evidence. suffix"},
+		{name: "partial review body", value: "Measured"},
+		{name: "wrapped partial review body", value: "prefix-Measured-suffix"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var server *httptest.Server

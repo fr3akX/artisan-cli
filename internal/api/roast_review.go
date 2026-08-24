@@ -88,14 +88,19 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	if failure != nil {
 		return result, failure
 	}
-	requestedIsCurrent := current.CurrentRevision != nil &&
-		current.CurrentRevision.RevisionNumber == revisionNumber &&
+	if current.CurrentRevision == nil {
+		return result, reviewRevisionChangedFailure()
+	}
+	requestedIsCurrent := current.CurrentRevision.RevisionNumber == revisionNumber &&
 		current.CurrentRevision.SHA256 == request.RevisionSHA256
 	if requestedIsCurrent {
 		if current.State != "parsed" || current.CurrentRevision.ParseState != "parsed" {
 			return result, reviewRevisionChangedFailure()
 		}
 	} else {
+		if revisionNumber >= current.CurrentRevision.RevisionNumber {
+			return result, reviewRevisionChangedFailure()
+		}
 		revision, lookupFailure := c.findRoastRevision(ctx, roastUUID, revisionNumber)
 		if lookupFailure != nil {
 			if lookupFailure.Code == "not_found" && lookupFailure.HTTPStatus == nil {
@@ -103,7 +108,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 			}
 			return result, lookupFailure
 		}
-		if revision.SHA256 != request.RevisionSHA256 || revision.ParseState != "parsed" {
+		if revision.SHA256 != request.RevisionSHA256 {
 			return result, reviewRevisionChangedFailure()
 		}
 	}
@@ -118,30 +123,17 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 
 	var replay bool
 	var locationCommentUUID string
+	var responseMetadata []string
 	validator := func(status int, header http.Header) *output.Error {
-		if status != http.StatusCreated || !validRoastReviewSuccessHeaders(header, request.Body, key, c.token, c.serverURL.String()) {
+		if status != http.StatusCreated {
 			return invalidServerResponse(status)
 		}
-		if !singleHeaderEquals(header, "Cache-Control", "no-store") ||
-			!singleHeaderEquals(header, "X-Roast-Revision-SHA256", request.RevisionSHA256) ||
-			!singleHeaderEquals(header, "X-Review-Template-Version", request.TemplateVersion) {
-			return invalidServerResponse(status)
-		}
-		replayValues := header.Values("X-Idempotent-Replay")
-		if len(replayValues) != 1 || (replayValues[0] != "true" && replayValues[0] != "false") {
-			return invalidServerResponse(status)
-		}
-		replay = replayValues[0] == "true"
-		if !requestedIsCurrent && !replay {
-			return invalidServerResponse(status)
-		}
-		locationValues := header.Values("Location")
-		prefix := roastAPIRoot + "/" + roastUUID + "/comments/"
-		if len(locationValues) != 1 || !strings.HasPrefix(locationValues[0], prefix) {
-			return invalidServerResponse(status)
-		}
-		locationCommentUUID = strings.TrimPrefix(locationValues[0], prefix)
-		if !validRoastUUID(locationCommentUUID) || locationValues[0] != prefix+locationCommentUUID {
+		var valid bool
+		replay, locationCommentUUID, responseMetadata, valid = validateRoastReviewSuccessHeaders(
+			header, roastUUID, request.RevisionSHA256, request.TemplateVersion, request.Body,
+			key, c.token, c.serverURL.String(),
+		)
+		if !valid || !requestedIsCurrent && !replay {
 			return invalidServerResponse(status)
 		}
 		return nil
@@ -157,7 +149,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	if failure != nil {
 		return result, sanitizeRoastReviewPostFailure(failure)
 	}
-	if roastReviewCommentReflectsForbidden(comment, request.Body, key, c.token, c.serverURL.String()) || comment.RoastUUID != roastUUID || comment.CommentUUID != locationCommentUUID || (!replay && (comment.IsDeleted || comment.Body == nil || *comment.Body != request.Body)) {
+	if roastReviewCommentReflectsForbidden(comment, responseMetadata, request.Body, key, c.token, c.serverURL.String()) || comment.RoastUUID != roastUUID || comment.CommentUUID != locationCommentUUID || (!replay && (comment.IsDeleted || comment.Body == nil || *comment.Body != request.Body)) {
 		return result, invalidServerResponse(http.StatusCreated)
 	}
 	return RoastReviewResult{
@@ -198,10 +190,8 @@ func singleHeaderEquals(header http.Header, name, expected string) bool {
 	return len(values) == 1 && values[0] == expected && !strings.Contains(values[0], ",")
 }
 
-// Review responses allow only endpoint contract metadata, net/http framing
-// metadata, and ubiquitous proxy/trace metadata. Application-specific custom
-// headers require an explicit client update so reflected data cannot be split
-// across newly invented names or values.
+// Review responses allow only exact endpoint contract metadata, net/http
+// framing metadata, and a bounded set of ubiquitous proxy/trace metadata.
 var roastReviewSuccessHeaderNames = map[string]struct{}{
 	"cache-control":             {},
 	"location":                  {},
@@ -218,49 +208,175 @@ var roastReviewSuccessHeaderNames = map[string]struct{}{
 	"tracestate":                {},
 }
 
-// Values for these headers are checked against their exact endpoint contract
-// below, so marker text that necessarily contains the same fixed values is not
-// mistaken for response reflection.
-var roastReviewFixedValueHeaderNames = map[string]struct{}{
-	"cache-control":             {},
-	"location":                  {},
-	"x-idempotent-replay":       {},
-	"x-roast-revision-sha256":   {},
-	"x-review-template-version": {},
-	"content-type":              {},
+var roastReviewOptionalHeaderNames = []string{
+	"Content-Length",
+	"Date",
+	"Server",
+	"Via",
+	"X-Request-ID",
+	"Traceparent",
+	"Tracestate",
 }
 
-func validRoastReviewSuccessHeaders(header http.Header, body string, forbiddenValues ...string) bool {
+var roastReviewRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:/+=-]+$`)
+
+func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSHA, template, body string, forbiddenValues ...string) (bool, string, []string, bool) {
+	if !singleHeaderEquals(header, "Cache-Control", "no-store") ||
+		!singleHeaderEquals(header, "X-Roast-Revision-SHA256", revisionSHA) ||
+		!singleHeaderEquals(header, "X-Review-Template-Version", template) ||
+		!singleHeaderEquals(header, "Content-Type", "application/json") &&
+			!singleHeaderEquals(header, "Content-Type", "application/json; charset=utf-8") {
+		return false, "", nil, false
+	}
+
+	replayValues := header.Values("X-Idempotent-Replay")
+	if len(replayValues) != 1 || replayValues[0] != "true" && replayValues[0] != "false" {
+		return false, "", nil, false
+	}
+	replay := replayValues[0] == "true"
+
+	locationValues := header.Values("Location")
+	prefix := roastAPIRoot + "/" + roastUUID + "/comments/"
+	if len(locationValues) != 1 || !strings.HasPrefix(locationValues[0], prefix) {
+		return false, "", nil, false
+	}
+	locationCommentUUID := strings.TrimPrefix(locationValues[0], prefix)
+	if !validRoastUUID(locationCommentUUID) || locationValues[0] != prefix+locationCommentUUID {
+		return false, "", nil, false
+	}
+
 	for name, values := range header {
-		lowerName := strings.ToLower(name)
-		if _, allowed := roastReviewSuccessHeaderNames[lowerName]; !allowed || len(values) == 0 {
+		if _, allowed := roastReviewSuccessHeaderNames[strings.ToLower(name)]; !allowed || len(values) == 0 || containsCaseInsensitive(name, forbiddenValues) {
+			return false, "", nil, false
+		}
+	}
+	for _, name := range []string{
+		"Cache-Control", "Location", "X-Idempotent-Replay", "X-Roast-Revision-SHA256",
+		"X-Review-Template-Version", "Content-Type",
+	} {
+		if containsAny(header.Values(name)[0], forbiddenValues) {
+			return false, "", nil, false
+		}
+	}
+
+	metadata := make([]string, 0, len(roastReviewOptionalHeaderNames))
+	for _, name := range roastReviewOptionalHeaderNames {
+		values := header.Values(name)
+		if len(values) > 1 {
+			return false, "", nil, false
+		}
+		if len(values) == 0 {
+			continue
+		}
+		value := values[0]
+		if containsAny(value, forbiddenValues) || !validRoastReviewOptionalHeader(name, value) {
+			return false, "", nil, false
+		}
+		metadata = append(metadata, value)
+	}
+	if roastReviewMetadataReflectsBody(metadata, body) {
+		return false, "", nil, false
+	}
+	return replay, locationCommentUUID, metadata, true
+}
+
+func validRoastReviewOptionalHeader(name, value string) bool {
+	switch name {
+	case "Content-Length":
+		parsed, err := strconv.ParseUint(value, 10, 63)
+		return err == nil && strconv.FormatUint(parsed, 10) == value && parsed <= maxResponseBodyBytes
+	case "Date":
+		_, err := http.ParseTime(value)
+		return len(value) <= 64 && err == nil
+	case "Server":
+		return validVisibleRoastReviewMetadata(value, 256)
+	case "Via":
+		if !validVisibleRoastReviewMetadata(value, 1024) {
 			return false
 		}
-		if containsCaseInsensitive(name, forbiddenValues) || containsReviewBodyExcerpt(name, body) {
-			return false
-		}
-		_, hasFixedContractValue := roastReviewFixedValueHeaderNames[lowerName]
-		for _, value := range values {
-			if containsAny(value, forbiddenValues) || (!hasFixedContractValue && containsReviewBodyExcerpt(value, body)) {
+		for _, entry := range strings.Split(value, ",") {
+			if len(strings.Fields(entry)) < 2 {
 				return false
 			}
 		}
-	}
-	if !singleHeaderEquals(header, "Content-Type", "application/json") &&
-		!singleHeaderEquals(header, "Content-Type", "application/json; charset=utf-8") {
+		return true
+	case "X-Request-ID":
+		return len(value) >= 1 && len(value) <= 256 && roastReviewRequestIDPattern.MatchString(value)
+	case "Traceparent":
+		return validTraceparent(value)
+	case "Tracestate":
+		return validTracestate(value)
+	default:
 		return false
 	}
-	if values := header.Values("Content-Length"); len(values) > 1 {
+}
+
+func validVisibleRoastReviewMetadata(value string, maximum int) bool {
+	if len(value) == 0 || len(value) > maximum || strings.TrimSpace(value) != value {
 		return false
-	} else if len(values) == 1 {
-		if _, err := strconv.ParseUint(values[0], 10, 63); err != nil {
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] > 0x7e {
 			return false
 		}
 	}
-	if values := header.Values("Date"); len(values) > 1 {
+	return true
+}
+
+func validTraceparent(value string) bool {
+	if len(value) != 55 || value[2] != '-' || value[35] != '-' || value[52] != '-' || value[:2] == "ff" {
 		return false
-	} else if len(values) == 1 {
-		if _, err := http.ParseTime(values[0]); err != nil {
+	}
+	for index, character := range value {
+		if index == 2 || index == 35 || index == 52 {
+			continue
+		}
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return value[3:35] != strings.Repeat("0", 32) && value[36:52] != strings.Repeat("0", 16)
+}
+
+func validTracestate(value string) bool {
+	if len(value) == 0 || len(value) > 512 {
+		return false
+	}
+	members := strings.Split(value, ",")
+	if len(members) > 32 {
+		return false
+	}
+	for _, member := range members {
+		if strings.TrimSpace(member) != member || strings.Count(member, "=") != 1 {
+			return false
+		}
+		parts := strings.SplitN(member, "=", 2)
+		if !validTracestateKey(parts[0]) || !validTracestateValue(parts[1]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTracestateKey(value string) bool {
+	if len(value) == 0 || len(value) > 256 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("_@*-/", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validTracestateValue(value string) bool {
+	if len(value) == 0 || len(value) > 256 || value[0] == ' ' || value[len(value)-1] == ' ' {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character > 0x7e || character == ',' || character == '=' {
 			return false
 		}
 	}
@@ -277,17 +393,42 @@ func containsCaseInsensitive(value string, forbiddenValues []string) bool {
 	return false
 }
 
-func containsReviewBodyExcerpt(value, body string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if len(line) >= 8 && strings.Contains(value, line) {
+func roastReviewMetadataReflectsBody(values []string, body string) bool {
+	const minimum = 8
+	if len(body) < minimum {
+		return false
+	}
+	bodySubstrings := make(map[string]struct{}, len(body)-minimum+1)
+	for index := 0; index+minimum <= len(body); index++ {
+		bodySubstrings[body[index:index+minimum]] = struct{}{}
+	}
+	reflects := func(value string) bool {
+		for index := 0; index+minimum <= len(value); index++ {
+			if _, exists := bodySubstrings[value[index:index+minimum]]; exists {
+				return true
+			}
+		}
+		return false
+	}
+	for _, value := range values {
+		if reflects(value) {
 			return true
+		}
+	}
+	if len(values) > 1 && reflects(strings.Join(values, "")) {
+		return true
+	}
+	for first := 0; first < len(values); first++ {
+		for second := first + 1; second < len(values); second++ {
+			if reflects(values[first]+values[second]) || reflects(values[second]+values[first]) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func roastReviewCommentReflectsForbidden(comment CommentView, requestBody, key, token, serverURL string) bool {
+func roastReviewCommentReflectsForbidden(comment CommentView, responseMetadata []string, requestBody, key, token, serverURL string) bool {
 	forbidden := []string{key, token, serverURL}
 	bodyIndependentFields := []string{
 		comment.CommentUUID, comment.RoastUUID, comment.AuthorNickname, comment.CreatedAt,
@@ -299,9 +440,13 @@ func roastReviewCommentReflectsForbidden(comment CommentView, requestBody, key, 
 		bodyIndependentFields = append(bodyIndependentFields, *comment.DeletedAt)
 	}
 	for _, value := range bodyIndependentFields {
-		if containsAny(value, forbidden) || containsReviewBodyExcerpt(value, requestBody) {
+		if containsAny(value, forbidden) {
 			return true
 		}
+	}
+	combinedMetadata := append(append([]string(nil), responseMetadata...), bodyIndependentFields...)
+	if roastReviewMetadataReflectsBody(combinedMetadata, requestBody) {
+		return true
 	}
 	return comment.Body != nil && containsAny(*comment.Body, forbidden)
 }

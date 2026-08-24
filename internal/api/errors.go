@@ -35,38 +35,44 @@ type apiErrorBody struct {
 }
 
 func isUnstructuredRouteNotFound(body []byte, header http.Header) bool {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
-		return true
+	if len(body) == 0 {
+		return len(header.Values("Content-Type")) == 0
 	}
+	trimmed := bytes.TrimSpace(body)
 	if exactFrameworkNotFound(trimmed) {
 		return trustedJSONContentType(header)
 	}
-	if json.Valid(trimmed) || bytes.ContainsAny(trimmed[:1], `{["`) || !validRouteNotFoundText(trimmed) {
-		return false
+	if exactGoRouteNotFound(body) || bytes.Equal(body, []byte("Not Found")) {
+		return trustedRouteNotFoundContentType(header, "text/plain")
 	}
-	return trustedRouteNotFoundTextContentType(header)
+	if exactProxyRouteNotFoundHTML(body) {
+		return trustedRouteNotFoundContentType(header, "text/html")
+	}
+	return false
 }
 
-func validRouteNotFoundText(body []byte) bool {
-	if !utf8.Valid(body) {
-		return false
-	}
-	for _, character := range string(body) {
-		if (character < 0x20 && character != '\t' && character != '\n' && character != '\r') || character == 0x7f {
-			return false
-		}
-	}
-	return true
+func exactGoRouteNotFound(body []byte) bool {
+	return bytes.Equal(body, []byte("404 page not found")) ||
+		bytes.Equal(body, []byte("404 page not found\n")) ||
+		bytes.Equal(body, []byte("404 page not found\r\n"))
 }
 
-func trustedRouteNotFoundTextContentType(header http.Header) bool {
+func exactProxyRouteNotFoundHTML(body []byte) bool {
+	switch string(body) {
+	case "<html><body>Not Found</body></html>":
+		return true
+	default:
+		return false
+	}
+}
+
+func trustedRouteNotFoundContentType(header http.Header, expected string) bool {
 	values := header.Values("Content-Type")
 	if len(values) != 1 || strings.Contains(values[0], ",") {
 		return false
 	}
 	mediaType, parameters, err := mime.ParseMediaType(values[0])
-	if err != nil || mediaType != "text/plain" && mediaType != "text/html" {
+	if err != nil || mediaType != expected {
 		return false
 	}
 	for name, value := range parameters {
