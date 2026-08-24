@@ -48,35 +48,75 @@ func TestCLIRunnerOptionalPaceIsBoundedAndNotResponseDriven(t *testing.T) {
 }
 
 func TestCLIErrorEnvelopeStrictWireContract(t *testing.T) {
-	valid := []byte(`{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists"}}`)
-	envelope, err := decodeCLIErrorEnvelope(valid)
-	if err != nil || envelope.OK || envelope.Error.Code != "local_storage_error" || envelope.Error.Message != "Destination already exists" || envelope.Error.HTTPStatus != nil {
-		t.Fatalf("valid local error envelope = (%+v, %v)", envelope, err)
+	validCases := []struct {
+		name        string
+		contents    string
+		wantCode    string
+		wantMessage string
+		wantStatus  *int
+	}{
+		{"omitted HTTP status", `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists"}}`, "local_storage_error", "Destination already exists", nil},
+		{"lower HTTP status boundary", `{"ok":false,"error":{"code":"server_error","message":"Request failed","http_status":100}}`, "server_error", "Request failed", intPointer(100)},
+		{"upper HTTP status boundary", `{"ok":false,"error":{"code":"server_error","message":"Request failed","http_status":599}}`, "server_error", "Request failed", intPointer(599)},
 	}
-	serverEnvelope, err := decodeCLIErrorEnvelope([]byte(`{"ok":false,"error":{"code":"not_found","message":"Roast not found","http_status":404}}`))
-	if err != nil || serverEnvelope.Error.HTTPStatus == nil || *serverEnvelope.Error.HTTPStatus != http.StatusNotFound {
-		t.Fatalf("valid server error envelope = (%+v, %v)", serverEnvelope, err)
+	for _, test := range validCases {
+		t.Run(test.name, func(t *testing.T) {
+			envelope, err := decodeCLIErrorEnvelope([]byte(test.contents))
+			if err != nil || envelope.OK || envelope.Error.Code != test.wantCode || envelope.Error.Message != test.wantMessage || test.wantStatus == nil && envelope.Error.HTTPStatus != nil || test.wantStatus != nil && (envelope.Error.HTTPStatus == nil || *envelope.Error.HTTPStatus != *test.wantStatus) {
+				t.Fatalf("valid CLI error envelope = (%+v, %v)", envelope, err)
+			}
+		})
 	}
 
-	mutations := map[string]string{
-		"missing ok":           `{"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
-		"missing error":        `{"ok":false}`,
-		"missing code":         `{"ok":false,"error":{"message":"Destination already exists","http_status":null}}`,
-		"missing message":      `{"ok":false,"error":{"code":"local_storage_error"}}`,
-		"explicit null HTTP":   `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
-		"extra envelope field": `{"ok":false,"extra":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
-		"extra error field":    `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null,"detail":"unsafe"}}`,
-		"wrong ok value":       `{"ok":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
-		"wrong message type":   `{"ok":false,"error":{"code":"local_storage_error","message":7,"http_status":null}}`,
-		"wrong HTTP type":      `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":"none"}}`,
+	mutations := []struct {
+		name     string
+		contents string
+	}{
+		{"missing ok", `{"error":{"code":"local_storage_error","message":"Destination already exists"}}`},
+		{"missing error", `{"ok":false}`},
+		{"missing code", `{"ok":false,"error":{"message":"Destination already exists"}}`},
+		{"missing message", `{"ok":false,"error":{"code":"local_storage_error"}}`},
+		{"extra envelope field", `{"ok":false,"extra":true,"error":{"code":"local_storage_error","message":"Destination already exists"}}`},
+		{"extra error field", `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","detail":"unsafe"}}`},
+		{"wrong ok value", `{"ok":true,"error":{"code":"local_storage_error","message":"Destination already exists"}}`},
+		{"wrong code type", `{"ok":false,"error":{"code":7,"message":"Destination already exists"}}`},
+		{"wrong message type", `{"ok":false,"error":{"code":"local_storage_error","message":7}}`},
 	}
-	for name, mutation := range mutations {
-		t.Run(name, func(t *testing.T) {
-			if _, err := decodeCLIErrorEnvelope([]byte(mutation)); err == nil {
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if _, err := decodeCLIErrorEnvelope([]byte(mutation.contents)); err == nil {
 				t.Fatal("invalid CLI error envelope was accepted")
 			}
 		})
 	}
+
+	invalidStatuses := []struct {
+		name   string
+		status string
+	}{
+		{"explicit null HTTP status", "null"},
+		{"below HTTP status boundary", "99"},
+		{"above HTTP status boundary", "600"},
+		{"negative HTTP status", "-1"},
+		{"fractional HTTP status", "100.5"},
+		{"string HTTP status", `"404"`},
+		{"boolean HTTP status", "true"},
+		{"object HTTP status", `{}`},
+		{"array HTTP status", `[]`},
+		{"overflowing HTTP status", "9223372036854775808"},
+	}
+	for _, test := range invalidStatuses {
+		t.Run(test.name, func(t *testing.T) {
+			contents := fmt.Sprintf(`{"ok":false,"error":{"code":"server_error","message":"Request failed","http_status":%s}}`, test.status)
+			if _, err := decodeCLIErrorEnvelope([]byte(contents)); err == nil {
+				t.Fatal("invalid CLI HTTP status was accepted")
+			}
+		})
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func TestDisposableProvisioningIncludesForeignTenantAdministratorCredential(t *testing.T) {
