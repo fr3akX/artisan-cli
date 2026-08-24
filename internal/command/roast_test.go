@@ -28,6 +28,13 @@ const commandRoastSHA = "ddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const commandCommentID = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb"
 const commandLabelID = "cccccccccccc4ccc8ccccccccccccccc"
 
+const (
+	commandReviewContentTypeOptions = "nosniff"
+	commandReviewReferrerPolicy     = "strict-origin-when-cross-origin"
+	commandReviewFrameOptions       = "DENY"
+	commandReviewContentSecurity    = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
+)
+
 func commandRoastRevisionJSON(number int64, sha string, byteSize int64) string {
 	return fmt.Sprintf(`{"revision_number":%d,"sha256":%q,"byte_size":%d,"parser_version":"artisan-4-v1","parse_state":"parsed","parse_diagnostic_code":null,"parse_diagnostic_message":null,"uploaded_at":%q,"metadata":{"note":"line\\tab"},"reparse_recommended":false}`,
 		number, sha, byteSize, commandTimestamp)
@@ -314,6 +321,54 @@ func TestRoastReviewPostParsesFileBeforeConfigurationPostsWithoutPromptAndRender
 	}
 }
 
+func TestRoastReviewPostRejectsMissingOrMutatedDeployedSecurityHeaders(t *testing.T) {
+	body := commandReviewBody()
+	bodyPath := filepath.Join(t.TempDir(), "review.txt")
+	if err := os.WriteFile(bodyPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	required := []struct {
+		name  string
+		value string
+	}{
+		{name: "X-Content-Type-Options", value: commandReviewContentTypeOptions},
+		{name: "Referrer-Policy", value: commandReviewReferrerPolicy},
+		{name: "X-Frame-Options", value: commandReviewFrameOptions},
+		{name: "Content-Security-Policy", value: commandReviewContentSecurity},
+	}
+	for _, header := range required {
+		for _, mutation := range []string{"missing", "mutated"} {
+			t.Run(mutation+" "+header.name, func(t *testing.T) {
+				var posts atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, commandRoastDetailJSON(1234))
+						return
+					}
+					posts.Add(1)
+					setCommandReviewHeaders(w.Header(), false)
+					w.Header().Set("Content-Type", "application/json")
+					if mutation == "missing" {
+						w.Header().Del(header.name)
+					} else {
+						w.Header().Set(header.name, header.value+"-mutated")
+					}
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, commandCommentJSON(&body, false))
+				}))
+				defer server.Close()
+
+				result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "roast", "review", "post", commandRoastID,
+					"--revision-sha256", commandRoastSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", bodyPath)
+				if result.code != 9 || result.stderr != "" || posts.Load() != 1 || !strings.Contains(result.stdout, `"code":"invalid_server_response"`) {
+					t.Fatalf("result = %#v posts=%d", result, posts.Load())
+				}
+			})
+		}
+	}
+}
+
 func TestRoastLocalValidationPrecedesConfigurationAndNetwork(t *testing.T) {
 	validBody := filepath.Join(t.TempDir(), "review.txt")
 	if err := os.WriteFile(validBody, []byte(commandReviewBody()), 0o600); err != nil {
@@ -482,4 +537,8 @@ func setCommandReviewHeaders(header http.Header, replay bool) {
 	header.Set("X-Idempotent-Replay", strconv.FormatBool(replay))
 	header.Set("X-Roast-Revision-SHA256", commandRoastSHA)
 	header.Set("X-Review-Template-Version", api.ReviewTemplateVersion)
+	header.Set("X-Content-Type-Options", commandReviewContentTypeOptions)
+	header.Set("Referrer-Policy", commandReviewReferrerPolicy)
+	header.Set("X-Frame-Options", commandReviewFrameOptions)
+	header.Set("Content-Security-Policy", commandReviewContentSecurity)
 }
