@@ -1227,13 +1227,16 @@ func TestValidTracestateW3COWSAndBounds(t *testing.T) {
 	}
 }
 
-func TestValidateRoastReviewSuccessHeadersAcceptsExactDeployedSecurityMetadata(t *testing.T) {
-	validate := func(header http.Header, body string) bool {
+func TestValidateRoastReviewSuccessHeadersAcceptsAbsentOrExactDeployedSecurityMetadata(t *testing.T) {
+	validate := func(header http.Header, body string, forbiddenValues ...string) bool {
 		_, _, _, valid := validateRoastReviewSuccessHeaders(
 			header, roastUUID, roastSHA256, ReviewTemplateVersion, body,
-			"canonical-review-key", "bearer-token", "https://server.example.test",
+			forbiddenValues...,
 		)
 		return valid
+	}
+	if !validate(directRoastReviewHeaders(), validReviewBody) {
+		t.Fatal("direct compliant endpoint response without proxy security metadata was rejected")
 	}
 	if !validate(deployedRoastReviewHeaders(), validReviewBody) {
 		t.Fatal("complete deployed nginx header set was rejected")
@@ -1246,11 +1249,11 @@ func TestValidateRoastReviewSuccessHeadersAcceptsExactDeployedSecurityMetadata(t
 		"Content-Security-Policy": "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'",
 	}
 	for name, value := range securityHeaders {
-		t.Run("missing "+name, func(t *testing.T) {
+		t.Run("absent "+name, func(t *testing.T) {
 			header := deployedRoastReviewHeaders()
 			header.Del(name)
-			if validate(header, validReviewBody) {
-				t.Fatal("missing deployed security header was accepted")
+			if !validate(header, validReviewBody) {
+				t.Fatal("optional deployed security header was required")
 			}
 		})
 		t.Run("duplicate "+name, func(t *testing.T) {
@@ -1265,6 +1268,11 @@ func TestValidateRoastReviewSuccessHeadersAcceptsExactDeployedSecurityMetadata(t
 			header.Set(name, value+"-mutated")
 			if validate(header, validReviewBody) {
 				t.Fatal("mutated deployed security header was accepted")
+			}
+		})
+		t.Run("forbidden value "+name, func(t *testing.T) {
+			if validate(deployedRoastReviewHeaders(), validReviewBody, value) {
+				t.Fatal("forbidden value reflected in deployed security metadata was accepted")
 			}
 		})
 	}
@@ -1428,7 +1436,7 @@ func writeReviewResponse(w http.ResponseWriter, replay bool, body string) {
 	_, _ = io.WriteString(w, activeCommentJSON(body))
 }
 
-func deployedRoastReviewHeaders() http.Header {
+func directRoastReviewHeaders() http.Header {
 	header := make(http.Header)
 	header.Set("Cache-Control", "no-store")
 	header.Set("Location", "/api/v1/roasts/"+roastUUID+"/comments/"+commentUUID)
@@ -1436,6 +1444,11 @@ func deployedRoastReviewHeaders() http.Header {
 	header.Set("X-Roast-Revision-SHA256", roastSHA256)
 	header.Set("X-Review-Template-Version", ReviewTemplateVersion)
 	header.Set("Content-Type", "application/json")
+	return header
+}
+
+func deployedRoastReviewHeaders() http.Header {
+	header := directRoastReviewHeaders()
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	header.Set("X-Frame-Options", "DENY")
@@ -1449,10 +1462,6 @@ func setReviewHeaders(w http.ResponseWriter, replay bool) {
 	w.Header().Set("X-Idempotent-Replay", map[bool]string{false: "false", true: "true"}[replay])
 	w.Header().Set("X-Roast-Revision-SHA256", roastSHA256)
 	w.Header().Set("X-Review-Template-Version", ReviewTemplateVersion)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'")
 }
 
 func activeCommentJSON(body string) string {

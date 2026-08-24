@@ -331,11 +331,12 @@ artisan [GLOBAL FLAGS] roast review post ROAST_UUID
 ```
 
 `roast list` combines the listed filters and normalizes compact or dashed roast
-and label UUIDs. `--all` cannot be combined with `--cursor`; all page options
-retain the normal pagination bounds. `roast show` returns the complete current
-safe projection. `roast revisions` returns immutable newest-first revision
-records, and `roast comment list` includes ordinary comments and deleted
-comment tombstones.
+and label UUIDs. `--all` may be combined with `--cursor`; bounded aggregation
+starts from that cursor and retains the normal pagination limits. The same
+starting-cursor behavior applies to `roast revisions` and `roast comment list`.
+`roast show` returns the complete current safe projection. `roast revisions`
+returns immutable newest-first revision records, and `roast comment list`
+includes ordinary comments and deleted comment tombstones.
 
 Chart download stores validated schema-v1 JSON for the current parsed revision.
 Profile download stores the exact immutable bytes of the selected positive

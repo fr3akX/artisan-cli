@@ -210,8 +210,8 @@ same fields as a comment-list item. `idempotent_replay:false` means this request
 won the slot, while true means the server returned its existing comment. A
 never-posted stale identity fails with `roast_revision_changed` and exit 7.
 
-`skill list` returns `items`, each containing `name`; `skill show` returns
-`name` and exact `content`; `skill install` returns `name`, `path`, `installed`,
+`skill list` returns `names`, an array of skill-name strings; `skill show`
+returns `name` and exact `content`; `skill install` returns `path`, `installed`,
 and `unchanged`.
 
 ## Financial JSON and totals invariants

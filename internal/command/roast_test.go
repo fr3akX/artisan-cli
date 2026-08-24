@@ -321,13 +321,13 @@ func TestRoastReviewPostParsesFileBeforeConfigurationPostsWithoutPromptAndRender
 	}
 }
 
-func TestRoastReviewPostRejectsMissingOrMutatedDeployedSecurityHeaders(t *testing.T) {
+func TestRoastReviewPostAcceptsAbsentAndRejectsMutatedOrDuplicateSecurityHeaders(t *testing.T) {
 	body := commandReviewBody()
 	bodyPath := filepath.Join(t.TempDir(), "review.txt")
 	if err := os.WriteFile(bodyPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	required := []struct {
+	optional := []struct {
 		name  string
 		value string
 	}{
@@ -336,8 +336,8 @@ func TestRoastReviewPostRejectsMissingOrMutatedDeployedSecurityHeaders(t *testin
 		{name: "X-Frame-Options", value: commandReviewFrameOptions},
 		{name: "Content-Security-Policy", value: commandReviewContentSecurity},
 	}
-	for _, header := range required {
-		for _, mutation := range []string{"missing", "mutated"} {
+	for _, header := range optional {
+		for _, mutation := range []string{"exact", "mutated", "duplicate"} {
 			t.Run(mutation+" "+header.name, func(t *testing.T) {
 				var posts atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -349,10 +349,14 @@ func TestRoastReviewPostRejectsMissingOrMutatedDeployedSecurityHeaders(t *testin
 					posts.Add(1)
 					setCommandReviewHeaders(w.Header(), false)
 					w.Header().Set("Content-Type", "application/json")
-					if mutation == "missing" {
-						w.Header().Del(header.name)
-					} else {
+					switch mutation {
+					case "exact":
+						w.Header().Set(header.name, header.value)
+					case "mutated":
 						w.Header().Set(header.name, header.value+"-mutated")
+					case "duplicate":
+						w.Header().Add(header.name, header.value)
+						w.Header().Add(header.name, header.value)
 					}
 					w.WriteHeader(http.StatusCreated)
 					_, _ = io.WriteString(w, commandCommentJSON(&body, false))
@@ -361,7 +365,11 @@ func TestRoastReviewPostRejectsMissingOrMutatedDeployedSecurityHeaders(t *testin
 
 				result := runAuthCommand(t, inventoryRuntime(t, server.URL), "--json", "roast", "review", "post", commandRoastID,
 					"--revision-sha256", commandRoastSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", bodyPath)
-				if result.code != 9 || result.stderr != "" || posts.Load() != 1 || !strings.Contains(result.stdout, `"code":"invalid_server_response"`) {
+				if mutation == "exact" {
+					if result.code != 0 || result.stderr != "" || posts.Load() != 1 || !strings.Contains(result.stdout, `"idempotent_replay":false`) {
+						t.Fatalf("result = %#v posts=%d", result, posts.Load())
+					}
+				} else if result.code != 9 || result.stderr != "" || posts.Load() != 1 || !strings.Contains(result.stdout, `"code":"invalid_server_response"`) {
 					t.Fatalf("result = %#v posts=%d", result, posts.Load())
 				}
 			})
@@ -537,8 +545,4 @@ func setCommandReviewHeaders(header http.Header, replay bool) {
 	header.Set("X-Idempotent-Replay", strconv.FormatBool(replay))
 	header.Set("X-Roast-Revision-SHA256", commandRoastSHA)
 	header.Set("X-Review-Template-Version", api.ReviewTemplateVersion)
-	header.Set("X-Content-Type-Options", commandReviewContentTypeOptions)
-	header.Set("Referrer-Policy", commandReviewReferrerPolicy)
-	header.Set("X-Frame-Options", commandReviewFrameOptions)
-	header.Set("Content-Security-Policy", commandReviewContentSecurity)
 }

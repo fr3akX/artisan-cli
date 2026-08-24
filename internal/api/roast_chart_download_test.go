@@ -96,6 +96,42 @@ func TestDownloadRoastChartVerifiesWireAndInstallsExactJSON(t *testing.T) {
 	assertNoDownloadTemps(t, destination)
 }
 
+func TestDownloadRoastChartReportsHeldCanonicalAbsoluteDestinationForRelativePath(t *testing.T) {
+	originalWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workingDirectory, "relative"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(originalWorkingDirectory); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+
+	raw := []byte(validChartJSON)
+	client := chartClient(t, deterministicGzip(t, raw), nil)
+	relativeDestination := filepath.Join("relative", "chart.json")
+	result, failure := client.DownloadRoastChart(context.Background(), roastUUID, relativeDestination, false)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	absoluteDestination := filepath.Join(workingDirectory, relativeDestination)
+	if result.Path != absoluteDestination || !filepath.IsAbs(result.Path) {
+		t.Fatalf("reported path = %q, want canonical held destination %q", result.Path, absoluteDestination)
+	}
+	contents, err := os.ReadFile(relativeDestination)
+	if err != nil || !bytes.Equal(contents, raw) {
+		t.Fatalf("installed relative destination = %d bytes, %v", len(contents), err)
+	}
+	assertNoDownloadTemps(t, relativeDestination)
+}
+
 func TestRoastChartDownloadJSONContract(t *testing.T) {
 	value := RoastChartDownload{
 		Path: "chart.json", RoastUUID: roastUUID, RevisionNumber: 3, RevisionSHA256: roastSHA256,

@@ -215,25 +215,19 @@ var roastReviewSuccessHeaderNames = map[string]struct{}{
 	"connection":                {},
 }
 
-var roastReviewRequiredSecurityHeaders = []struct {
-	name  string
-	value string
-}{
-	{name: "X-Content-Type-Options", value: "nosniff"},
-	{name: "Referrer-Policy", value: "strict-origin-when-cross-origin"},
-	{name: "X-Frame-Options", value: "DENY"},
-	{name: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"},
-}
-
 var roastReviewOptionalHeaderNames = []string{
 	"Connection",
 	"Content-Length",
+	"Content-Security-Policy",
 	"Date",
+	"Referrer-Policy",
 	"Server",
-	"Via",
-	"X-Request-ID",
 	"Traceparent",
 	"Tracestate",
+	"Via",
+	"X-Content-Type-Options",
+	"X-Frame-Options",
+	"X-Request-ID",
 }
 
 var roastReviewRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:/+=-]+$`)
@@ -245,12 +239,6 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		!singleHeaderEquals(header, "Content-Type", "application/json") &&
 			!singleHeaderEquals(header, "Content-Type", "application/json; charset=utf-8") {
 		return false, "", nil, false
-	}
-
-	for _, required := range roastReviewRequiredSecurityHeaders {
-		if !singleHeaderEquals(header, required.name, required.value) {
-			return false, "", nil, false
-		}
 	}
 
 	replayValues := header.Values("X-Idempotent-Replay")
@@ -283,7 +271,7 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		}
 	}
 
-	metadata := make([]string, 0, len(roastReviewOptionalHeaderNames)+len(roastReviewRequiredSecurityHeaders))
+	metadata := make([]string, 0, len(roastReviewOptionalHeaderNames))
 	for _, name := range roastReviewOptionalHeaderNames {
 		values := header.Values(name)
 		if len(values) > 1 {
@@ -298,13 +286,6 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		}
 		metadata = append(metadata, value)
 	}
-	for _, required := range roastReviewRequiredSecurityHeaders {
-		value := header.Values(required.name)[0]
-		if containsAny(value, forbiddenValues) {
-			return false, "", nil, false
-		}
-		metadata = append(metadata, value)
-	}
 	if roastReviewFieldsReflectSensitiveData(metadata, body, forbiddenValues...) {
 		return false, "", nil, false
 	}
@@ -315,12 +296,16 @@ func validRoastReviewOptionalHeader(name, value string) bool {
 	switch name {
 	case "Connection":
 		return value == "keep-alive"
+	case "Content-Security-Policy":
+		return value == "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
 	case "Content-Length":
 		parsed, err := strconv.ParseUint(value, 10, 63)
 		return err == nil && strconv.FormatUint(parsed, 10) == value && parsed <= maxResponseBodyBytes
 	case "Date":
 		_, err := http.ParseTime(value)
 		return len(value) <= 64 && err == nil
+	case "Referrer-Policy":
+		return value == "strict-origin-when-cross-origin"
 	case "Server":
 		return validVisibleRoastReviewMetadata(value, 256)
 	case "Via":
@@ -339,6 +324,10 @@ func validRoastReviewOptionalHeader(name, value string) bool {
 		return validTraceparent(value)
 	case "Tracestate":
 		return validTracestate(value)
+	case "X-Content-Type-Options":
+		return value == "nosniff"
+	case "X-Frame-Options":
+		return value == "DENY"
 	default:
 		return false
 	}

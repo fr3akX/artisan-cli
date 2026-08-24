@@ -13,12 +13,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +119,200 @@ func TestCLIErrorEnvelopeStrictWireContract(t *testing.T) {
 
 func intPointer(value int) *int {
 	return &value
+}
+
+func TestConcurrentReviewCommandsUseSeparateRunnersAndDecodeAfterCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-specific")
+	}
+	root := canonicalTempDir(t)
+	body := reviewBody(1, strings.Repeat("a", 64), "Concurrent fixture")
+	response := integrationReviewResult{
+		RevisionSHA256: strings.Repeat("a", 64), TemplateVersion: api.ReviewTemplateVersion,
+		Comment: integrationComment{CommentUUID: strings.Repeat("b", 32), RoastUUID: strings.Repeat("c", 32), Body: &body},
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := `{"ok":true,"data":` + string(data) + `}`
+	runners := [2]*cliRunner{}
+	for index := range runners {
+		script := filepath.Join(root, fmt.Sprintf("runner-%d", index))
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '"+envelope+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runners[index] = &cliRunner{binary: script, baseURL: "http://127.0.0.1", cwd: root, env: []string{"PATH=" + os.Getenv("PATH")}}
+	}
+
+	executions := runConcurrentReviewCommands(runners, [2][]string{{"first"}, {"second"}})
+	for index, execution := range executions {
+		decoded, err := decodeReviewExecution(execution)
+		if err != nil || decoded.Comment.CommentUUID != response.Comment.CommentUUID || len(runners[index].records) != 1 {
+			t.Fatalf("concurrent result %d = (%+v, %v), records=%d", index, decoded, err, len(runners[index].records))
+		}
+	}
+}
+
+func TestRevisionFenceProxyHoldsFetchedDetailUntilReleased(t *testing.T) {
+	const roastID = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"revision":"one"}`)
+	}))
+	defer upstream.Close()
+	proxy, err := newRevisionFenceProxy(upstream.URL, roastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+
+	type responseResult struct {
+		status int
+		body   []byte
+		err    error
+	}
+	resultChannel := make(chan responseResult, 1)
+	go func() {
+		response, err := http.Get(proxy.URL() + "/api/v1/roasts/" + roastID)
+		if err != nil {
+			resultChannel <- responseResult{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, readErr := io.ReadAll(response.Body)
+		resultChannel <- responseResult{status: response.StatusCode, body: body, err: readErr}
+	}()
+
+	select {
+	case <-proxy.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not hold the fetched preflight detail")
+	}
+	select {
+	case result := <-resultChannel:
+		t.Fatalf("held response completed before release: %+v", result)
+	default:
+	}
+	proxy.Release()
+	select {
+	case result := <-resultChannel:
+		if result.err != nil || result.status != http.StatusOK || string(result.body) != `{"revision":"one"}` {
+			t.Fatalf("released response = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("released proxy response did not complete")
+	}
+}
+
+func runConcurrentReviewCommands(runners [2]*cliRunner, arguments [2][]string) [2]commandExecution {
+	start := make(chan struct{})
+	results := make(chan int, len(runners))
+	var executions [2]commandExecution
+	for index := range runners {
+		go func(index int) {
+			<-start
+			executions[index] = runners[index].execute("", arguments[index]...)
+			results <- index
+		}(index)
+	}
+	close(start)
+	for range runners {
+		<-results
+	}
+	return executions
+}
+
+func decodeReviewExecution(execution commandExecution) (integrationReviewResult, error) {
+	if execution.overflow || execution.timedOut || execution.err != nil || execution.record.ExitCode != 0 || execution.record.Stderr != "" {
+		return integrationReviewResult{}, errors.New("concurrent CLI review command did not complete successfully")
+	}
+	var envelope struct {
+		OK   bool            `json:"ok"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := decodeExactlyOneJSON([]byte(execution.record.Stdout), &envelope, true); err != nil || !envelope.OK || len(envelope.Data) == 0 {
+		return integrationReviewResult{}, errors.New("concurrent CLI review command returned an invalid success envelope")
+	}
+	var result integrationReviewResult
+	if err := decodeExactlyOneJSON(envelope.Data, &result, false); err != nil {
+		return integrationReviewResult{}, errors.New("concurrent CLI review command returned invalid review data")
+	}
+	return result, nil
+}
+
+type revisionFenceProxy struct {
+	server      *httptest.Server
+	transport   *http.Transport
+	ready       chan struct{}
+	release     chan struct{}
+	readyOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newRevisionFenceProxy(upstream, roastUUID string) (*revisionFenceProxy, error) {
+	target, err := url.Parse(upstream)
+	if err != nil || target.Scheme == "" || target.Host == "" || target.User != nil || target.Path != "" || target.RawQuery != "" || target.Fragment != "" {
+		return nil, errors.New("invalid revision-fence upstream")
+	}
+	proxy := &revisionFenceProxy{
+		transport: &http.Transport{Proxy: nil},
+		ready:     make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	proxy.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		outbound := request.Clone(request.Context())
+		outbound.URL.Scheme = target.Scheme
+		outbound.URL.Host = target.Host
+		outbound.URL.Path = request.URL.Path
+		outbound.URL.RawPath = request.URL.RawPath
+		outbound.URL.RawQuery = request.URL.RawQuery
+		outbound.RequestURI = ""
+		outbound.Host = target.Host
+		response, roundTripErr := proxy.transport.RoundTrip(outbound)
+		if roundTripErr != nil {
+			http.Error(writer, "upstream request failed", http.StatusBadGateway)
+			return
+		}
+		defer response.Body.Close()
+
+		var heldBody []byte
+		held := request.Method == http.MethodGet && request.URL.Path == "/api/v1/roasts/"+roastUUID && request.URL.RawQuery == ""
+		if held {
+			heldBody, roundTripErr = io.ReadAll(io.LimitReader(response.Body, maxBrowserJSONBytes+1))
+			if roundTripErr != nil || len(heldBody) > maxBrowserJSONBytes {
+				http.Error(writer, "upstream response invalid", http.StatusBadGateway)
+				return
+			}
+			proxy.readyOnce.Do(func() { close(proxy.ready) })
+			select {
+			case <-proxy.release:
+			case <-request.Context().Done():
+				return
+			}
+		}
+		for name, values := range response.Header {
+			for _, value := range values {
+				writer.Header().Add(name, value)
+			}
+		}
+		writer.WriteHeader(response.StatusCode)
+		if held {
+			_, _ = writer.Write(heldBody)
+			return
+		}
+		_, _ = io.Copy(writer, response.Body)
+	}))
+	return proxy, nil
+}
+
+func (proxy *revisionFenceProxy) URL() string            { return proxy.server.URL }
+func (proxy *revisionFenceProxy) Ready() <-chan struct{} { return proxy.ready }
+func (proxy *revisionFenceProxy) Release()               { proxy.releaseOnce.Do(func() { close(proxy.release) }) }
+func (proxy *revisionFenceProxy) Close() {
+	proxy.Release()
+	proxy.server.Close()
+	proxy.transport.CloseIdleConnections()
 }
 
 func TestBrowserRoastUUIDMatchesCompactIdentityOnlyForCanonicalDashedForm(t *testing.T) {
@@ -545,10 +741,24 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		t.Fatal("revision-two fixture mutation did not apply")
 	}
 	revisionTwoSHA := digestHex(revisionTwo)
+	staleRoastUUID := randomCanonicalUUID(t)
+	staleTitle := "CLI stale review " + runID
+	staleRevisionOne := profileFixtureForRoast(t, fixture, staleRoastUUID, staleTitle)
+	staleRevisionOneSHA := digestHex(staleRevisionOne)
+	staleRevisionTwo := bytes.Replace(staleRevisionOne, []byte("'ambient_temp': 23.5"), []byte("'ambient_temp': 25.5"), 1)
+	if bytes.Equal(staleRevisionOne, staleRevisionTwo) {
+		t.Fatal("stale-proof revision-two fixture mutation did not apply")
+	}
 
 	root := canonicalTempDir(t)
 	adminRunner, adminPaths := newReviewRunner(t, root, "admin", binary, config.baseURL)
 	memberRunner, memberPaths := newReviewRunner(t, root, "member", binary, config.baseURL)
+	staleProxy, err := newRevisionFenceProxy(config.baseURL, staleRoastUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staleProxy.Close()
+	staleRunner, stalePaths := newReviewRunner(t, root, "stale-member", binary, staleProxy.URL())
 	adminHTTP, csrf, adminToken, adminCredentialID := issueCredential(t, config, config.adminEmail, config.adminPassword)
 	foreignHTTP, foreignCSRF := loginBrowserSession(t, config.baseURL, config.foreignEmail, config.memberPassword, config.foreignOrganizationSlug)
 	adminRunner.forbiddenToken = adminToken
@@ -572,6 +782,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		}{
 			{adminToken, adminRunner, adminPaths},
 			{config.reviewMemberToken, memberRunner, memberPaths},
+			{config.reviewMemberToken, staleRunner, stalePaths},
 		} {
 			if err := assertTokenAbsent(check.token, check.runner.records, nil); err != nil {
 				t.Error(err)
@@ -581,7 +792,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 			}
 		}
 	}()
-	adminLoggedIn, memberLoggedIn := true, true
+	adminLoggedIn, memberLoggedIn, staleMemberLoggedIn := true, true, true
 	defer func() {
 		if adminLoggedIn {
 			if err := adminRunner.cleanupLogout(); err != nil {
@@ -593,13 +804,20 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 				t.Error(err)
 			}
 		}
+		if staleMemberLoggedIn {
+			if err := staleRunner.cleanupLogout(); err != nil {
+				t.Error(err)
+			}
+		}
 	}()
 
-	var adminIdentity, memberIdentity authIdentity
+	var adminIdentity, memberIdentity, staleMemberIdentity authIdentity
 	adminRunner.runJSON(t, adminToken+"\n", &adminIdentity, "auth", "login", "--token-stdin")
 	memberRunner.runJSON(t, config.reviewMemberToken+"\n", &memberIdentity, "auth", "login", "--token-stdin")
+	staleRunner.runJSON(t, config.reviewMemberToken+"\n", &staleMemberIdentity, "auth", "login", "--token-stdin")
 	assertExpectedIdentity(t, adminIdentity, config)
 	assertExpectedMemberIdentity(t, memberIdentity, config)
+	assertExpectedMemberIdentity(t, staleMemberIdentity, config)
 
 	uploadRoastRevision(t, config, config.reviewMemberToken, roastUUID, revisionOne, "review-"+runID+"-revision-1")
 	for _, role := range []struct {
@@ -620,28 +838,74 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	adminBody := reviewBody(1, revisionOneSHA, "Administrator alternate analysis")
 	memberBodyPath := writeReviewBody(t, memberPaths[len(memberPaths)-1], "member-review.txt", memberBody)
 	adminBodyPath := writeReviewBody(t, adminPaths[len(adminPaths)-1], "admin-review.txt", adminBody)
-	var memberCreated, adminReplayed integrationReviewResult
-	memberRunner.runJSON(t, "", &memberCreated, "roast", "review", "post", roastUUID,
-		"--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberBodyPath)
-	adminRunner.runJSON(t, "", &adminReplayed, "roast", "review", "post", roastUUID,
-		"--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", adminBodyPath)
-	assertReviewPair(t, memberCreated, adminReplayed, roastUUID, revisionOneSHA, memberBody)
-	assertReviewComments(t, memberRunner, roastUUID, []integrationReviewResult{memberCreated})
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID})
+	concurrentArguments := [2][]string{
+		{"roast", "review", "post", roastUUID, "--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberBodyPath},
+		{"roast", "review", "post", roastUUID, "--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", adminBodyPath},
+	}
+	concurrentExecutions := runConcurrentReviewCommands([2]*cliRunner{memberRunner, adminRunner}, concurrentArguments)
+	for index, check := range []struct {
+		token  string
+		runner *cliRunner
+	}{{config.reviewMemberToken, memberRunner}, {adminToken, adminRunner}} {
+		if err := assertTokenAbsent(check.token, check.runner.records, concurrentExecutions[index].err); err != nil {
+			t.Fatal(err)
+		}
+	}
+	memberReview, err := decodeReviewExecution(concurrentExecutions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminReview, err := decodeReviewExecution(concurrentExecutions[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReview := assertConcurrentReviewPair(t, memberReview, adminReview, roastUUID, revisionOneSHA, memberBody, adminBody)
+	assertReviewComments(t, memberRunner, roastUUID, []integrationReviewResult{firstReview})
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{firstReview.Comment.CommentUUID})
 
 	uploadRoastRevision(t, config, adminToken, roastUUID, revisionTwo, "review-"+runID+"-revision-2")
 	var oldReplay integrationReviewResult
 	memberRunner.runJSON(t, "", &oldReplay, "roast", "review", "post", roastUUID,
 		"--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberBodyPath)
-	if !oldReplay.IdempotentReplay || oldReplay.Comment.CommentUUID != memberCreated.Comment.CommentUUID {
+	if !oldReplay.IdempotentReplay || oldReplay.Comment.CommentUUID != firstReview.Comment.CommentUUID {
 		t.Fatalf("old revision replay = %+v", oldReplay)
 	}
 
-	staleSHA := strings.Repeat("0", 64)
-	staleBodyPath := writeReviewBody(t, memberPaths[len(memberPaths)-1], "stale-review.txt", reviewBody(1, staleSHA, "Never-posted stale analysis"))
-	runCLIError(t, memberRunner, 7, "roast_revision_changed", 0, "roast", "review", "post", roastUUID,
-		"--revision-sha256", staleSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", staleBodyPath)
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID})
+	staleUploadedOne := uploadRoastRevision(t, config, config.reviewMemberToken, staleRoastUUID, staleRevisionOne, "review-"+runID+"-stale-revision-1")
+	if staleUploadedOne.RevisionNumber != 1 || staleUploadedOne.SHA256 != staleRevisionOneSHA {
+		t.Fatalf("stale-proof uploaded revision one = %+v", staleUploadedOne)
+	}
+	staleBodyPath := writeReviewBody(t, stalePaths[len(stalePaths)-1], "never-posted-stale-review.txt", reviewBody(1, staleRevisionOneSHA, "Never-posted real stale analysis"))
+	staleExecutionChannel := make(chan commandExecution, 1)
+	go func() {
+		staleExecutionChannel <- staleRunner.execute("", "roast", "review", "post", staleRoastUUID,
+			"--revision-sha256", staleRevisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", staleBodyPath)
+	}()
+	select {
+	case <-staleProxy.Ready():
+	case <-time.After(cliCommandTimeout):
+		t.Fatal("stale review CLI did not complete local current-revision preflight")
+	}
+	staleUploadedTwo := uploadRoastRevision(t, config, adminToken, staleRoastUUID, staleRevisionTwo, "review-"+runID+"-stale-revision-2")
+	if staleUploadedTwo.RevisionNumber != 2 || staleUploadedTwo.SHA256 != digestHex(staleRevisionTwo) {
+		t.Fatalf("stale-proof uploaded revision two = %+v", staleUploadedTwo)
+	}
+	staleProxy.Release()
+	var staleExecution commandExecution
+	select {
+	case staleExecution = <-staleExecutionChannel:
+	case <-time.After(cliCommandTimeout):
+		t.Fatal("stale review CLI did not receive the authoritative server response")
+	}
+	if err := assertTokenAbsent(config.reviewMemberToken, staleRunner.records, staleExecution.err); err != nil {
+		t.Fatal(err)
+	}
+	staleEnvelope, err := decodeCLIErrorEnvelope([]byte(staleExecution.record.Stdout))
+	if staleExecution.overflow || staleExecution.timedOut || staleExecution.record.ExitCode != 7 || staleExecution.record.Stderr != "" || err != nil || staleEnvelope.Error.Code != "roast_revision_changed" || staleEnvelope.Error.HTTPStatus == nil || *staleEnvelope.Error.HTTPStatus != http.StatusConflict {
+		t.Fatalf("authoritative stale review result = execution %+v envelope %+v", staleExecution, staleEnvelope)
+	}
+	assertInspection(t, inspectRoastReviews(t, config, staleRoastUUID, inspectionSecrets), nil)
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{firstReview.Comment.CommentUUID})
 
 	adminRevisionTwoBody := reviewBody(2, revisionTwoSHA, "Administrator revision-two analysis")
 	memberRevisionTwoBody := reviewBody(2, revisionTwoSHA, "Member alternate revision-two analysis")
@@ -653,8 +917,8 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	memberRunner.runJSON(t, "", &memberRevisionTwoReplay, "roast", "review", "post", roastUUID,
 		"--revision-sha256", revisionTwoSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberRevisionTwoPath)
 	assertReviewPair(t, adminRevisionTwo, memberRevisionTwoReplay, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
-	assertReviewComments(t, adminRunner, roastUUID, []integrationReviewResult{adminRevisionTwo, memberCreated})
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID, adminRevisionTwo.Comment.CommentUUID})
+	assertReviewComments(t, adminRunner, roastUUID, []integrationReviewResult{adminRevisionTwo, firstReview})
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{firstReview.Comment.CommentUUID, adminRevisionTwo.Comment.CommentUUID})
 
 	assertCookieOnlyReviewRejected(t, adminHTTP, config, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
 	assertForeignTenantHidden(t, config, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
@@ -669,6 +933,11 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		t.Fatal("member logout did not report success")
 	}
 	memberLoggedIn = false
+	staleRunner.runJSON(t, "", &logout, "auth", "logout")
+	if !logout.LoggedOut {
+		t.Fatal("stale member logout did not report success")
+	}
+	staleMemberLoggedIn = false
 	adminRunner.runJSON(t, "", &logout, "auth", "logout")
 	if !logout.LoggedOut {
 		t.Fatal("admin logout did not report success")
@@ -1026,6 +1295,28 @@ func writeReviewBody(t *testing.T, directory, name, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func assertConcurrentReviewPair(t *testing.T, member, administrator integrationReviewResult, roastUUID, sha, memberBody, administratorBody string) integrationReviewResult {
+	t.Helper()
+	if member.IdempotentReplay == administrator.IdempotentReplay {
+		t.Fatalf("concurrent replay flags = member %t administrator %t, want exactly one winner", member.IdempotentReplay, administrator.IdempotentReplay)
+	}
+	winner := member
+	winnerBody := memberBody
+	if !administrator.IdempotentReplay {
+		winner = administrator
+		winnerBody = administratorBody
+	}
+	if member.RevisionSHA256 != sha || administrator.RevisionSHA256 != sha ||
+		member.TemplateVersion != api.ReviewTemplateVersion || administrator.TemplateVersion != api.ReviewTemplateVersion ||
+		member.Comment.CommentUUID == "" || member.Comment.CommentUUID != administrator.Comment.CommentUUID ||
+		member.Comment.RoastUUID != roastUUID || administrator.Comment.RoastUUID != roastUUID ||
+		member.Comment.Body == nil || administrator.Comment.Body == nil ||
+		*member.Comment.Body != winnerBody || *administrator.Comment.Body != winnerBody {
+		t.Fatalf("concurrent first-writer mismatch: member=%+v administrator=%+v", member, administrator)
+	}
+	return winner
 }
 
 func assertReviewPair(t *testing.T, created, replay integrationReviewResult, roastUUID, sha, createdBody string) {

@@ -189,7 +189,7 @@ func (c *Client) DownloadRoastChart(ctx context.Context, rawRoastUUID, destinati
 	}
 
 	installedResult := RoastChartDownload{
-		Path: destination, RoastUUID: roastUUID,
+		Path: target.destination, RoastUUID: roastUUID,
 		RevisionNumber: revision.RevisionNumber, RevisionSHA256: revision.SHA256,
 		ParserVersion: parserVersion, ChartSchemaVersion: 1,
 		CompressedBytes: compressedBytes, CompressedSHA256: compressedSHA,
