@@ -6,33 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func TestPrivateReopenParametersRequestExactSecurityAndSharingRights(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		directory bool
-		wantFlags uint32
-	}{
-		{name: "file", wantFlags: windows.FILE_FLAG_OPEN_REPARSE_POINT},
-		{name: "directory", directory: true, wantFlags: windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			access, share, flags := privateReopenParameters(test.directory)
-			wantAccess := uint32(windows.GENERIC_READ | windows.READ_CONTROL | windows.WRITE_DAC)
-			wantShare := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
-			if access != wantAccess || share != wantShare || flags != test.wantFlags {
-				t.Fatalf("privateReopenParameters(%t) = access %#x share %#x flags %#x, want %#x %#x %#x", test.directory, access, share, flags, wantAccess, wantShare, test.wantFlags)
-			}
-		})
-	}
-}
-
-func TestProtectPrivateReopensOrdinaryHandlesWithDACLAccess(t *testing.T) {
+func TestProtectPrivateUsesIdentityCheckedCandidateForOrdinaryHandles(t *testing.T) {
 	directoryPath := filepath.Join(t.TempDir(), "private-directory")
 	if err := os.Mkdir(directoryPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -63,7 +44,7 @@ func TestProtectPrivateReopensOrdinaryHandlesWithDACLAccess(t *testing.T) {
 	}
 }
 
-func TestProtectPrivateReopenRemainsBoundAfterPathReplacement(t *testing.T) {
+func TestProtectPrivateFinalPathFollowsRenamedHeldObject(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "private-file")
 	heldPath := filepath.Join(root, "held-private-file")
@@ -101,7 +82,57 @@ func TestProtectPrivateReopenRemainsBoundAfterPathReplacement(t *testing.T) {
 	}
 	defer replacement.Close()
 	if err := verifyPrivateHandle(windows.Handle(replacement.Fd()), false); err == nil {
-		t.Fatal("path replacement received the held object's private DACL")
+		t.Fatal("stale path replacement received the held object's private DACL")
+	}
+}
+
+func TestProtectPrivateRejectsFinalPathReplacementBeforeDACLMutation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private-file")
+	heldPath := filepath.Join(root, "held-private-file")
+	if err := os.WriteFile(path, []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pathPointer, windows.GENERIC_READ|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	if err := verifyPrivateHandle(windows.Handle(file.Fd()), false); err == nil {
+		t.Fatal("race fixture unexpectedly begins with a private DACL")
+	}
+
+	err = protectPrivateWithHooks(file, false, privateProtectionHooks{afterFinalPath: func() error {
+		if err := os.Rename(path, heldPath); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("replacement"), 0o600)
+	}})
+	if err == nil {
+		t.Fatal("protectPrivate accepted a replacement at the handle-derived final path")
+	}
+	for _, forbidden := range []string{root, path, heldPath, "held", "replacement"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("privacy-safe race error %q contains %q", err, forbidden)
+		}
+	}
+	if err := verifyPrivateHandle(windows.Handle(file.Fd()), false); err == nil {
+		t.Fatal("held object DACL changed after candidate identity mismatch")
+	}
+	replacement, openErr := openWindowsObject(path, false, false)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer replacement.Close()
+	if err := verifyPrivateHandle(windows.Handle(replacement.Fd()), false); err == nil {
+		t.Fatal("replacement DACL changed before candidate identity matched")
 	}
 }
 

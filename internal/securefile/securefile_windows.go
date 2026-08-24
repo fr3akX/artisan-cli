@@ -8,13 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
-
-var reOpenFileProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
 
 // OpenPrivate opens a file without traversing a final reparse point and
 // verifies the DACL on the exact handle used for subsequent reads.
@@ -110,62 +107,106 @@ func openWindowsObject(path string, directory, verify bool) (*os.File, error) {
 	return file, nil
 }
 
+type privateProtectionHooks struct {
+	afterFinalPath func() error
+}
+
 func protectPrivate(file *os.File, directory bool) error {
-	// Ordinary os.File handles do not request WRITE_DAC. Reopen the existing
-	// file object with the security rights needed to apply and verify its DACL;
-	// never resolve file.Name(), which may now identify a replacement object.
-	handle, err := reopenPrivateHandle(windows.Handle(file.Fd()), directory)
+	return protectPrivateWithHooks(file, directory, privateProtectionHooks{})
+}
+
+func protectPrivateWithHooks(file *os.File, directory bool, hooks privateProtectionHooks) error {
+	// Ordinary os.File handles do not request WRITE_DAC. Resolve the kernel's
+	// current path for the already-held object, then open a security-capable
+	// candidate and prove it is still that exact object before changing its DACL.
+	original := windows.Handle(file.Fd())
+	finalPath, err := privateFinalPath(original)
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(handle)
-	if err := applyPrivateACLHandle(handle, directory); err != nil {
+	if hooks.afterFinalPath != nil {
+		if err := hooks.afterFinalPath(); err != nil {
+			return errors.New("private object changed before protection")
+		}
+	}
+	candidate, err := openPrivateProtectionCandidate(finalPath, directory)
+	if err != nil {
 		return err
 	}
-	return verifyPrivateHandle(handle, directory)
-}
+	defer windows.CloseHandle(candidate)
 
-func reopenPrivateHandle(handle windows.Handle, directory bool) (windows.Handle, error) {
-	access, share, flags := privateReopenParameters(directory)
-	result, _, callErr := reOpenFileProc.Call(uintptr(handle), uintptr(access), uintptr(share), uintptr(flags))
-	if windows.Handle(result) == windows.InvalidHandle {
-		if callErr == syscall.Errno(0) {
-			callErr = windows.ERROR_INVALID_HANDLE
-		}
-		return windows.InvalidHandle, fmt.Errorf("reopen private object with DACL access: %w", callErr)
+	var originalInfo, candidateInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(original, &originalInfo); err != nil {
+		return fmt.Errorf("inspect private object before protection: %w", err)
 	}
-	return windows.Handle(result), nil
+	if err := windows.GetFileInformationByHandle(candidate, &candidateInfo); err != nil {
+		return fmt.Errorf("inspect private ACL candidate: %w", err)
+	}
+	if !validPrivateObjectInfo(originalInfo, directory) ||
+		!validPrivateObjectInfo(candidateInfo, directory) ||
+		!samePrivateObjectIdentity(originalInfo, candidateInfo) {
+		return errors.New("private object changed before protection")
+	}
+	if err := applyPrivateACLHandle(candidate, directory); err != nil {
+		return err
+	}
+	return verifyPrivateHandle(candidate, directory)
 }
 
-func privateReopenParameters(directory bool) (access, share, flags uint32) {
-	access = windows.GENERIC_READ | windows.READ_CONTROL | windows.WRITE_DAC
-	share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
-	flags = windows.FILE_FLAG_OPEN_REPARSE_POINT
+func privateFinalPath(handle windows.Handle) (string, error) {
+	size := uint32(256)
+	for {
+		buffer := make([]uint16, size)
+		length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], size, 0)
+		if err != nil {
+			return "", fmt.Errorf("resolve private object from opened handle: %w", err)
+		}
+		if length < size {
+			return windows.UTF16ToString(buffer[:length]), nil
+		}
+		if length >= windows.MAX_LONG_PATH {
+			return "", errors.New("private object path is too long")
+		}
+		size = length + 1
+	}
+}
+
+func openPrivateProtectionCandidate(path string, directory bool) (windows.Handle, error) {
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, errors.New("private object path is invalid")
+	}
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	if directory {
 		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
 	}
-	return access, share, flags
+	handle, err := windows.CreateFile(
+		pathPointer,
+		windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		flags,
+		0,
+	)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("open private ACL candidate: %w", err)
+	}
+	return handle, nil
 }
 
-func applyPrivateACL(path string, directory bool) error {
-	descriptor, acl, err := privateACL(directory)
-	if err != nil {
-		return err
+func validPrivateObjectInfo(info windows.ByHandleFileInformation, directory bool) bool {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false
 	}
-	err = windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	)
-	runtime.KeepAlive(descriptor)
-	if err != nil {
-		return fmt.Errorf("set private ACL: %w", err)
-	}
-	return nil
+	isDirectory := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	return isDirectory == directory
+}
+
+func samePrivateObjectIdentity(first, second windows.ByHandleFileInformation) bool {
+	return first.VolumeSerialNumber == second.VolumeSerialNumber &&
+		first.FileIndexHigh == second.FileIndexHigh &&
+		first.FileIndexLow == second.FileIndexLow
 }
 
 func applyPrivateACLHandle(handle windows.Handle, directory bool) error {

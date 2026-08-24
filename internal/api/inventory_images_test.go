@@ -1007,11 +1007,16 @@ func (zeroReader) Read(buffer []byte) (int, error) {
 }
 
 type cancelReadCloser struct {
-	ctx    context.Context
-	closed atomic.Bool
+	ctx         context.Context
+	readStarted chan struct{}
+	started     atomic.Bool
+	closed      atomic.Bool
 }
 
 func (body *cancelReadCloser) Read([]byte) (int, error) {
+	if body.readStarted != nil && body.started.CompareAndSwap(false, true) {
+		close(body.readStarted)
+	}
 	<-body.ctx.Done()
 	return 0, body.ctx.Err()
 }

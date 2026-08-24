@@ -741,10 +741,17 @@ func TestDownloadRoastChartRefusesRedirectAndCancellationWithoutVisibility(t *te
 	t.Run("body cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		blocked := &cancelReadCloser{ctx: ctx}
+		readStarted := make(chan struct{})
+		blocked := &cancelReadCloser{ctx: ctx, readStarted: readStarted}
 		compressed := deterministicGzip(t, []byte(validChartJSON))
 		client := chartClient(t, compressed, func(response *http.Response) { response.Body = blocked })
-		go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+		go func() {
+			select {
+			case <-readStarted:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 		destination := filepath.Join(t.TempDir(), "chart.json")
 		if _, failure := client.DownloadRoastChart(ctx, roastUUID, destination, false); failure == nil || failure.Code != "interrupted" || failure.ExitCode != 130 {
 			t.Fatalf("failure = %#v", failure)
