@@ -55,7 +55,7 @@ func runInventoryReservationCreate(ctx context.Context, args []string, runtime R
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -63,7 +63,7 @@ func runInventoryReservationCreate(ctx context.Context, args []string, runtime R
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, response, func(w io.Writer) error { return writeReservationMutation(w, response) })
+	return writeAPISuccess(runtime, jsonMode, response, func(w io.Writer) error { return writeReservationMutation(w, response) })
 }
 
 func runInventoryReservationTransition(ctx context.Context, transition, clientReservationUUID string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -105,7 +105,7 @@ func runInventoryReservationTransition(ctx context.Context, transition, clientRe
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -119,7 +119,7 @@ func runInventoryReservationTransition(ctx context.Context, transition, clientRe
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, response, func(w io.Writer) error { return writeReservationMutation(w, response) })
+	return writeAPISuccess(runtime, jsonMode, response, func(w io.Writer) error { return writeReservationMutation(w, response) })
 }
 
 func writeReservationMutation(w io.Writer, response api.ReservationMutationResponse) error {

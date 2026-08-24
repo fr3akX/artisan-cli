@@ -64,7 +64,7 @@ func TestAuthStateLockPreventsMixedPairAcrossProcessesAndRecoversCrash(t *testin
 			type result struct{ clientErr int }
 			loaded := make(chan result, 1)
 			go func() {
-				client, code := inventoryReadClient(context.Background(), Runtime{ConfigDir: dir, Getenv: func(string) string { return "" }}, false, "", time.Second)
+				client, code := authenticatedClient(context.Background(), Runtime{ConfigDir: dir, Getenv: func(string) string { return "" }}, false, "", time.Second)
 				if client == nil {
 					loaded <- result{clientErr: code}
 					return

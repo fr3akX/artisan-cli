@@ -69,7 +69,7 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -77,5 +77,5 @@ func runInventoryAdjust(ctx context.Context, args []string, runtime Runtime, jso
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }

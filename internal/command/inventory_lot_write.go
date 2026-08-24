@@ -113,7 +113,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -121,7 +121,7 @@ func runInventoryLotCreate(ctx context.Context, args []string, runtime Runtime, 
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -171,7 +171,7 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -179,7 +179,7 @@ func runInventoryLotUpdate(ctx context.Context, lotID string, args []string, run
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryLotState(ctx context.Context, state, lotID string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -218,7 +218,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 		patchState = "archived"
 	}
 	patch, _ := api.NewBeanLotPatch(map[string]any{"state": patchState})
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -226,7 +226,7 @@ func runInventoryLotState(ctx context.Context, state, lotID string, args []strin
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func createManifestFromFlags(values lotFieldFlags, visited map[string]bool, openingGrams int64, openingReason, openingReference string) (api.BeanLotCreateManifest, *output.Error) {

@@ -239,6 +239,18 @@ func isKnownLegacySingleDashFlagForPath(name, path string) bool {
 	if isCobraGlobalFlag(name) {
 		return true
 	}
+	if path == "roast list" {
+		return stringIn(name, "limit", "cursor", "all", "search", "roast-at-from", "roast-at-to", "machine", "state", "label-id")
+	}
+	if path == "roast revisions" || path == "roast comment list" {
+		return stringIn(name, "limit", "cursor", "all")
+	}
+	if path == "roast chart download" || path == "roast profile download" {
+		return name == "force"
+	}
+	if path == "roast review post" {
+		return stringIn(name, "revision-sha256", "template-version", "body-file")
+	}
 	if strings.HasPrefix(path, "inventory lot create") {
 		return cobraLotFieldFlag(name) || stringIn(name, "opening-grams", "opening-reason", "opening-reference", "from-json", "idempotency-key", "image", "image-caption", "image-alt-text", "image-cover")
 	}
@@ -332,7 +344,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	}
 	root := &cobra.Command{
 		Use:              "artisan",
-		Short:            "Artisan green-coffee inventory command line client",
+		Short:            "Artisan Server command line client",
 		SilenceErrors:    true,
 		SilenceUsage:     true,
 		TraverseChildren: true,
@@ -387,6 +399,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	root.AddCommand(
 		newAuthCommand(ctx, state),
 		newInventoryCommand(ctx, state),
+		newRoastCommand(ctx, state),
 		newSkillCommand(ctx, state),
 		newCompletionCommand(root, state),
 		newVersionCommand(state),
@@ -550,6 +563,16 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			message = "Unknown inventory conflict command"
 		case "inventory image":
 			message = "Unknown inventory image command"
+		case "roast":
+			message = "Unknown roast command"
+		case "roast chart":
+			message = "Unknown roast chart command"
+		case "roast profile":
+			message = "Unknown roast profile command"
+		case "roast comment":
+			message = "Unknown roast comment command"
+		case "roast review":
+			message = "Unknown roast review command"
 		case "":
 			if command := firstCommandArg(args); command != "" {
 				message = "Unknown command: " + command
@@ -582,6 +605,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			default:
 				if inventoryMessage := inventoryCobraParseFailureMessage(path); inventoryMessage != "" {
 					message = inventoryMessage
+				} else if roastMessage := roastCobraParseFailureMessage(path); roastMessage != "" {
+					message = roastMessage
 				}
 			}
 		}
@@ -595,11 +620,12 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 
 func cobraJSONModeForParseFailure(args []string) bool {
 	command := firstCommandArg(args)
-	if command != "auth" && command != "inventory" {
+	if command != "auth" && command != "inventory" && command != "roast" {
 		return jsonModeForParseFailure(args)
 	}
 
 	jsonMode := false
+	path := knownCommandPath(args)
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -619,7 +645,7 @@ func cobraJSONModeForParseFailure(args []string) bool {
 				jsonMode = parsed
 			}
 		default:
-			if cobraFlagConsumesValue(name) && !hasValue && i+1 < len(args) {
+			if cobraFlagConsumesValueForPath(name, path) && !hasValue && i+1 < len(args) {
 				i++
 			}
 		}
@@ -672,6 +698,8 @@ func knownCommandPath(args []string) string {
 		return "skill"
 	case "inventory":
 		return knownInventoryCommandPath(args)
+	case "roast":
+		return knownRoastCommandPath(args)
 	default:
 		return ""
 	}
