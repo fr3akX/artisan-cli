@@ -232,9 +232,10 @@ func TestWindowsPrivateSecurityComparatorDetectsCanonicalChanges(t *testing.T) {
 
 func TestPrivateFileSnapshotDetectsWindowsDACLChanges(t *testing.T) {
 	tests := []struct {
-		name      string
-		wantError string
-		mutate    func(*testing.T, string)
+		name            string
+		wantError       string
+		wantExactErrors []string
+		mutate          func(*testing.T, string)
 	}{
 		{
 			name:      "control",
@@ -256,8 +257,11 @@ func TestPrivateFileSnapshotDetectsWindowsDACLChanges(t *testing.T) {
 			},
 		},
 		{
-			name:      "flags",
-			wantError: "DACL ACE 1 flags changed",
+			name: "flags",
+			wantExactErrors: []string{
+				"download DACL ACE 1 flags changed from 0x0 to 0x8",
+				"download DACL ACE count changed from 3 to 2",
+			},
 			mutate: func(t *testing.T, path string) {
 				setWindowsTestDACL(t, path, "(A;IO;GA;;;SY)")
 			},
@@ -284,6 +288,14 @@ func TestPrivateFileSnapshotDetectsWindowsDACLChanges(t *testing.T) {
 			err = privateFileMatchesSnapshot(path, snapshot)
 			if err == nil {
 				t.Fatal("changed Windows DACL was accepted")
+			}
+			if len(test.wantExactErrors) > 0 {
+				for _, want := range test.wantExactErrors {
+					if err.Error() == want {
+						return
+					}
+				}
+				t.Fatalf("changed Windows DACL error = %q, want one of %q", err, test.wantExactErrors)
 			}
 			if !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("changed Windows DACL error = %q, want %q", err, test.wantError)

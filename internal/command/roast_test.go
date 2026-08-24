@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/fr3akX/artisan-cli/internal/api"
+	"github.com/fr3akX/artisan-cli/internal/output"
 )
 
 const commandRoastSHA = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
@@ -185,9 +186,9 @@ func TestRoastProfileDownloadHumanJSONNoClobberAndHostilePathEscaping(t *testing
 		}
 	}))
 	defer server.Close()
-	destination := filepath.Join(t.TempDir(), "profile\nname.alog")
+	destination := filepath.Join(t.TempDir(), "profile\u0085name.alog")
 	human := runAuthCommand(t, inventoryRuntime(t, server.URL), "roast", "profile", "download", commandRoastID, "1", destination)
-	if human.code != 0 || human.stderr != "" || !strings.Contains(human.stdout, fmt.Sprintf("Downloaded %d bytes to %s", len(profile), strings.ReplaceAll(destination, "\n", `\n`))) || !strings.Contains(human.stdout, sha) {
+	if human.code != 0 || human.stderr != "" || !strings.Contains(human.stdout, fmt.Sprintf("Downloaded %d bytes to %s", len(profile), output.EscapeVisible(destination))) || !strings.Contains(human.stdout, sha) {
 		t.Fatalf("human = %#v", human)
 	}
 	contents, err := os.ReadFile(destination)
@@ -226,7 +227,7 @@ func TestRoastChartDownloadHumanAndJSONDoNotEmbedFileBytes(t *testing.T) {
 
 	humanPath := filepath.Join(t.TempDir(), "chart.json")
 	human := runAuthCommand(t, inventoryRuntime(t, server.URL), "roast", "chart", "download", commandRoastID, humanPath)
-	if human.code != 0 || human.stderr != "" || !strings.Contains(human.stdout, fmt.Sprintf("Downloaded %d bytes to %s", len(chart), humanPath)) || !strings.Contains(human.stdout, "Compressed SHA-256") {
+	if human.code != 0 || human.stderr != "" || !strings.Contains(human.stdout, fmt.Sprintf("Downloaded %d bytes to %s", len(chart), output.EscapeVisible(humanPath))) || !strings.Contains(human.stdout, "Compressed SHA-256") {
 		t.Fatalf("human = %#v", human)
 	}
 	machinePath := filepath.Join(t.TempDir(), "chart.json")
