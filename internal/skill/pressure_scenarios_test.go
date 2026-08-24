@@ -69,6 +69,7 @@ func TestRoastReviewPressureScenariosV1CoverReviewThreats(t *testing.T) {
 		"provider-setup",
 		"published-on-error-download",
 		"second-stale-retry",
+		"stale-acquisition-restart",
 		"token-login",
 		"unsafe-temp-paths",
 		"urgency",
@@ -135,6 +136,38 @@ func TestRoastReviewPressurePublishedOnErrorRubricRequiresOwnershipAndNoAnalysis
 		return
 	}
 	t.Fatal("missing published-on-error-download scenario")
+}
+
+func TestRoastReviewPressureStaleAcquisitionRubricRequiresInspectionCleanupAndFreshRestart(t *testing.T) {
+	contents, err := os.ReadFile("testdata/roast-review-pressure-scenarios-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := decodeRoastReviewPressureFixture(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range fixture.Scenarios {
+		if scenario.ID != "stale-during-acquisition" {
+			continue
+		}
+		rubric := strings.Join(scenario.ExpectedBehavior, " ")
+		for _, required := range []string{
+			"inspect the newly published regular child after the stale command outcome and own it for cleanup",
+			"absence is expected and nonterminal for roast_revision_changed",
+			"clean all owned current-attempt artifacts safely",
+			"refetch roast show and the current parsed revision",
+			"restart the complete workflow once with a fresh private directory, fresh names, and the fresh revision",
+			"not a retry of the failed download",
+			"stop on a second stale response",
+		} {
+			if !strings.Contains(rubric, required) {
+				t.Fatalf("stale-acquisition rubric is missing %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("missing stale-during-acquisition scenario")
 }
 
 func TestRoastReviewPressureCleanupRubricStatesPointInTimeBoundary(t *testing.T) {
