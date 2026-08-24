@@ -21,7 +21,7 @@ const (
 	ReviewTemplateVersion              = "artisan-roast-review-v1"
 	maxRoastReviewBytes                = 16_000
 	maxRoastReviewRunes                = 4_000
-	maxRoastReviewReflectionFields     = 13
+	maxRoastReviewReflectionFields     = 17
 	maxRoastReviewReflectionFieldBytes = 1_024
 	maxRoastReviewReflectionSegments   = 8
 	maxRoastReviewReconstructionStates = 1 << 20
@@ -208,6 +208,20 @@ var roastReviewSuccessHeaderNames = map[string]struct{}{
 	"x-request-id":              {},
 	"traceparent":               {},
 	"tracestate":                {},
+	"x-content-type-options":    {},
+	"referrer-policy":           {},
+	"x-frame-options":           {},
+	"content-security-policy":   {},
+}
+
+var roastReviewRequiredSecurityHeaders = []struct {
+	name  string
+	value string
+}{
+	{name: "X-Content-Type-Options", value: "nosniff"},
+	{name: "Referrer-Policy", value: "strict-origin-when-cross-origin"},
+	{name: "X-Frame-Options", value: "DENY"},
+	{name: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"},
 }
 
 var roastReviewOptionalHeaderNames = []string{
@@ -229,6 +243,12 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		!singleHeaderEquals(header, "Content-Type", "application/json") &&
 			!singleHeaderEquals(header, "Content-Type", "application/json; charset=utf-8") {
 		return false, "", nil, false
+	}
+
+	for _, required := range roastReviewRequiredSecurityHeaders {
+		if !singleHeaderEquals(header, required.name, required.value) {
+			return false, "", nil, false
+		}
 	}
 
 	replayValues := header.Values("X-Idempotent-Replay")
@@ -261,7 +281,7 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		}
 	}
 
-	metadata := make([]string, 0, len(roastReviewOptionalHeaderNames))
+	metadata := make([]string, 0, len(roastReviewOptionalHeaderNames)+len(roastReviewRequiredSecurityHeaders))
 	for _, name := range roastReviewOptionalHeaderNames {
 		values := header.Values(name)
 		if len(values) > 1 {
@@ -272,6 +292,13 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		}
 		value := values[0]
 		if containsAny(value, forbiddenValues) || !validRoastReviewOptionalHeader(name, value) {
+			return false, "", nil, false
+		}
+		metadata = append(metadata, value)
+	}
+	for _, required := range roastReviewRequiredSecurityHeaders {
+		value := header.Values(required.name)[0]
+		if containsAny(value, forbiddenValues) {
 			return false, "", nil, false
 		}
 		metadata = append(metadata, value)
@@ -512,13 +539,13 @@ func roastReviewFieldsReflectSensitiveData(fields []string, body string, forbidd
 	}
 
 	type reconstructionState struct {
-		mask  uint16
+		mask  uint32
 		value string
 	}
 	visited := make(map[reconstructionState]struct{})
 	states := 0
-	var reconstructs func(mask uint16, value string, segments int) bool
-	reconstructs = func(mask uint16, value string, segments int) bool {
+	var reconstructs func(mask uint32, value string, segments int) bool
+	reconstructs = func(mask uint32, value string, segments int) bool {
 		if len(value) == minimumBodyWindow {
 			return true
 		}
@@ -535,7 +562,7 @@ func roastReviewFieldsReflectSensitiveData(fields []string, body string, forbidd
 			return true
 		}
 		for index, field := range fields {
-			bit := uint16(1) << index
+			bit := uint32(1) << index
 			if mask&bit != 0 || len(field) == 0 {
 				continue
 			}
@@ -579,12 +606,12 @@ func roastReviewTargetReconstructed(target string, fields []string, maximumSegme
 // combinatorial reconstruction.
 func roastReviewTargetReconstructionWithinBudget(target string, fields []string, maximumSegments, maximumStates int) (reconstructed bool, states int, exhausted bool) {
 	type reconstructionState struct {
-		mask   uint16
+		mask   uint32
 		offset int
 	}
 	visited := make(map[reconstructionState]struct{})
-	var reconstructs func(mask uint16, offset, segments int) bool
-	reconstructs = func(mask uint16, offset, segments int) bool {
+	var reconstructs func(mask uint32, offset, segments int) bool
+	reconstructs = func(mask uint32, offset, segments int) bool {
 		if offset == len(target) {
 			return segments > 1
 		}
@@ -602,7 +629,7 @@ func roastReviewTargetReconstructionWithinBudget(target string, fields []string,
 			return true
 		}
 		for index, field := range fields {
-			bit := uint16(1) << index
+			bit := uint32(1) << index
 			if mask&bit != 0 || field == "" {
 				continue
 			}

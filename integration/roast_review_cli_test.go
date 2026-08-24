@@ -47,7 +47,38 @@ func TestCLIRunnerOptionalPaceIsBoundedAndNotResponseDriven(t *testing.T) {
 	}
 }
 
-func TestDisposableProvisioningIncludesForeignTenantCredential(t *testing.T) {
+func TestCLIErrorEnvelopeStrictWireContract(t *testing.T) {
+	valid := []byte(`{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists"}}`)
+	envelope, err := decodeCLIErrorEnvelope(valid)
+	if err != nil || envelope.OK || envelope.Error.Code != "local_storage_error" || envelope.Error.Message != "Destination already exists" || envelope.Error.HTTPStatus != nil {
+		t.Fatalf("valid local error envelope = (%+v, %v)", envelope, err)
+	}
+	serverEnvelope, err := decodeCLIErrorEnvelope([]byte(`{"ok":false,"error":{"code":"not_found","message":"Roast not found","http_status":404}}`))
+	if err != nil || serverEnvelope.Error.HTTPStatus == nil || *serverEnvelope.Error.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("valid server error envelope = (%+v, %v)", serverEnvelope, err)
+	}
+
+	mutations := map[string]string{
+		"missing ok":           `{"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
+		"missing error":        `{"ok":false}`,
+		"missing code":         `{"ok":false,"error":{"message":"Destination already exists","http_status":null}}`,
+		"missing message":      `{"ok":false,"error":{"code":"local_storage_error"}}`,
+		"extra envelope field": `{"ok":false,"extra":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
+		"extra error field":    `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null,"detail":"unsafe"}}`,
+		"wrong ok value":       `{"ok":true,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":null}}`,
+		"wrong message type":   `{"ok":false,"error":{"code":"local_storage_error","message":7,"http_status":null}}`,
+		"wrong HTTP type":      `{"ok":false,"error":{"code":"local_storage_error","message":"Destination already exists","http_status":"none"}}`,
+	}
+	for name, mutation := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeCLIErrorEnvelope([]byte(mutation)); err == nil {
+				t.Fatal("invalid CLI error envelope was accepted")
+			}
+		})
+	}
+}
+
+func TestDisposableProvisioningIncludesForeignTenantAdministratorCredential(t *testing.T) {
 	contents, err := os.ReadFile("provision_member.py")
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +92,52 @@ func TestDisposableProvisioningIncludesForeignTenantCredential(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Errorf("disposable provisioning is missing %q", required)
 		}
+	}
+	foreignStart := strings.Index(text, "foreign_organization = Organization(")
+	foreignEnd := strings.Index(text, "foreign_credential, foreign_token = await issue_api_credential(")
+	if foreignStart < 0 || foreignEnd <= foreignStart || !strings.Contains(text[foreignStart:foreignEnd], `role="admin"`) {
+		t.Fatal("foreign disposable identity is not provisioned as its tenant administrator")
+	}
+	if strings.Count(text, "foreign_credential, foreign_token = await issue_api_credential(") != 1 {
+		t.Fatal("foreign provisioning must issue exactly the one credential exercised and revoked by the integration")
+	}
+}
+
+func TestBrowserSessionLoginRoutesExactOrganizationWithoutIssuingCredential(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.Method+" "+request.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch request.Method + " " + request.URL.Path {
+		case "GET /api/v1/session/csrf":
+			_, _ = io.WriteString(w, `{"csrf_token":"csrf-response"}`)
+		case "POST /api/v1/session/login":
+			if request.Header.Get("X-CSRF-Token") != "csrf-response" {
+				t.Errorf("login CSRF header = %q", request.Header.Get("X-CSRF-Token"))
+			}
+			var login map[string]string
+			if err := json.NewDecoder(request.Body).Decode(&login); err != nil {
+				t.Errorf("decode login request: %v", err)
+				return
+			}
+			if login["email"] != "foreign@example.test" || login["password"] != "disposable-password" || login["organization"] != "foreign-review-e2e" || len(login) != 3 {
+				t.Errorf("login route = %#v", login)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "artisan_server_csrf", Value: "csrf-cookie", Path: "/"})
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected browser-session request %s %s", request.Method, request.URL.Path)
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	client, csrf := loginBrowserSession(t, server.URL, "foreign@example.test", "disposable-password", "foreign-review-e2e")
+	if client == nil || csrf != "csrf-cookie" {
+		t.Fatalf("browser session = (%v, %q)", client, csrf)
+	}
+	if got := strings.Join(paths, ","); got != "GET /api/v1/session/csrf,POST /api/v1/session/login" {
+		t.Fatalf("browser session requests = %s", got)
 	}
 }
 
@@ -307,11 +384,12 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	adminRunner, adminPaths := newReviewRunner(t, root, "admin", binary, config.baseURL)
 	memberRunner, memberPaths := newReviewRunner(t, root, "member", binary, config.baseURL)
 	adminHTTP, csrf, adminToken, adminCredentialID := issueCredential(t, config, config.adminEmail, config.adminPassword)
+	foreignHTTP, foreignCSRF := loginBrowserSession(t, config.baseURL, config.foreignEmail, config.memberPassword, config.foreignOrganizationSlug)
 	adminRunner.forbiddenToken = adminToken
 	memberRunner.forbiddenToken = config.reviewMemberToken
 	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, adminCredentialID, adminToken)
 	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, config.reviewMemberCredential, config.reviewMemberToken)
-	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, config.foreignCredential, config.foreignToken)
+	defer revokeCredentialAndAssertRejected(t, foreignHTTP, config.baseURL, foreignCSRF, config.foreignCredential, config.foreignToken)
 	defer func() {
 		for _, check := range []struct {
 			token  string
@@ -709,6 +787,35 @@ func assertPrivateRegularFile(t *testing.T, path string) {
 	}
 }
 
+type cliErrorEnvelope struct {
+	OK    bool
+	Error struct {
+		Code       string
+		Message    string
+		HTTPStatus *int
+	}
+}
+
+func decodeCLIErrorEnvelope(contents []byte) (cliErrorEnvelope, error) {
+	var wire struct {
+		OK    *bool `json:"ok"`
+		Error *struct {
+			Code       *string `json:"code"`
+			Message    *string `json:"message"`
+			HTTPStatus *int    `json:"http_status"`
+		} `json:"error"`
+	}
+	if err := decodeExactlyOneJSON(contents, &wire, true); err != nil || wire.OK == nil || *wire.OK || wire.Error == nil || wire.Error.Code == nil || wire.Error.Message == nil || wire.Error.HTTPStatus != nil && (*wire.Error.HTTPStatus < 100 || *wire.Error.HTTPStatus > 599) {
+		return cliErrorEnvelope{}, errors.New("CLI error response did not match its strict wire contract")
+	}
+	var envelope cliErrorEnvelope
+	envelope.OK = *wire.OK
+	envelope.Error.Code = *wire.Error.Code
+	envelope.Error.Message = *wire.Error.Message
+	envelope.Error.HTTPStatus = wire.Error.HTTPStatus
+	return envelope, nil
+}
+
 func runCLIError(t *testing.T, runner *cliRunner, wantExit int, wantCode string, wantHTTP int, args ...string) {
 	t.Helper()
 	execution := runner.execute("", args...)
@@ -720,14 +827,8 @@ func runCLIError(t *testing.T, runner *cliRunner, wantExit int, wantCode string,
 			t.Fatal(err)
 		}
 	}
-	var envelope struct {
-		OK    bool `json:"ok"`
-		Error struct {
-			Code       string `json:"code"`
-			HTTPStatus *int   `json:"http_status"`
-		} `json:"error"`
-	}
-	if err := decodeExactlyOneJSON([]byte(execution.record.Stdout), &envelope, true); err != nil || envelope.OK || envelope.Error.Code != wantCode || wantHTTP == 0 && envelope.Error.HTTPStatus != nil || wantHTTP != 0 && (envelope.Error.HTTPStatus == nil || *envelope.Error.HTTPStatus != wantHTTP) {
+	envelope, err := decodeCLIErrorEnvelope([]byte(execution.record.Stdout))
+	if err != nil || envelope.Error.Code != wantCode || wantHTTP == 0 && envelope.Error.HTTPStatus != nil || wantHTTP != 0 && (envelope.Error.HTTPStatus == nil || *envelope.Error.HTTPStatus != wantHTTP) {
 		t.Fatalf("CLI error envelope = %+v", envelope)
 	}
 }

@@ -1227,6 +1227,58 @@ func TestValidTracestateW3COWSAndBounds(t *testing.T) {
 	}
 }
 
+func TestValidateRoastReviewSuccessHeadersAcceptsExactDeployedSecurityMetadata(t *testing.T) {
+	validate := func(header http.Header, body string) bool {
+		_, _, _, valid := validateRoastReviewSuccessHeaders(
+			header, roastUUID, roastSHA256, ReviewTemplateVersion, body,
+			"canonical-review-key", "bearer-token", "https://server.example.test",
+		)
+		return valid
+	}
+	if !validate(deployedRoastReviewHeaders(), validReviewBody) {
+		t.Fatal("complete deployed nginx header set was rejected")
+	}
+
+	securityHeaders := map[string]string{
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "strict-origin-when-cross-origin",
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'",
+	}
+	for name, value := range securityHeaders {
+		t.Run("missing "+name, func(t *testing.T) {
+			header := deployedRoastReviewHeaders()
+			header.Del(name)
+			if validate(header, validReviewBody) {
+				t.Fatal("missing deployed security header was accepted")
+			}
+		})
+		t.Run("duplicate "+name, func(t *testing.T) {
+			header := deployedRoastReviewHeaders()
+			header.Add(name, value)
+			if validate(header, validReviewBody) {
+				t.Fatal("duplicate deployed security header was accepted")
+			}
+		})
+		t.Run("mutated "+name, func(t *testing.T) {
+			header := deployedRoastReviewHeaders()
+			header.Set(name, value+"-mutated")
+			if validate(header, validReviewBody) {
+				t.Fatal("mutated deployed security header was accepted")
+			}
+		})
+	}
+
+	unexpected := deployedRoastReviewHeaders()
+	unexpected.Set("Permissions-Policy", "camera=()")
+	if validate(unexpected, validReviewBody) {
+		t.Fatal("unexpected security metadata bypassed the closed header allowlist")
+	}
+	if validate(deployedRoastReviewHeaders(), validReviewBody+"\ndefault-") {
+		t.Fatal("review-body reflection in deployed security metadata was accepted")
+	}
+}
+
 func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *testing.T) {
 	requestBody := validReviewBody + "\n" + ReviewTemplateVersion + "\n" + roastSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1320,12 +1372,31 @@ func writeReviewResponse(w http.ResponseWriter, replay bool, body string) {
 	_, _ = io.WriteString(w, activeCommentJSON(body))
 }
 
+func deployedRoastReviewHeaders() http.Header {
+	header := make(http.Header)
+	header.Set("Cache-Control", "no-store")
+	header.Set("Location", "/api/v1/roasts/"+roastUUID+"/comments/"+commentUUID)
+	header.Set("X-Idempotent-Replay", "false")
+	header.Set("X-Roast-Revision-SHA256", roastSHA256)
+	header.Set("X-Review-Template-Version", ReviewTemplateVersion)
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'")
+	return header
+}
+
 func setReviewHeaders(w http.ResponseWriter, replay bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Location", "/api/v1/roasts/"+roastUUID+"/comments/"+commentUUID)
 	w.Header().Set("X-Idempotent-Replay", map[bool]string{false: "false", true: "true"}[replay])
 	w.Header().Set("X-Roast-Revision-SHA256", roastSHA256)
 	w.Header().Set("X-Review-Template-Version", ReviewTemplateVersion)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'")
 }
 
 func activeCommentJSON(body string) string {

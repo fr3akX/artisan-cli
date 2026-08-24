@@ -78,7 +78,7 @@ async def main() -> tuple[str, str, str, str, str, str]:
                 Membership(
                     organization_id=foreign_organization.id,
                     user_id=foreign_user.id,
-                    role="member",
+                    role="admin",
                 )
             )
             foreign_credential, foreign_token = await issue_api_credential(

@@ -2126,7 +2126,7 @@ func newBrowserClient(jar http.CookieJar) *http.Client {
 	}
 }
 
-func issueCredential(t *testing.T, config liveConfig, email, password string) (*http.Client, string, string, string) {
+func loginBrowserSession(t *testing.T, baseURL, email, password, organizationSlug string) (*http.Client, string) {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -2136,13 +2136,18 @@ func issueCredential(t *testing.T, config liveConfig, email, password string) (*
 	var csrfResponse struct {
 		CSRFToken string `json:"csrf_token"`
 	}
-	doJSON(t, client, http.MethodGet, config.baseURL+"/api/v1/session/csrf", "", nil, &csrfResponse, http.StatusOK, "")
+	doJSON(t, client, http.MethodGet, baseURL+"/api/v1/session/csrf", "", nil, &csrfResponse, http.StatusOK, "")
 	if csrfResponse.CSRFToken == "" {
 		t.Fatal("browser CSRF endpoint returned an empty token")
 	}
-	login := map[string]string{"email": email, "password": password, "organization": config.organizationSlug}
-	doJSON(t, client, http.MethodPost, config.baseURL+"/api/v1/session/login", csrfResponse.CSRFToken, login, &map[string]any{}, http.StatusOK, "")
-	csrf := cookieValue(t, jar, config.baseURL, "artisan_server_csrf")
+	login := map[string]string{"email": email, "password": password, "organization": organizationSlug}
+	doJSON(t, client, http.MethodPost, baseURL+"/api/v1/session/login", csrfResponse.CSRFToken, login, &map[string]any{}, http.StatusOK, "")
+	return client, cookieValue(t, jar, baseURL, "artisan_server_csrf")
+}
+
+func issueCredential(t *testing.T, config liveConfig, email, password string) (*http.Client, string, string, string) {
+	t.Helper()
+	client, csrf := loginBrowserSession(t, config.baseURL, email, password, config.organizationSlug)
 	issued := struct {
 		Token      string `json:"token"`
 		Credential struct {
