@@ -175,7 +175,7 @@ func PreflightDownloadDestination(destination string, force bool) error {
 	}
 	absolute, err := filepath.Abs(destination)
 	if err != nil {
-		return ErrInvalidDownloadDestination
+		return err
 	}
 	parentInfo, err := os.Lstat(filepath.Dir(absolute))
 	if err != nil {
@@ -206,7 +206,7 @@ func newDownloadTarget(destination string, force bool, operations downloadOperat
 	}
 	absolute, err := filepath.Abs(destination)
 	if err != nil {
-		return nil, ErrInvalidDownloadDestination
+		return nil, err
 	}
 	// Repeat the destination observation immediately before holding the parent.
 	// The held publication object remains authoritative for all later races.

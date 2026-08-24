@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -75,6 +76,13 @@ func TestRoastDownloadDestinationPreflightPrecedesConfigurationAndNetwork(t *tes
 	contents, err := os.ReadFile(existing)
 	if err != nil || string(contents) != "keep" {
 		t.Fatalf("existing destination changed: %q, %v", contents, err)
+	}
+}
+
+func TestRoastDownloadEnvironmentalPreflightErrorsAreLocalStorageFailures(t *testing.T) {
+	failure := roastDownloadPreflightFailure(&os.PathError{Op: "getwd", Path: ".", Err: os.ErrNotExist}, "invalid", "storage")
+	if failure.ExitCode != 3 || failure.Code != "local_storage_error" || failure.Message != "storage" {
+		t.Fatalf("failure = %#v", failure)
 	}
 }
 
@@ -198,17 +206,19 @@ func TestRoastDownloadVisibleDurabilityUncertaintyIsExactInHumanAndJSON(t *testi
 	for _, download := range []string{"chart", "profile"} {
 		for _, jsonMode := range []bool{false, true} {
 			t.Run(download+"/json="+strconv.FormatBool(jsonMode), func(t *testing.T) {
+				t.Parallel()
 				destination := filepath.Join(t.TempDir(), download)
 				runtime := inventoryRuntime(t, "http://127.0.0.1:1")
+				hooks := roastDownloadHooks{}
 				if download == "chart" {
-					runtime.roastChartDownload = func(_ context.Context, _ *api.Client, _ string, path string, _ bool) (api.RoastChartDownload, *output.Error) {
+					hooks.chart = func(_ context.Context, _ *api.Client, _ string, path string, _ bool) (api.RoastChartDownload, *output.Error) {
 						if err := os.WriteFile(path, []byte("exact chart"), 0o600); err != nil {
 							t.Fatal(err)
 						}
 						return api.RoastChartDownload{Path: path, RoastUUID: commandRoastID, FileBytes: 11}, &output.Error{ExitCode: 3, Code: "local_storage_error", Message: "The roast chart is installed, but storage durability is uncertain"}
 					}
 				} else {
-					runtime.roastProfileDownload = func(_ context.Context, _ *api.Client, _ string, _ int64, path string, _ bool) (api.RoastProfileDownload, *output.Error) {
+					hooks.profile = func(_ context.Context, _ *api.Client, _ string, _ int64, path string, _ bool) (api.RoastProfileDownload, *output.Error) {
 						if err := os.WriteFile(path, []byte("exact profile"), 0o600); err != nil {
 							t.Fatal(err)
 						}
@@ -223,7 +233,7 @@ func TestRoastDownloadVisibleDurabilityUncertaintyIsExactInHumanAndJSON(t *testi
 				if jsonMode {
 					args = append([]string{"--json"}, args...)
 				}
-				result := runAuthCommand(t, runtime, args...)
+				result := runRoastCommandWithContext(t, withRoastDownloadHooks(context.Background(), hooks), runtime, args...)
 				contents, err := os.ReadFile(destination)
 				if result.code != 3 || err != nil || !strings.HasPrefix(string(contents), "exact ") || !strings.Contains(result.stdout+result.stderr, "storage durability is uncertain") {
 					t.Fatalf("result=%#v contents=%q err=%v", result, contents, err)
@@ -242,6 +252,15 @@ func TestRoastDownloadVisibleDurabilityUncertaintyIsExactInHumanAndJSON(t *testi
 			})
 		}
 	}
+}
+
+func runRoastCommandWithContext(t *testing.T, ctx context.Context, runtime Runtime, args ...string) commandResult {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	runtime.Out = &stdout
+	runtime.Err = &stderr
+	code := Run(ctx, args, runtime)
+	return commandResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
 func TestCobraRoastExecutesEveryLegacySingleDashFlagAndDashPath(t *testing.T) {
@@ -323,42 +342,148 @@ func TestCobraRoastExecutesEveryLegacySingleDashFlagAndDashPath(t *testing.T) {
 }
 
 func TestRoastCommandSurfaceAndOutputsExcludeProviderConfigurationCorpus(t *testing.T) {
-	forbidden := []string{"--provider", "--api-key", "api_key", "--model", "model_name", "--prompt", "--token-budget", "token_budget", "--cost"}
 	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{}), nil)
-	var surface strings.Builder
-	for _, command := range root.Commands() {
-		if command.Name() != "roast" {
-			continue
-		}
-		walkCommandSurface(command, &surface)
+	roast, _, err := root.Find([]string{"roast"})
+	if err != nil || roast == root {
+		t.Fatalf("find roast command: command=%v err=%v", roast, err)
 	}
-	outputs := []string{surface.String()}
-	outputs = append(outputs,
+	var surface strings.Builder
+	walkCommandSurface(roast, &surface)
+	outputs := []string{
+		surface.String(),
 		runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "--json", "roast", "show", "bad").stdout,
 		runAuthCommand(t, Runtime{ConfigDir: t.TempDir()}, "roast", "review", "post", commandRoastID).stderr,
-	)
+	}
 	for _, value := range outputs {
-		lower := strings.ToLower(value)
-		for _, absent := range forbidden {
-			if strings.Contains(lower, absent) {
-				t.Fatalf("roast command corpus contains forbidden %q: %s", absent, value)
-			}
+		if match := prohibitedRoastSurface(value); match != "" {
+			t.Fatalf("roast command corpus contains forbidden %q: %s", match, value)
 		}
 	}
 }
 
-func walkCommandSurface(command *cobra.Command, destination *strings.Builder) {
-	for _, child := range command.Commands() {
-		destination.WriteString(child.CommandPath())
-		destination.WriteByte('\n')
-		destination.WriteString(child.Short)
-		destination.WriteByte('\n')
-		child.LocalNonPersistentFlags().VisitAll(func(flag *pflag.Flag) {
-			destination.WriteString(flag.Name)
-			destination.WriteByte('\n')
-			destination.WriteString(flag.Usage)
-			destination.WriteByte('\n')
+func TestProhibitedRoastSurfaceAllowsReviewTokenSecurityProse(t *testing.T) {
+	for _, value := range []string{
+		"Review tokens are never accepted or stored",
+		"Bearer token security requirements",
+		"The revision token remains private",
+	} {
+		if match := prohibitedRoastSurface(value); match != "" {
+			t.Fatalf("legitimate token prose %q matched %q", value, match)
+		}
+	}
+}
+
+func TestWalkCommandSurfaceDetectsEveryRepresentativeProhibitedSurface(t *testing.T) {
+	tests := []struct {
+		name   string
+		inject func(*cobra.Command)
+	}{
+		{name: "root local flag", inject: func(root *cobra.Command) { root.Flags().String("provider", "", "Select a backend") }},
+		{name: "child persistent flag", inject: func(root *cobra.Command) {
+			child := &cobra.Command{Use: "safe"}
+			child.PersistentFlags().String("api-key", "", "Credential")
+			root.AddCommand(child)
+		}},
+		{name: "use", inject: func(root *cobra.Command) { root.AddCommand(&cobra.Command{Use: "model VALUE"}) }},
+		{name: "short", inject: func(root *cobra.Command) { root.AddCommand(&cobra.Command{Use: "safe", Short: "Configure prompt"}) }},
+		{name: "long", inject: func(root *cobra.Command) { root.AddCommand(&cobra.Command{Use: "safe", Long: "Select an AI provider"}) }},
+		{name: "example", inject: func(root *cobra.Command) {
+			root.AddCommand(&cobra.Command{Use: "safe", Example: "artisan roast safe --token-budget 10"})
+		}},
+		{name: "aliases", inject: func(root *cobra.Command) { root.AddCommand(&cobra.Command{Use: "safe", Aliases: []string{"cost"}}) }},
+		{name: "valid args", inject: func(root *cobra.Command) {
+			root.AddCommand(&cobra.Command{Use: "safe", ValidArgs: []string{"model_name"}})
+		}},
+		{name: "completion", inject: func(root *cobra.Command) {
+			root.AddCommand(&cobra.Command{Use: "safe", ValidArgsFunction: func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+				return []string{"api_key"}, cobra.ShellCompDirectiveNoFileComp
+			}})
+		}},
+		{name: "flag completion", inject: func(root *cobra.Command) {
+			child := &cobra.Command{Use: "safe"}
+			child.Flags().String("engine", "", "Backend")
+			if err := child.RegisterFlagCompletionFunc("engine", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+				return []string{"cost"}, cobra.ShellCompDirectiveNoFileComp
+			}); err != nil {
+				panic(err)
+			}
+			root.AddCommand(child)
+		}},
+		{name: "flag usage", inject: func(root *cobra.Command) {
+			child := &cobra.Command{Use: "safe"}
+			child.Flags().String("engine", "", "Choose a model")
+			root.AddCommand(child)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := &cobra.Command{Use: "roast", SilenceUsage: true, SilenceErrors: true}
+			test.inject(root)
+			var surface strings.Builder
+			walkCommandSurface(root, &surface)
+			if match := prohibitedRoastSurface(surface.String()); match == "" {
+				t.Fatalf("prohibited injection was not discovered; surface=%q", surface.String())
+			}
 		})
+	}
+}
+
+var prohibitedRoastText = regexp.MustCompile(`(?i)(^|[^a-z0-9])(?:provider|api[ _-]key|model(?:[ _-]name)?|prompt|token[ _-]budget|cost)($|[^a-z0-9])`)
+
+func prohibitedRoastSurface(surface string) string {
+	for _, line := range strings.Split(surface, "\n") {
+		normalized := strings.ReplaceAll(strings.TrimLeft(strings.ToLower(strings.TrimSpace(line)), "-"), "_", "-")
+		switch normalized {
+		case "provider", "api-key", "model", "model-name", "prompt", "token-budget", "cost":
+			return line
+		}
+		if match := prohibitedRoastText.FindString(line); match != "" {
+			return strings.TrimSpace(match)
+		}
+	}
+	return ""
+}
+
+func walkCommandSurface(command *cobra.Command, destination *strings.Builder) {
+	writeCommandSurfaceValue(destination, command.CommandPath())
+	writeCommandSurfaceValue(destination, command.Use)
+	writeCommandSurfaceValue(destination, command.Short)
+	writeCommandSurfaceValue(destination, command.Long)
+	writeCommandSurfaceValue(destination, command.Example)
+	for _, alias := range command.Aliases {
+		writeCommandSurfaceValue(destination, alias)
+	}
+	for _, validArg := range command.ValidArgs {
+		writeCommandSurfaceValue(destination, validArg)
+	}
+	if command.ValidArgsFunction != nil {
+		completions, _ := command.ValidArgsFunction(command, nil, "")
+		for _, completion := range completions {
+			writeCommandSurfaceValue(destination, completion)
+		}
+	}
+	walkCommandFlags(command, command.LocalNonPersistentFlags(), destination)
+	walkCommandFlags(command, command.PersistentFlags(), destination)
+	walkCommandFlags(command, command.InheritedFlags(), destination)
+	for _, child := range command.Commands() {
 		walkCommandSurface(child, destination)
 	}
+}
+
+func walkCommandFlags(command *cobra.Command, flags *pflag.FlagSet, destination *strings.Builder) {
+	flags.VisitAll(func(flag *pflag.Flag) {
+		writeCommandSurfaceValue(destination, flag.Name)
+		writeCommandSurfaceValue(destination, flag.Usage)
+		if completion, exists := command.GetFlagCompletionFunc(flag.Name); exists {
+			values, _ := completion(command, nil, "")
+			for _, value := range values {
+				writeCommandSurfaceValue(destination, value)
+			}
+		}
+	})
+}
+
+func writeCommandSurfaceValue(destination *strings.Builder, value string) {
+	destination.WriteString(value)
+	destination.WriteByte('\n')
 }

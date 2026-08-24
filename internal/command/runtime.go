@@ -11,6 +11,22 @@ import (
 type roastChartDownloadFunc func(context.Context, *api.Client, string, string, bool) (api.RoastChartDownload, *output.Error)
 type roastProfileDownloadFunc func(context.Context, *api.Client, string, int64, string, bool) (api.RoastProfileDownload, *output.Error)
 
+type roastDownloadHooks struct {
+	chart   roastChartDownloadFunc
+	profile roastProfileDownloadFunc
+}
+
+type roastDownloadHooksContextKey struct{}
+
+func withRoastDownloadHooks(ctx context.Context, hooks roastDownloadHooks) context.Context {
+	return context.WithValue(ctx, roastDownloadHooksContextKey{}, hooks)
+}
+
+func roastDownloadHooksFromContext(ctx context.Context) roastDownloadHooks {
+	hooks, _ := ctx.Value(roastDownloadHooksContextKey{}).(roastDownloadHooks)
+	return hooks
+}
+
 // Runtime contains process resources used by commands.
 type Runtime struct {
 	In           io.Reader
@@ -20,9 +36,4 @@ type Runtime struct {
 	ConfigDir    string
 	IsTerminal   func(fd int) bool
 	ReadPassword func(fd int) ([]byte, error)
-
-	// Deterministic command-level download result seams. Production runtimes
-	// leave these nil and call the authenticated API client directly.
-	roastChartDownload   roastChartDownloadFunc
-	roastProfileDownload roastProfileDownloadFunc
 }

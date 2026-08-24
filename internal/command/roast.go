@@ -160,7 +160,7 @@ func runRoastChartDownload(ctx context.Context, roastUUID, destination string, f
 	if client == nil {
 		return code
 	}
-	download := runtime.roastChartDownload
+	download := roastDownloadHooksFromContext(ctx).chart
 	if download == nil {
 		download = func(ctx context.Context, client *api.Client, roastUUID, destination string, force bool) (api.RoastChartDownload, *output.Error) {
 			return client.DownloadRoastChart(ctx, roastUUID, destination, force)
@@ -188,7 +188,7 @@ func runRoastProfileDownload(ctx context.Context, roastUUID, rawRevision, destin
 	if client == nil {
 		return code
 	}
-	download := runtime.roastProfileDownload
+	download := roastDownloadHooksFromContext(ctx).profile
 	if download == nil {
 		download = func(ctx context.Context, client *api.Client, roastUUID string, revision int64, destination string, force bool) (api.RoastProfileDownload, *output.Error) {
 			return client.DownloadRoastProfile(ctx, roastUUID, revision, destination, force)
