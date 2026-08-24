@@ -9,12 +9,10 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
 
-const (
-	Name     = "artisan-inventory"
-	FileName = "SKILL.md"
-)
+const FileName = "SKILL.md"
 
 var (
+	ErrUnknownSkill           = errors.New("unknown skill")
 	ErrInvalidDirectory       = errors.New("invalid skill directory")
 	ErrDifferentContent       = errors.New("installed skill differs")
 	ErrUnsafeTarget           = errors.New("unsafe skill target")
@@ -38,24 +36,27 @@ type installHooks struct {
 	onEvent                func(string)
 }
 
-// Install atomically and durably installs Content below
-// root/artisan-inventory/SKILL.md by walking root components without following
-// links, then keeping all child operations relative to opened directory handles.
-func Install(root string, force bool) (InstallResult, error) {
-	return installWithHooks(root, force, installHooks{})
+// Install atomically and durably installs the selected embedded definition
+// below root/name/SKILL.md while walking paths without following links.
+func Install(root, name string, force bool) (InstallResult, error) {
+	return installWithHooks(root, name, force, installHooks{})
 }
 
-func installWithHooks(root string, force bool, hooks installHooks) (InstallResult, error) {
+func installWithHooks(root, name string, force bool, hooks installHooks) (InstallResult, error) {
+	definition, ok := Lookup(name)
+	if !ok {
+		return InstallResult{}, ErrUnknownSkill
+	}
 	rootPath, err := normalizeRoot(root)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	result, err := installPlatform(rootPath, force, hooks)
+	result, err := installPlatform(rootPath, definition, force, hooks)
 	if err != nil {
 		result.Path = ""
 		return result, err
 	}
-	result.Path = filepath.Join(rootPath, Name, FileName)
+	result.Path = filepath.Join(rootPath, definition.Name, FileName)
 	return result, nil
 }
 

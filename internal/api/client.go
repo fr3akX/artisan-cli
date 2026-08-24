@@ -20,15 +20,20 @@ import (
 
 const maxResponseBodyBytes = 1 << 20
 
+// ResponseValidator validates trusted response metadata for a successful API operation.
+type ResponseValidator func(status int, header http.Header) *output.Error
+
 // Request describes one API operation. Body must return a newly opened body on
 // every call so an idempotent mutation can be replayed safely.
 type Request struct {
-	Method         string
-	Path           string
-	Query          url.Values
-	Body           func() (io.ReadCloser, string, error)
-	IdempotencyKey string
-	ExpectedStatus int
+	Method                  string
+	Path                    string
+	Query                   url.Values
+	Body                    func() (io.ReadCloser, string, error)
+	IdempotencyKey          string
+	ExpectedStatus          int
+	ValidateResponse        ResponseValidator
+	ForbiddenResponseValues []string
 }
 
 // Client is an authenticated Artisan API client.
@@ -74,7 +79,11 @@ func NewClient(serverURL, token string, timeout time.Duration) (*Client, error) 
 
 // Do executes an API request, applying bounded retries only to safe reads or
 // replayable idempotent mutations. It returns nil on success.
-func (c *Client) Do(ctx context.Context, request Request, destination any) (failure *output.Error) {
+func (c *Client) Do(ctx context.Context, request Request, destination any) *output.Error {
+	return c.do(ctx, request, destination, false)
+}
+
+func (c *Client) do(ctx context.Context, request Request, destination any, missingEndpointOnUnstructuredNotFound bool) (failure *output.Error) {
 	defer func() {
 		failure = c.failureWithoutSecrets(failure)
 	}()
@@ -104,6 +113,12 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 	}
 
 	canRetry := requestCanRetry(request)
+	forbiddenResponseValues := make([]string, 0, 2+len(request.ForbiddenResponseValues))
+	forbiddenResponseValues = append(forbiddenResponseValues, c.token, c.serverURL.String())
+	forbiddenResponseValues = append(forbiddenResponseValues, request.ForbiddenResponseValues...)
+	forbiddenBodyValues := make([]string, 0, 1+len(request.ForbiddenResponseValues))
+	forbiddenBodyValues = append(forbiddenBodyValues, c.token)
+	forbiddenBodyValues = append(forbiddenBodyValues, request.ForbiddenResponseValues...)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
@@ -152,7 +167,7 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			isExpectedClientError := status >= 400 && status < 500
 			isNonTransientServerError := status >= 500 && status < 600 && !isTransientStatus(status)
 			if isExpectedClientError || isNonTransientServerError {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 			}
 			if canRetry && attempt < maxAttempts-1 && ctx.Err() == nil {
 				if err := waitForRetry(ctx, attempt); err == nil {
@@ -160,21 +175,24 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 				}
 			}
 			if isTransientStatus(status) {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 			}
 			return contextOrNetworkFailure(ctx)
 		}
 		if oversized {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
 		}
-		if containsExactTokenReflection(responseBody, c.token) {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		if responseBodyContainsAnyExactToken(responseBody, forbiddenBodyValues) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
+		}
+		if status == http.StatusNotFound && missingEndpointOnUnstructuredNotFound && isUnstructuredRouteNotFound(responseBody, response.Header) {
+			return serverUpgradeRequiredFailure()
 		}
 		if responseRequiresJSON(responseBody) && !trustedJSONContentType(response.Header) {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if isTransientStatus(status) && canRetry && attempt < maxAttempts-1 {
 			if err := waitForRetry(ctx, attempt); err != nil {
@@ -184,14 +202,19 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 		}
 		if status >= 200 && status < 300 {
 			if request.ExpectedStatus != 0 && status != request.ExpectedStatus {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
+			}
+			if request.ValidateResponse != nil {
+				if failure := request.ValidateResponse(status, response.Header.Clone()); failure != nil {
+					return failure
+				}
 			}
 			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
 		if status >= 400 && status < 600 {
-			return decodeAPIError(status, responseBody, c.token, c.serverURL.String())
+			return decodeAPIError(status, responseBody, forbiddenResponseValues...)
 		}
-		return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 	}
 	return contextOrNetworkFailure(ctx)
 }
@@ -200,7 +223,33 @@ func responseRequiresJSON(body []byte) bool {
 	return len(bytes.TrimSpace(body)) != 0
 }
 
+func responseHeaderContainsAny(header http.Header, forbiddenValues []string) bool {
+	for name, values := range header {
+		if containsAny(name, forbiddenValues) {
+			return true
+		}
+		for _, value := range values {
+			if containsAny(value, forbiddenValues) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func responseBodyContainsAnyExactToken(body []byte, forbiddenValues []string) bool {
+	for _, forbidden := range forbiddenValues {
+		if containsExactTokenReflection(body, forbidden) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsExactTokenReflection(body []byte, token string) bool {
+	if token == "" {
+		return false
+	}
 	if bytes.Contains(body, []byte(token)) {
 		return true
 	}

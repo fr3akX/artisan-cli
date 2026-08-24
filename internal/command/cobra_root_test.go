@@ -20,7 +20,7 @@ func TestCobraRootHelpListsDiscoverableCommands(t *testing.T) {
 	if result.code != 0 || result.stderr != "" {
 		t.Fatalf("root help = %#v", result)
 	}
-	for _, want := range []string{"Authentication and saved credentials", "Manage green-coffee inventory", "Install or inspect the embedded agent skill", "version"} {
+	for _, want := range []string{"Artisan Server command line client", "Authentication and saved credentials", "Manage green-coffee inventory", "Read private roasts and post review comments", "List, install, or inspect embedded agent skills", "version"} {
 		if !strings.Contains(result.stdout, want) {
 			t.Errorf("root help missing %q:\n%s", want, result.stdout)
 		}
@@ -61,6 +61,8 @@ func TestCobraUnknownChildAttributionIgnoresTrailingRecognizedWords(t *testing.T
 		{name: "skill", args: []string{"skill", "bogus", "--bad", "show"}, message: "Unknown skill command"},
 		{name: "completion", args: []string{"completion", "bogus", "--bad", "bash"}, message: "Unknown completion command"},
 		{name: "inventory image", args: []string{"inventory", "image", "bogus"}, message: "Unknown inventory image command"},
+		{name: "roast", args: []string{"roast", "bogus", "--bad", "list"}, message: "Unknown roast command"},
+		{name: "roast chart", args: []string{"roast", "chart", "bogus", "--bad", "download"}, message: "Unknown roast chart command"},
 	} {
 		for _, jsonMode := range []bool{false, true} {
 			name := "text"
@@ -238,8 +240,21 @@ func TestCobraPublicCommandManifestAndGeneratedHelp(t *testing.T) {
 		"artisan inventory reservation finalize",
 		"artisan inventory reservation release",
 		"artisan inventory totals",
+		"artisan roast",
+		"artisan roast chart",
+		"artisan roast chart download",
+		"artisan roast comment",
+		"artisan roast comment list",
+		"artisan roast list",
+		"artisan roast profile",
+		"artisan roast profile download",
+		"artisan roast review",
+		"artisan roast review post",
+		"artisan roast revisions",
+		"artisan roast show",
 		"artisan skill",
 		"artisan skill install",
+		"artisan skill list",
 		"artisan skill show",
 		"artisan version",
 	}
@@ -282,6 +297,8 @@ func TestRepresentativeGeneratedHelpUsesOneJSONEnvelope(t *testing.T) {
 		{"auth", "login", "--help"},
 		{"inventory", "lot", "list", "--help"},
 		{"inventory", "totals", "--help"},
+		{"roast", "list", "--help"},
+		{"roast", "review", "post", "--help"},
 		{"skill", "show", "--help"},
 	} {
 		args = append(args, "--json")
@@ -303,6 +320,48 @@ func TestRepresentativeGeneratedHelpUsesOneJSONEnvelope(t *testing.T) {
 				t.Fatalf("JSON help %q envelope = %#v", args, envelope)
 			}
 		})
+	}
+}
+
+func TestCobraSkillHelpArgsAndStaticNameCompletion(t *testing.T) {
+	root, _ := newRootCommand(context.Background(), normalizeRuntime(Runtime{}), nil)
+	for _, test := range []struct {
+		path []string
+		use  string
+	}{
+		{path: []string{"skill", "show"}, use: "show [NAME]"},
+		{path: []string{"skill", "install"}, use: "install [NAME] --directory ROOT [--force]"},
+		{path: []string{"skill", "list"}, use: "list"},
+	} {
+		cmd, _, err := root.Find(test.path)
+		if err != nil || cmd.Use != test.use {
+			t.Fatalf("Find(%q) = %v, use %q; want %q", test.path, err, cmd.Use, test.use)
+		}
+		if test.path[1] == "list" {
+			if cmd.ValidArgsFunction == nil {
+				t.Fatal("skill list lacks static no-file completion")
+			}
+			continue
+		}
+		got, directive := cmd.ValidArgsFunction(cmd, nil, "artisan-")
+		if !reflect.DeepEqual(got, []string{"artisan-inventory", "artisan-roast-review"}) || directive&cobra.ShellCompDirectiveNoFileComp == 0 {
+			t.Errorf("%s completion = %q, %v", strings.Join(test.path, " "), got, directive)
+		}
+		got, directive = cmd.ValidArgsFunction(cmd, []string{"artisan-inventory"}, "")
+		if len(got) != 0 || directive&cobra.ShellCompDirectiveNoFileComp == 0 {
+			t.Errorf("%s completion after name = %q, %v", strings.Join(test.path, " "), got, directive)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"skill", "list", "extra"},
+		{"skill", "show", "artisan-inventory", "extra"},
+		{"skill", "install", "artisan-inventory", "extra", "--directory", t.TempDir()},
+	} {
+		result := runAuthCommand(t, Runtime{}, args...)
+		if result.code != usageExitCode || result.stdout != "" || result.stderr == "" {
+			t.Errorf("Run(%q) = %#v, want usage failure", args, result)
+		}
 	}
 }
 

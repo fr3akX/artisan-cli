@@ -27,7 +27,7 @@ type fileRenameInformation struct {
 
 type fileDispositionInformation struct{ DeleteFile uint32 }
 
-func installPlatform(rootPath string, force bool, hooks installHooks) (InstallResult, error) {
+func installPlatform(rootPath string, definition Definition, force bool, hooks installHooks) (InstallResult, error) {
 	result := InstallResult{}
 	root, err := openWindowsRoot(rootPath, hooks)
 	if err != nil {
@@ -38,7 +38,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		return result, err
 	}
 
-	directory, err := openWindowsRelative(root, Name, true, windows.FILE_OPEN_IF)
+	directory, err := openWindowsRelative(root, definition.Name, true, windows.FILE_OPEN_IF)
 	if err != nil {
 		return result, ErrUnsafeTarget
 	}
@@ -50,16 +50,16 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		return result, err
 	}
 
-	exists, identical, err := inspectWindowsTarget(directory)
+	exists, identical, err := inspectWindowsTarget(directory, definition)
 	if err != nil {
 		return result, err
 	}
 	if exists && identical {
-		if err := syncWindowsExisting(directory, hooks); err != nil {
+		if err := syncWindowsExisting(directory, definition, hooks); err != nil {
 			return result, err
 		}
 		result.Unchanged = true
-		if !windowsInstallLocationMatches(rootPath, root, directory) {
+		if !windowsInstallLocationMatches(rootPath, root, directory, definition) {
 			return result, installLocationChanged(false)
 		}
 		return result, nil
@@ -79,7 +79,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		}
 		windows.CloseHandle(temporaryHandle)
 	}()
-	if err := writeWindowsHandle(temporaryHandle, Content); err != nil {
+	if err := writeWindowsHandle(temporaryHandle, definition.Content); err != nil {
 		return result, fmt.Errorf("write temporary skill: %w", err)
 	}
 	event(hooks, "file-sync")
@@ -93,16 +93,16 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	replace := exists && force
 	err = renameWindowsHandle(temporaryHandle, directory, FileName, replace)
 	if isWindowsExists(err) {
-		exists, identical, inspectErr := inspectWindowsTarget(directory)
+		exists, identical, inspectErr := inspectWindowsTarget(directory, definition)
 		if inspectErr != nil {
 			return result, inspectErr
 		}
 		if exists && identical {
-			if err := syncWindowsExisting(directory, hooks); err != nil {
+			if err := syncWindowsExisting(directory, definition, hooks); err != nil {
 				return result, err
 			}
 			result.Unchanged = true
-			if !windowsInstallLocationMatches(rootPath, root, directory) {
+			if !windowsInstallLocationMatches(rootPath, root, directory, definition) {
 				return result, installLocationChanged(false)
 			}
 			return result, nil
@@ -119,10 +119,10 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	event(hooks, "commit")
 	result.Installed = true
 	event(hooks, "directory-sync")
-	if err := syncWindowsDirectory(directory, hooks); err != nil {
+	if err := syncWindowsDirectory(directory, definition, hooks); err != nil {
 		return result, &securefile.ReplacementError{Err: fmt.Errorf("flush skill directory: %w", err)}
 	}
-	if !windowsInstallLocationMatches(rootPath, root, directory) {
+	if !windowsInstallLocationMatches(rootPath, root, directory, definition) {
 		return result, installLocationChanged(true)
 	}
 	return result, nil
@@ -174,7 +174,7 @@ func openWindowsRootAccess(path string, hooks installHooks, writable bool) (wind
 	return current, nil
 }
 
-func windowsInstallLocationMatches(rootPath string, root, directory windows.Handle) bool {
+func windowsInstallLocationMatches(rootPath string, root, directory windows.Handle, definition Definition) bool {
 	requestedRoot, err := openWindowsRootAccess(rootPath, installHooks{}, false)
 	if err != nil {
 		return false
@@ -183,7 +183,7 @@ func windowsInstallLocationMatches(rootPath string, root, directory windows.Hand
 	if !sameWindowsHandleIdentity(root, requestedRoot) {
 		return false
 	}
-	requestedDirectory, err := openWindowsRelativeAccess(requestedRoot, Name, true, windows.FILE_OPEN, false)
+	requestedDirectory, err := openWindowsRelativeAccess(requestedRoot, definition.Name, true, windows.FILE_OPEN, false)
 	if err != nil {
 		return false
 	}
@@ -265,7 +265,7 @@ func verifyWindowsHandle(handle windows.Handle, directory bool) error {
 	return nil
 }
 
-func inspectWindowsTarget(directory windows.Handle) (bool, bool, error) {
+func inspectWindowsTarget(directory windows.Handle, definition Definition) (bool, bool, error) {
 	handle, err := openWindowsRelativeAccess(directory, FileName, false, windows.FILE_OPEN, false)
 	if isWindowsNotExist(err) {
 		return false, false, nil
@@ -275,11 +275,11 @@ func inspectWindowsTarget(directory windows.Handle) (bool, bool, error) {
 	}
 	file := os.NewFile(uintptr(handle), FileName)
 	defer file.Close()
-	contents, err := io.ReadAll(io.LimitReader(file, int64(len(Content)+1)))
+	contents, err := io.ReadAll(io.LimitReader(file, int64(len(definition.Content)+1)))
 	if err != nil {
 		return false, false, err
 	}
-	return true, bytes.Equal(contents, Content), nil
+	return true, bytes.Equal(contents, definition.Content), nil
 }
 
 func createWindowsTemporary(directory windows.Handle) (string, windows.Handle, error) {
@@ -351,7 +351,7 @@ func syncWindowsHandle(handle windows.Handle, name string, hooks installHooks) e
 	return hooks.syncFile(file)
 }
 
-func syncWindowsExisting(directory windows.Handle, hooks installHooks) error {
+func syncWindowsExisting(directory windows.Handle, definition Definition, hooks installHooks) error {
 	handle, err := openWindowsRelative(directory, FileName, false, windows.FILE_OPEN)
 	if err != nil {
 		return err
@@ -360,16 +360,16 @@ func syncWindowsExisting(directory windows.Handle, hooks installHooks) error {
 	if err := syncWindowsHandle(handle, FileName, hooks); err != nil {
 		return err
 	}
-	return syncWindowsDirectory(directory, hooks)
+	return syncWindowsDirectory(directory, definition, hooks)
 }
 
-func syncWindowsDirectory(directory windows.Handle, hooks installHooks) error {
+func syncWindowsDirectory(directory windows.Handle, definition Definition, hooks installHooks) error {
 	if hooks.syncDirectory != nil {
 		duplicate, err := duplicateWindowsHandle(directory)
 		if err != nil {
 			return err
 		}
-		file := os.NewFile(uintptr(duplicate), Name)
+		file := os.NewFile(uintptr(duplicate), definition.Name)
 		defer file.Close()
 		return hooks.syncDirectory(file)
 	}

@@ -1,7 +1,7 @@
 # Installing Artisan CLI
 
 Artisan CLI requires Artisan Server at commit
-`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy the compatible
+`bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea` or later. Deploy the compatible
 server before releasing or installing this CLI.
 
 ## Release downloads
@@ -44,7 +44,8 @@ Get-FileHash -Algorithm SHA256 .\artisan-VERSION-windows-amd64.zip
 Each archive has one top-level directory named
 `artisan-VERSION-OS-ARCH`. It contains only `artisan` (`artisan.exe` on
 Windows), `LICENSE`, `RELEASE_NOTES.md`, `THIRD_PARTY_NOTICES.txt`, and
-`skills/artisan-inventory/SKILL.md`. The same reviewed `RELEASE_NOTES.md` is the
+`skills/artisan-inventory/SKILL.md`, and
+`skills/artisan-roast-review/SKILL.md`. The same reviewed `RELEASE_NOTES.md` is the
 GitHub release body. Release automation also publishes GitHub build provenance
 for the six archives and `checksums.txt`; the note is archive content, not an
 additional downloadable asset.

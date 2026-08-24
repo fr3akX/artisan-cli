@@ -152,7 +152,7 @@ func runInventoryImageAdd(ctx context.Context, args []string, runtime Runtime, j
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -160,7 +160,7 @@ func runInventoryImageAdd(ctx context.Context, args []string, runtime Runtime, j
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryImageUpdate(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -208,7 +208,7 @@ func runInventoryImageUpdate(ctx context.Context, args []string, runtime Runtime
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -216,7 +216,7 @@ func runInventoryImageUpdate(ctx context.Context, args []string, runtime Runtime
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryImageReorder(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -250,7 +250,7 @@ func runInventoryImageReorder(ctx context.Context, args []string, runtime Runtim
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -258,7 +258,7 @@ func runInventoryImageReorder(ctx context.Context, args []string, runtime Runtim
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryImageDelete(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -292,7 +292,7 @@ func runInventoryImageDelete(ctx context.Context, args []string, runtime Runtime
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -300,7 +300,7 @@ func runInventoryImageDelete(ctx context.Context, args []string, runtime Runtime
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryImageDownload(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -321,7 +321,7 @@ func runInventoryImageDownload(ctx context.Context, args []string, runtime Runti
 	if _, failure := api.NormalizeInventoryUUID(imageID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -329,7 +329,7 @@ func runInventoryImageDownload(ctx context.Context, args []string, runtime Runti
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, result, func(w io.Writer) error {
+	return writeAPISuccess(runtime, jsonMode, result, func(w io.Writer) error {
 		_, err := fmt.Fprintf(w, "Downloaded %s image to %s (%d bytes)\n", result.Variant, output.EscapeVisible(result.Path), result.Bytes)
 		return err
 	})

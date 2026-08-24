@@ -107,32 +107,106 @@ func openWindowsObject(path string, directory, verify bool) (*os.File, error) {
 	return file, nil
 }
 
-func protectPrivate(file *os.File, directory bool) error {
-	if err := applyPrivateACL(file.Name(), directory); err != nil {
-		return err
-	}
-	return verifyPrivateHandle(windows.Handle(file.Fd()), directory)
+type privateProtectionHooks struct {
+	afterFinalPath func() error
 }
 
-func applyPrivateACL(path string, directory bool) error {
-	descriptor, acl, err := privateACL(directory)
+func protectPrivate(file *os.File, directory bool) error {
+	return protectPrivateWithHooks(file, directory, privateProtectionHooks{})
+}
+
+func protectPrivateWithHooks(file *os.File, directory bool, hooks privateProtectionHooks) error {
+	// Ordinary os.File handles do not request WRITE_DAC. Resolve the kernel's
+	// current path for the already-held object, then open a security-capable
+	// candidate and prove it is still that exact object before changing its DACL.
+	original := windows.Handle(file.Fd())
+	finalPath, err := privateFinalPath(original)
 	if err != nil {
 		return err
 	}
-	err = windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	)
-	runtime.KeepAlive(descriptor)
-	if err != nil {
-		return fmt.Errorf("set private ACL: %w", err)
+	if hooks.afterFinalPath != nil {
+		if err := hooks.afterFinalPath(); err != nil {
+			return errors.New("private object changed before protection")
+		}
 	}
-	return nil
+	candidate, err := openPrivateProtectionCandidate(finalPath, directory)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(candidate)
+
+	var originalInfo, candidateInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(original, &originalInfo); err != nil {
+		return fmt.Errorf("inspect private object before protection: %w", err)
+	}
+	if err := windows.GetFileInformationByHandle(candidate, &candidateInfo); err != nil {
+		return fmt.Errorf("inspect private ACL candidate: %w", err)
+	}
+	if !validPrivateObjectInfo(originalInfo, directory) ||
+		!validPrivateObjectInfo(candidateInfo, directory) ||
+		!samePrivateObjectIdentity(originalInfo, candidateInfo) {
+		return errors.New("private object changed before protection")
+	}
+	if err := applyPrivateACLHandle(candidate, directory); err != nil {
+		return err
+	}
+	return verifyPrivateHandle(candidate, directory)
+}
+
+func privateFinalPath(handle windows.Handle) (string, error) {
+	size := uint32(256)
+	for {
+		buffer := make([]uint16, size)
+		length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], size, 0)
+		if err != nil {
+			return "", fmt.Errorf("resolve private object from opened handle: %w", err)
+		}
+		if length < size {
+			return windows.UTF16ToString(buffer[:length]), nil
+		}
+		if length >= windows.MAX_LONG_PATH {
+			return "", errors.New("private object path is too long")
+		}
+		size = length + 1
+	}
+}
+
+func openPrivateProtectionCandidate(path string, directory bool) (windows.Handle, error) {
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, errors.New("private object path is invalid")
+	}
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if directory {
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	handle, err := windows.CreateFile(
+		pathPointer,
+		windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		flags,
+		0,
+	)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("open private ACL candidate: %w", err)
+	}
+	return handle, nil
+}
+
+func validPrivateObjectInfo(info windows.ByHandleFileInformation, directory bool) bool {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false
+	}
+	isDirectory := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	return isDirectory == directory
+}
+
+func samePrivateObjectIdentity(first, second windows.ByHandleFileInformation) bool {
+	return first.VolumeSerialNumber == second.VolumeSerialNumber &&
+		first.FileIndexHigh == second.FileIndexHigh &&
+		first.FileIndexLow == second.FileIndexLow
 }
 
 func applyPrivateACLHandle(handle windows.Handle, directory bool) error {

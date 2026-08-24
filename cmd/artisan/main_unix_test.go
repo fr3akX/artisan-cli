@@ -87,9 +87,9 @@ func TestCompiledProcessSIGINTExits130WithStableOutputAndCleanup(t *testing.T) {
 				_ = command.Wait()
 				t.Fatal("compiled process did not reach blocking server")
 			}
-			if !test.upload {
-				waitForDownloadTemporary(t, workDir)
-			}
+			// Reaching the request proves the download target was created. Linux
+			// and Darwin intentionally keep that source anonymous/unlinked, so no
+			// raceable temporary pathname is expected here.
 			if err := command.Process.Signal(os.Interrupt); err != nil {
 				t.Fatal(err)
 			}
@@ -145,22 +145,6 @@ func signalTestEnvironment(configRoot string) []string {
 		environment = append(environment, value)
 	}
 	return append(environment, "HOME="+configRoot, "XDG_CONFIG_HOME="+configRoot)
-}
-
-func waitForDownloadTemporary(t *testing.T, dir string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		matches, err := filepath.Glob(filepath.Join(dir, ".download.webp.tmp-*"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) == 1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("download temporary was not created before interruption")
 }
 
 func waitForSignalTestProcess(t *testing.T, command *exec.Cmd) error {

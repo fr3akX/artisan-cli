@@ -6,13 +6,151 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/fr3akX/artisan-cli/internal/output"
 	"github.com/fr3akX/artisan-cli/internal/release"
 )
+
+func TestClientUnrelatedShortIdempotencyKeyDoesNotBecomeAResponseSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Inventory-Result", "available")
+		_, _ = io.WriteString(w, `{"status":"available"}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "short-key-control-token", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Status string `json:"status"`
+	}
+	failure := client.Do(context.Background(), Request{
+		Method: http.MethodPost, Path: "/unrelated-mutation", IdempotencyKey: "a",
+	}, &response)
+	if failure != nil || response.Status != "available" {
+		t.Fatalf("response = %#v, failure = %#v", response, failure)
+	}
+}
+
+func TestClientResponseValidatorReceivesClonedHeadersBeforeSuccessDecode(t *testing.T) {
+	const token = "response-validator-secret-token"
+	const serverURL = "http://127.0.0.1"
+	transportHeader := http.Header{
+		"Content-Type": []string{"application/json"},
+		"X-Contract":   []string{"one", "two"},
+	}
+	client, err := NewClient(serverURL, token, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     transportHeader,
+			Body:       io.NopCloser(strings.NewReader(`{"value":"ok"}`)),
+		}, nil
+	})
+	called := false
+	var response struct {
+		Value string `json:"value"`
+	}
+	failure := client.Do(context.Background(), Request{
+		Method: http.MethodGet, Path: "/resource", ExpectedStatus: http.StatusOK,
+		ValidateResponse: func(status int, header http.Header) *output.Error {
+			called = true
+			if status != http.StatusOK || !reflect.DeepEqual(header.Values("X-Contract"), []string{"one", "two"}) {
+				t.Fatalf("validator status/header = %d/%#v", status, header)
+			}
+			for name, values := range header {
+				if strings.Contains(name, token) || strings.Contains(name, serverURL) {
+					t.Fatalf("validator received secret-bearing header name %q", name)
+				}
+				for _, value := range values {
+					if strings.Contains(value, token) || strings.Contains(value, serverURL) {
+						t.Fatalf("validator received secret-bearing header value")
+					}
+				}
+			}
+			header["X-Contract"][0] = "mutated-slice-element"
+			header.Set("X-Contract", "mutated-clone")
+			header.Add("X-Callback-Only", "value")
+			return nil
+		},
+	}, &response)
+	if failure != nil || !called || response.Value != "ok" {
+		t.Fatalf("Do() response=%#v failure=%#v called=%v", response, failure, called)
+	}
+	if got := transportHeader.Values("X-Contract"); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Fatalf("transport X-Contract mutated through validator: %#v", got)
+	}
+	if _, exists := transportHeader["X-Callback-Only"]; exists {
+		t.Fatalf("transport header gained callback-only value: %#v", transportHeader)
+	}
+}
+
+func TestClientResponseValidatorRejectsBeforeDecodeAndNeverReceivesReflectedSecrets(t *testing.T) {
+	const token = "response-header-reflection-token"
+	for _, reflected := range []string{token, "SERVER_URL"} {
+		t.Run(reflected, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				value := reflected
+				if value == "SERVER_URL" {
+					value = server.URL
+				}
+				w.Header().Set("X-Untrusted", value)
+				_, _ = io.WriteString(w, `{"value":"ok"}`)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, token, time.Second)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			called := false
+			var response struct {
+				Value string `json:"value"`
+			}
+			failure := client.Do(context.Background(), Request{
+				Method: http.MethodGet, Path: "/resource", ExpectedStatus: http.StatusOK,
+				ValidateResponse: func(int, http.Header) *output.Error { called = true; return nil },
+			}, &response)
+			if failure == nil || failure.Code != "invalid_server_response" || called || response.Value != "" {
+				t.Fatalf("Do() response=%#v failure=%#v called=%v", response, failure, called)
+			}
+		})
+	}
+}
+
+func TestClientResponseValidatorFailureIsReturnedWithoutDecoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"value":"ok"}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "validator-token", time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	want := &output.Error{ExitCode: 9, Code: "contract_mismatch", Message: "Contract mismatch"}
+	var response struct {
+		Value string `json:"value"`
+	}
+	failure := client.Do(context.Background(), Request{
+		Method: http.MethodGet, Path: "/resource", ExpectedStatus: http.StatusOK,
+		ValidateResponse: func(int, http.Header) *output.Error { return want },
+	}, &response)
+	if failure != want || response.Value != "" {
+		t.Fatalf("Do() response=%#v failure=%#v", response, failure)
+	}
+}
 
 func TestClientSendsExactAuthenticationAndUserAgent(t *testing.T) {
 	t.Parallel()

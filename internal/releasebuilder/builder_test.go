@@ -624,7 +624,7 @@ func TestSnapshotBytesRemainBoundToInspectedArchivePayload(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte("changed binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "RELEASE_NOTES.md": {bytes: []byte("release notes"), digest: sha256.Sum256([]byte("release notes"))}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("skill"), digest: sha256.Sum256([]byte("skill"))}, binary: {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
+	payloads := map[string]payloadSnapshot{"LICENSE": {bytes: sourceBytes, digest: sha256.Sum256(sourceBytes)}, "RELEASE_NOTES.md": {bytes: []byte("release notes"), digest: sha256.Sum256([]byte("release notes"))}, "THIRD_PARTY_NOTICES.txt": {bytes: []byte("notice"), digest: sha256.Sum256([]byte("notice"))}, "skills/artisan-inventory/SKILL.md": {bytes: []byte("inventory skill"), digest: sha256.Sum256([]byte("inventory skill"))}, "skills/artisan-roast-review/SKILL.md": {bytes: []byte("roast review skill"), digest: sha256.Sum256([]byte("roast review skill"))}, binary: {bytes: binaryBytes, digest: sha256.Sum256(binaryBytes)}}
 	archivePath := filepath.Join(temporary, "snapshot.tar.gz")
 	top := "artisan-" + contractVersion + "-" + runtime.GOOS + "-" + runtime.GOARCH
 	if err := writeTarGzip(archivePath, top, binary, payloads); err != nil {
@@ -879,7 +879,7 @@ func fakeRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for path := range map[string]bool{"LICENSE": true, "RELEASE_NOTES.md": true, "THIRD_PARTY_NOTICES.txt": true, "skills/artisan-inventory/SKILL.md": true} {
+	for path := range map[string]bool{"LICENSE": true, "RELEASE_NOTES.md": true, "THIRD_PARTY_NOTICES.txt": true, "skills/artisan-inventory/SKILL.md": true, "skills/artisan-roast-review/SKILL.md": true} {
 		full := filepath.Join(root, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)

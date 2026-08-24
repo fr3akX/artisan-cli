@@ -44,7 +44,7 @@ func runInventoryConflictResolve(ctx context.Context, conflictID string, args []
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -52,5 +52,5 @@ func runInventoryConflictResolve(ctx context.Context, conflictID string, args []
 	if apiFailure != nil {
 		return writeFailure(runtime, jsonMode, *apiFailure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, conflict, func(w io.Writer) error { return writeConflictDetail(w, conflict) })
+	return writeAPISuccess(runtime, jsonMode, conflict, func(w io.Writer) error { return writeConflictDetail(w, conflict) })
 }

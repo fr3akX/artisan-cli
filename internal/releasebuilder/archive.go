@@ -27,6 +27,8 @@ func archiveEntries(top, binary string, payloads map[string]payloadSnapshot) []a
 		{name: top + "/skills/", mode: 0o755, directory: true},
 		{name: top + "/skills/artisan-inventory/", mode: 0o755, directory: true},
 		{name: top + "/skills/artisan-inventory/SKILL.md", mode: 0o644, payload: payloads["skills/artisan-inventory/SKILL.md"]},
+		{name: top + "/skills/artisan-roast-review/", mode: 0o755, directory: true},
+		{name: top + "/skills/artisan-roast-review/SKILL.md", mode: 0o644, payload: payloads["skills/artisan-roast-review/SKILL.md"]},
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 	return entries

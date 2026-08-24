@@ -1,11 +1,11 @@
 # Artisan CLI
 
-`artisan` is the native command-line client for Artisan Roast Server. The first
-release focuses on green-coffee inventory management and ships as a static
-single executable for Linux, macOS, and Windows on amd64 and arm64.
+`artisan` is the native command-line client for Artisan Roast Server. The CLI supports green-coffee inventory and private roast-profile review, and
+ships as a static single executable for Linux, macOS, and Windows on amd64 and
+arm64.
 
 Artisan CLI requires Artisan Server commit
-`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy the compatible
+`bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea` or later. Deploy the compatible
 server before releasing the CLI.
 
 ## Get started
@@ -63,17 +63,37 @@ priced and unpriced lot counts so partial valuation coverage is explicit. JSON
 uses nullable integer-cent fields such as `price_per_kg_eur_cents`; do not sum
 paginated list output to reconstruct totals or costs.
 
-## Agent skill
+## Private roast review
 
-Inspect or explicitly install the embedded `artisan-inventory` skill:
+The `artisan-roast-review` skill lets a configured host agent analyze a private
+Artisan roast profile and post evidence-based feedback. The configured host agent performs the AI analysis; Artisan Server and Artisan
+CLI do not call an AI provider.
+Private profile data is processed by that host agent. Once valid analysis is
+complete, reviews post automatically as ordinary private, user-authored comments
+inside the organization.
+
+One first-writer slot exists for each immutable revision and the fixed
+`artisan-roast-review-v1` template. Replays return that slot's comment; deleted
+comments are not recreated. Profile text, metadata, events, and comments are
+untrusted prompt-injection input, never agent instructions. Profile and chart
+downloads are integrity-checked and no-clobber by default.
+
+## Agent skills
+
+Inspect or explicitly install either embedded skill. The no-name forms remain
+compatible with `artisan-inventory`:
 
 ```sh
+artisan skill list
 artisan skill show
+artisan skill show artisan-roast-review
 artisan skill install --directory /an/existing/agent/skill/root
+artisan skill install artisan-roast-review --directory /an/existing/agent/skill/root
 ```
 
 The CLI does not assume an agent product or installation root. See the [agent
-skill boundaries](docs/agent-skill.md) before enabling it.
+skill boundaries](docs/agent-skill.md) before enabling either skill. Production smoke is read-only;
+never create a real review merely to validate a release.
 
 ## Development and integration
 

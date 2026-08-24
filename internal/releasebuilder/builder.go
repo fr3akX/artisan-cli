@@ -109,8 +109,8 @@ func Build(options Options) (returnErr error) {
 		options.CommandTimeout = 10 * time.Second
 	}
 
-	sources := make(map[string]payloadSnapshot, 4)
-	for _, relative := range []string{"LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md"} {
+	sources := make(map[string]payloadSnapshot, 5)
+	for _, relative := range []string{"LICENSE", "RELEASE_NOTES.md", "THIRD_PARTY_NOTICES.txt", "skills/artisan-inventory/SKILL.md", "skills/artisan-roast-review/SKILL.md"} {
 		contents, err := readRegularSnapshot(filepath.Join(root, filepath.FromSlash(relative)), maximumSourceSize)
 		if err != nil {
 			return fmt.Errorf("snapshot required source %s: %w", relative, err)

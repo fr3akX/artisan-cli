@@ -70,7 +70,7 @@ func runInventoryConflict(ctx context.Context, args []string, runtime Runtime, j
 		if _, failure := api.NormalizeInventoryUUID(args[1]); failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+		client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 		if client == nil {
 			return code
 		}
@@ -78,7 +78,7 @@ func runInventoryConflict(ctx context.Context, args []string, runtime Runtime, j
 		if failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		return writeInventorySuccess(runtime, jsonMode, conflict, func(w io.Writer) error { return writeConflictDetail(w, conflict) })
+		return writeAPISuccess(runtime, jsonMode, conflict, func(w io.Writer) error { return writeConflictDetail(w, conflict) })
 	case "resolve":
 		if len(args) < 2 {
 			return inventoryUsageFailure(runtime, jsonMode, "inventory conflict resolve requires one CONFLICT_ID")
@@ -107,7 +107,7 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	if failure := api.ValidateLotListOptions(options); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -121,7 +121,7 @@ func runInventoryLotList(ctx context.Context, args []string, runtime Runtime, js
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeLotTable(w, page) })
+	return writeAPISuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeLotTable(w, page) })
 }
 
 func runInventoryTotals(ctx context.Context, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -139,7 +139,7 @@ func runInventoryTotals(ctx context.Context, args []string, runtime Runtime, jso
 	if failure := api.ValidateInventoryTotalsOptions(options); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -147,14 +147,14 @@ func runInventoryTotals(ctx context.Context, args []string, runtime Runtime, jso
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, totals, func(w io.Writer) error { return writeInventoryTotals(w, totals) })
+	return writeAPISuccess(runtime, jsonMode, totals, func(w io.Writer) error { return writeInventoryTotals(w, totals) })
 }
 
 func runInventoryLotShow(ctx context.Context, lotID string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
 	if _, failure := api.NormalizeInventoryUUID(lotID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -162,7 +162,7 @@ func runInventoryLotShow(ctx context.Context, lotID string, runtime Runtime, jso
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
+	return writeAPISuccess(runtime, jsonMode, lot, func(w io.Writer) error { return writeLotDetail(w, lot) })
 }
 
 func runInventoryLotHistory(ctx context.Context, kind string, args []string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {
@@ -188,7 +188,7 @@ func runInventoryLotHistory(ctx context.Context, kind string, args []string, run
 	if kind == "conflicts" {
 		return executeInventoryConflicts(ctx, lotID, options, *all, runtime, jsonMode, serverOverride, timeout)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -204,7 +204,7 @@ func runInventoryLotHistory(ctx context.Context, kind string, args []string, run
 		if failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeLedgerTable(w, page) })
+		return writeAPISuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeLedgerTable(w, page) })
 	case "reservations":
 		var page api.InventoryReservationPage
 		var failure *output.Error
@@ -216,7 +216,7 @@ func runInventoryLotHistory(ctx context.Context, kind string, args []string, run
 		if failure != nil {
 			return writeFailure(runtime, jsonMode, *failure)
 		}
-		return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeReservationTable(w, page) })
+		return writeAPISuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeReservationTable(w, page) })
 	default:
 		return inventoryUsageFailure(runtime, jsonMode, "Unknown inventory history command")
 	}
@@ -229,7 +229,7 @@ func executeInventoryConflicts(ctx context.Context, lotID string, options api.Pa
 	if failure := api.ValidatePageOptions(options); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	client, code := inventoryReadClient(ctx, runtime, jsonMode, serverOverride, timeout)
+	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
@@ -243,10 +243,10 @@ func executeInventoryConflicts(ctx context.Context, lotID string, options api.Pa
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
-	return writeInventorySuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeConflictTable(w, page) })
+	return writeAPISuccess(runtime, jsonMode, page, func(w io.Writer) error { return writeConflictTable(w, page) })
 }
 
-func inventoryReadClient(ctx context.Context, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) (*api.Client, int) {
+func authenticatedClient(ctx context.Context, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) (*api.Client, int) {
 	release, lockFailure := acquireAuthStateLock(ctx, runtime.ConfigDir)
 	if lockFailure != nil {
 		return nil, writeFailure(runtime, jsonMode, *lockFailure)
@@ -266,7 +266,7 @@ func inventoryReadClient(ctx context.Context, runtime Runtime, jsonMode bool, se
 	return client, 0
 }
 
-func writeInventorySuccess(runtime Runtime, jsonMode bool, data any, human func(io.Writer) error) int {
+func writeAPISuccess(runtime Runtime, jsonMode bool, data any, human func(io.Writer) error) int {
 	if err := output.WriteSuccess(runtime.Out, jsonMode, data, human); err != nil {
 		return reportWriteError(runtime.Err, err)
 	}

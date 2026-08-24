@@ -13,6 +13,7 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/config"
 	"github.com/fr3akX/artisan-cli/internal/output"
 	"github.com/fr3akX/artisan-cli/internal/release"
+	embeddedskill "github.com/fr3akX/artisan-cli/internal/skill"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -239,6 +240,18 @@ func isKnownLegacySingleDashFlagForPath(name, path string) bool {
 	if isCobraGlobalFlag(name) {
 		return true
 	}
+	if path == "roast list" {
+		return stringIn(name, "limit", "cursor", "all", "search", "roast-at-from", "roast-at-to", "machine", "state", "label-id")
+	}
+	if path == "roast revisions" || path == "roast comment list" {
+		return stringIn(name, "limit", "cursor", "all")
+	}
+	if path == "roast chart download" || path == "roast profile download" {
+		return name == "force"
+	}
+	if path == "roast review post" {
+		return stringIn(name, "revision-sha256", "template-version", "body-file")
+	}
 	if strings.HasPrefix(path, "inventory lot create") {
 		return cobraLotFieldFlag(name) || stringIn(name, "opening-grams", "opening-reason", "opening-reference", "from-json", "idempotency-key", "image", "image-caption", "image-alt-text", "image-cover")
 	}
@@ -332,7 +345,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	}
 	root := &cobra.Command{
 		Use:              "artisan",
-		Short:            "Artisan green-coffee inventory command line client",
+		Short:            "Artisan Server command line client",
 		SilenceErrors:    true,
 		SilenceUsage:     true,
 		TraverseChildren: true,
@@ -387,6 +400,7 @@ func newRootCommand(ctx context.Context, runtime Runtime, _ []string) (*cobra.Co
 	root.AddCommand(
 		newAuthCommand(ctx, state),
 		newInventoryCommand(ctx, state),
+		newRoastCommand(ctx, state),
 		newSkillCommand(ctx, state),
 		newCompletionCommand(root, state),
 		newVersionCommand(state),
@@ -485,7 +499,7 @@ func newVersionCommand(state *cobraState) *cobra.Command {
 func newSkillCommand(ctx context.Context, state *cobraState) *cobra.Command {
 	skill := &cobra.Command{
 		Use:   "skill",
-		Short: "Install or inspect the embedded agent skill",
+		Short: "List, install, or inspect embedded agent skills",
 		Run: func(_ *cobra.Command, args []string) {
 			message := "A skill command is required"
 			if len(args) != 0 {
@@ -494,32 +508,59 @@ func newSkillCommand(ctx context.Context, state *cobraState) *cobra.Command {
 			setCommandExit(state, skillUsageFailure(state.runtime, state.jsonMode, message))
 		},
 	}
+	list := &cobra.Command{
+		Use:               "list",
+		Short:             "List embedded agent skills",
+		Args:              skillMaximumArgs(0, "skill list does not accept arguments"),
+		ValidArgsFunction: cobra.NoFileCompletions,
+		Run: func(_ *cobra.Command, _ []string) {
+			setCommandExit(state, runSkill(ctx, []string{"list"}, state.runtime, state.jsonMode))
+		},
+	}
 	show := &cobra.Command{
-		Use:   "show",
-		Short: "Show the embedded agent skill",
+		Use:               "show [NAME]",
+		Short:             "Show an embedded agent skill",
+		Args:              skillMaximumArgs(1, "skill show accepts at most one NAME"),
+		ValidArgsFunction: completeSkillNames,
 		Run: func(_ *cobra.Command, args []string) {
-			if len(args) != 0 {
-				setCommandExit(state, skillUsageFailure(state.runtime, state.jsonMode, "skill show does not accept arguments"))
-				return
-			}
-			setCommandExit(state, runSkill(ctx, []string{"show"}, state.runtime, state.jsonMode))
+			setCommandExit(state, runSkill(ctx, append([]string{"show"}, args...), state.runtime, state.jsonMode))
 		},
 	}
 	install := &cobra.Command{
-		Use:   "install --directory ROOT [--force]",
-		Short: "Install the embedded agent skill",
+		Use:               "install [NAME] --directory ROOT [--force]",
+		Short:             "Install an embedded agent skill",
+		Args:              skillMaximumArgs(1, "skill install accepts at most one NAME"),
+		ValidArgsFunction: completeSkillNames,
 		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) != 0 {
-				setCommandExit(state, skillUsageFailure(state.runtime, state.jsonMode, "skill install requires --directory ROOT"))
-				return
-			}
 			setCommandExit(state, runSkillInstall(canonicalLegacyArgs(cmd, args), state.runtime, state.jsonMode))
 		},
 	}
 	install.Flags().String("directory", "", "agent skill root")
 	install.Flags().Bool("force", false, "replace differing content")
-	skill.AddCommand(show, install)
+	skill.AddCommand(list, show, install)
 	return skill
+}
+
+func skillMaximumArgs(maximum int, message string) cobra.PositionalArgs {
+	return func(_ *cobra.Command, args []string) error {
+		if len(args) > maximum {
+			return &cobraValidationError{failure: output.Error{ExitCode: usageExitCode, Code: "usage", Message: message}}
+		}
+		return nil
+	}
+}
+
+func completeSkillNames(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var matches []string
+	for _, name := range embeddedskill.Names() {
+		if strings.HasPrefix(name, toComplete) {
+			matches = append(matches, name)
+		}
+	}
+	return matches, cobra.ShellCompDirectiveNoFileComp
 }
 
 func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err error) int {
@@ -550,6 +591,16 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			message = "Unknown inventory conflict command"
 		case "inventory image":
 			message = "Unknown inventory image command"
+		case "roast":
+			message = "Unknown roast command"
+		case "roast chart":
+			message = "Unknown roast chart command"
+		case "roast profile":
+			message = "Unknown roast profile command"
+		case "roast comment":
+			message = "Unknown roast comment command"
+		case "roast review":
+			message = "Unknown roast review command"
 		case "":
 			if command := firstCommandArg(args); command != "" {
 				message = "Unknown command: " + command
@@ -572,9 +623,11 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			case "skill":
 				message = "Unknown skill command"
 			case "skill install":
-				message = "skill install requires --directory ROOT"
+				message = "Invalid skill install option"
 			case "skill show":
-				message = "skill show does not accept arguments"
+				message = "Invalid skill show option"
+			case "skill list":
+				message = "skill list does not accept arguments"
 			case "completion":
 				message = "Unknown completion command"
 			case "completion bash", "completion zsh", "completion fish", "completion powershell":
@@ -582,6 +635,8 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 			default:
 				if inventoryMessage := inventoryCobraParseFailureMessage(path); inventoryMessage != "" {
 					message = inventoryMessage
+				} else if roastMessage := roastCobraParseFailureMessage(path); roastMessage != "" {
+					message = roastMessage
 				}
 			}
 		}
@@ -595,11 +650,12 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 
 func cobraJSONModeForParseFailure(args []string) bool {
 	command := firstCommandArg(args)
-	if command != "auth" && command != "inventory" {
+	if command != "auth" && command != "inventory" && command != "roast" && command != "skill" {
 		return jsonModeForParseFailure(args)
 	}
 
 	jsonMode := false
+	path := knownCommandPath(args)
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -619,7 +675,7 @@ func cobraJSONModeForParseFailure(args []string) bool {
 				jsonMode = parsed
 			}
 		default:
-			if cobraFlagConsumesValue(name) && !hasValue && i+1 < len(args) {
+			if cobraFlagConsumesValueForPath(name, path) && !hasValue && i+1 < len(args) {
 				i++
 			}
 		}
@@ -666,12 +722,14 @@ func knownCommandPath(args []string) string {
 		}
 		return "completion"
 	case "skill":
-		if child, _, ok := nextRouteCommandToken(args, commandIndex+1); ok && stringIn(child, "show", "install") {
+		if child, _, ok := nextRouteCommandToken(args, commandIndex+1); ok && stringIn(child, "list", "show", "install") {
 			return "skill " + child
 		}
 		return "skill"
 	case "inventory":
 		return knownInventoryCommandPath(args)
+	case "roast":
+		return knownRoastCommandPath(args)
 	default:
 		return ""
 	}
