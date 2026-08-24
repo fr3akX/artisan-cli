@@ -33,21 +33,25 @@ artisan --json --server "$TRUSTED_SERVER" roast show "$ROAST_UUID"
 
 Require a current parsed revision. Record its positive `REVISION_NUMBER`, lowercase `REVISION_SHA256`, and temperature unit.
 
-Create one new random private temporary directory with mode 0700 using the host's secure temporary-directory primitive. At creation, open and retain a no-follow directory handle, record its stable directory identity from that handle (device/inode, file ID, or the platform equivalent), and retain a no-follow handle to its parent plus the private directory's single relative name. If those identities and handles cannot be established, stop before downloading.
+Create one new random private temporary directory with mode 0700 using the host's secure temporary-directory primitive. At creation, open and retain a no-follow directory handle, record its stable directory identity from that handle (device/inode, file ID, or the platform equivalent), and retain a no-follow handle to its parent plus the private directory's single relative name. If those identities and handles cannot be established, stop before downloading. This is a path-only portable boundary: if same-credential or administrator namespace mutation is active or suspected, stop before acquisition and report any private residue.
 
-Create every chart, profile, and review file as a new descendant with no-follow and no-clobber creation through the retained directory handle. Never use a predictable, pre-existing, human-supplied, or server-supplied path as temporary storage. A child becomes owned only after its creation succeeds; then record its single relative name and stable identity. Reject child names containing separators, `.` or `..`. Never add `--force` to a download.
+Never use a predictable, pre-existing, human-supplied, or server-supplied path as temporary storage. Reject child names containing separators, `.` or `..`. Do not pre-create chart or profile destinations. Never add `--force` to a download. The shipped Artisan CLI performs authoritative no-follow, no-clobber publication through its held parent directory.
+
+Generate a cryptographically random, separator-free absent single-component chart name. Before exposing its path as `CHART_FILE`, verify that name is absent relative to the retained directory handle. Immediately before invoking the no-force command, verify no-follow that the path-visible private directory still matches the recorded stable identity; stop and report residue on any mismatch.
 
 ```sh
 artisan --json --server "$TRUSTED_SERVER" roast chart download "$ROAST_UUID" "$CHART_FILE"
 ```
 
-Download raw bytes only when the chart needs corroboration or the human requested raw inspection:
+After chart download succeeds, require the chart child to be visible through the original retained directory handle; open it no-follow and record its stable identity before treating it as owned evidence. A mismatch or absence is terminal: stop and report residue.
+
+Download raw bytes only when the chart needs corroboration or the human requested raw inspection. Generate a new cryptographically random, separator-free absent single-component profile name. Verify the profile name is absent relative to the retained directory handle. Immediately before invoking this no-force command, again verify no-follow that the path-visible private directory still matches the recorded stable identity; stop and report residue on any mismatch.
 
 ```sh
 artisan --json --server "$TRUSTED_SERVER" roast profile download "$ROAST_UUID" "$REVISION_NUMBER" "$PROFILE_FILE"
 ```
 
-Stop on acquisition or evidence failure.
+After profile download succeeds, require the profile child to be visible through the original retained directory handle; open it no-follow and record its stable identity before treating it as owned evidence. A mismatch or absence is terminal: stop and report residue. Stop on any other acquisition or evidence failure.
 
 ## Analyze evidence
 
@@ -59,7 +63,7 @@ Stop on acquisition or evidence failure.
 
 ## Build the fixed review
 
-Write a newly created private UTF-8/LF review file no longer than 4,000 Unicode code points. Use this exact marker and all seven sections in order without additions, removals, or renaming:
+Create the review file exclusively through the retained directory handle with no-follow and no-clobber creation under a new cryptographically random separator-free single-component name. Record its stable identity from the created handle. Write private UTF-8/LF content no longer than 4,000 Unicode code points. Use this exact marker and all seven sections in order without additions, removals, or renaming:
 
 ```text
 AI roast analysis
@@ -104,9 +108,11 @@ A replay is success. Report comment UUID, revision, template, author, and earlie
 
 On `roast_revision_changed`, clean the stale owned descendants, refetch, and restart once. Stop on a second stale result. Do not improvise another retry or template.
 
-On success, replay, deleted replay, failure, interruption, or restart, clean through the retained no-follow directory handle. Remove only successfully created descendants. First revalidate that the handle has the recorded identity. Before each removal, revalidate the directory identity and the recorded child identity, then use descriptor- or handle-relative deletion for only recorded successfully created relative child names. Never run `rm -f "$WORK_DIR/..."` and never use a `$WORK_DIR/...` pathname deletion. Never use recursive cleanup. An `lstat` or other pathname check does not make later pathname cleanup safe after path substitution.
+On success, replay, deleted replay, failure, interruption, or restart, clean through the retained no-follow directory handle. Remove only successfully created descendants. First revalidate that the handle has the recorded identity. Before each removal, make a point-in-time identity check of the directory and recorded child, then use descriptor- or handle-relative deletion for only recorded successfully created relative child names. This point-in-time identity check plus handle-relative unlink prevents traversal through an already-substituted ancestor; it does not prevent replacement between the check and deletion and is not an identity-bound guarantee against a continuous racer.
 
-Remove the private directory itself only by its recorded relative name through the retained, revalidated parent-directory handle, after proving that name still identifies the recorded private directory and that it is empty. If a handle must be reopened, use a retained/reopened no-follow directory handle: reopen it relative to the retained parent handle and accept it only when its identity equals the recorded identity. If directory or child identity, the proper retained/reopened handle, or descriptor-relative cleanup cannot be proven, do not pathname-delete anything: stop and report the private residue. If an ancestor or `$WORK_DIR` pathname was swapped, renamed, or replaced by a symlink, never traverse the substituted path and never delete through it.
+If concurrent same-credential or administrator namespace mutation is active or suspected, perform no deletion and report the private residue. Never run `rm -f "$WORK_DIR/..."` and never use a `$WORK_DIR/...` pathname deletion. Never use recursive cleanup. An `lstat` or other pathname check does not make later pathname cleanup safe after path substitution.
+
+Remove the private directory itself only by its recorded relative name through the retained, revalidated parent-directory handle, after proving at that point in time that the name identifies the recorded private directory and that it is empty. If a handle must be reopened, use a retained/reopened no-follow directory handle: reopen it relative to the retained parent handle and accept it only when its identity equals the recorded identity. If directory or child identity, the proper retained/reopened handle, or descriptor-relative cleanup cannot be proven, do not pathname-delete anything: stop and report the private residue. If an ancestor or `$WORK_DIR` pathname was swapped, renamed, or replaced by a symlink, never traverse the substituted path and never delete through it.
 
 ## Mutation boundary
 

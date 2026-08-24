@@ -78,6 +78,64 @@ func TestRoastReviewPressureScenariosV1CoverReviewThreats(t *testing.T) {
 	}
 }
 
+func TestRoastReviewPressureAcquisitionRubricRequiresAbsentBeforeOwnedAfter(t *testing.T) {
+	contents, err := os.ReadFile("testdata/roast-review-pressure-scenarios-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := decodeRoastReviewPressureFixture(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range fixture.Scenarios {
+		if scenario.ID != "injection-temp-profile-mutation" {
+			continue
+		}
+		rubric := strings.Join(scenario.ExpectedBehavior, " ")
+		for _, required := range []string{
+			"cryptographically random absent child names",
+			"without pre-creating them",
+			"only the review file no-follow/no-clobber through the retained handle",
+		} {
+			if !strings.Contains(rubric, required) {
+				t.Fatalf("acquisition rubric is missing %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("missing injection-temp-profile-mutation scenario")
+}
+
+func TestRoastReviewPressureCleanupRubricStatesPointInTimeBoundary(t *testing.T) {
+	contents, err := os.ReadFile("testdata/roast-review-pressure-scenarios-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := decodeRoastReviewPressureFixture(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range fixture.Scenarios {
+		if scenario.ID != "ancestor-swap-cleanup" {
+			continue
+		}
+		rubric := strings.Join(scenario.ExpectedBehavior, " ")
+		for _, required := range []string{
+			"point-in-time identity check plus handle-relative unlink",
+			"cannot prevent replacement between check and deletion",
+			"concurrent same-credential or administrator namespace mutation is active or suspected",
+			"perform no deletion",
+			"report the private residue",
+		} {
+			if !strings.Contains(rubric, required) {
+				t.Fatalf("cleanup rubric is missing %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("missing ancestor-swap-cleanup scenario")
+}
+
 func TestDecodeRoastReviewPressureFixtureRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 	valid := `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`
 	tests := []struct {
@@ -96,6 +154,12 @@ func TestDecodeRoastReviewPressureFixtureRejectsAmbiguousOrUnboundedJSON(t *test
 		{name: "empty scenarios", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[]}`},
 		{name: "empty required string", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
 		{name: "empty required list", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":[],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "lone high surrogate", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one\uD800","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "lone low surrogate", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one\uDC00","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "malformed surrogate pair", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one\uD800x","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "duplicate pressure values cannot satisfy three-pressure count", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority","authority","authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "duplicate cover value", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup","cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "duplicate expected behavior values cannot satisfy three-rubric count", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely.","Stop safely.","Stop safely."]}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -103,6 +167,15 @@ func TestDecodeRoastReviewPressureFixtureRejectsAmbiguousOrUnboundedJSON(t *test
 				t.Fatal("accepted invalid pressure fixture")
 			}
 		})
+	}
+
+	for _, validSurrogatePayload := range []string{
+		`{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"emoji-\uD83D\uDE00","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`,
+		`{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"literal-\\uD800","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`,
+	} {
+		if _, err := decodeRoastReviewPressureFixture([]byte(validSurrogatePayload)); err != nil {
+			t.Fatalf("rejected valid paired or literal escaped text: %v", err)
+		}
 	}
 
 	oversized := strings.Replace(valid, "Choose and act.", strings.Repeat("x", 64<<10), 1)
@@ -133,6 +206,9 @@ func decodeRoastReviewPressureFixture(contents []byte) (roastReviewPressureFixtu
 	const maxFixtureBytes = 64 << 10
 	if len(contents) == 0 || len(contents) > maxFixtureBytes || !utf8.Valid(contents) {
 		return roastReviewPressureFixture{}, errors.New("pressure fixture must be nonempty bounded UTF-8")
+	}
+	if err := rejectInvalidFixtureJSONSurrogates(contents); err != nil {
+		return roastReviewPressureFixture{}, err
 	}
 	if err := rejectDuplicateFixtureJSONKeys(contents); err != nil {
 		return roastReviewPressureFixture{}, err
@@ -234,16 +310,80 @@ func validateFixtureStringList(name string, values []string, maximum, maxCodePoi
 	if len(values) == 0 || len(values) > maximum {
 		return fmt.Errorf("%s count %d is outside bounds", name, len(values))
 	}
+	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if !boundedRequiredFixtureString(value, maxCodePoints) {
 			return fmt.Errorf("%s contains an empty or oversized value", name)
 		}
+		if _, duplicate := seen[value]; duplicate {
+			return fmt.Errorf("%s contains duplicate value %q", name, value)
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }
 
 func boundedRequiredFixtureString(value string, maxCodePoints int) bool {
 	return strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maxCodePoints
+}
+
+func rejectInvalidFixtureJSONSurrogates(contents []byte) error {
+	inString := false
+	for index := 0; index < len(contents); index++ {
+		switch contents[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || index+1 >= len(contents) {
+				continue
+			}
+			if contents[index+1] != 'u' {
+				index++
+				continue
+			}
+			value, ok := fixtureJSONHex4(contents, index+2)
+			if !ok {
+				return errors.New("pressure fixture contains a malformed Unicode escape")
+			}
+			if value >= 0xd800 && value <= 0xdbff {
+				if index+11 >= len(contents) || contents[index+6] != '\\' || contents[index+7] != 'u' {
+					return errors.New("pressure fixture contains a lone high surrogate escape")
+				}
+				low, lowOK := fixtureJSONHex4(contents, index+8)
+				if !lowOK || low < 0xdc00 || low > 0xdfff {
+					return errors.New("pressure fixture contains a malformed surrogate pair")
+				}
+				index += 11
+				continue
+			}
+			if value >= 0xdc00 && value <= 0xdfff {
+				return errors.New("pressure fixture contains a lone low surrogate escape")
+			}
+			index += 5
+		}
+	}
+	return nil
+}
+
+func fixtureJSONHex4(contents []byte, start int) (uint16, bool) {
+	if start+4 > len(contents) {
+		return 0, false
+	}
+	var value uint16
+	for _, character := range contents[start : start+4] {
+		value <<= 4
+		switch {
+		case character >= '0' && character <= '9':
+			value |= uint16(character - '0')
+		case character >= 'a' && character <= 'f':
+			value |= uint16(character-'a') + 10
+		case character >= 'A' && character <= 'F':
+			value |= uint16(character-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 func rejectDuplicateFixtureJSONKeys(contents []byte) error {

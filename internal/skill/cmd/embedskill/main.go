@@ -152,8 +152,8 @@ func parseFrontmatterName(contents []byte) (string, error) {
 	if !hasName || !hasDescription {
 		return "", errors.New("frontmatter requires name and description")
 	}
-	if containsUnicodeLineOrParagraphSeparator(name) || containsUnicodeLineOrParagraphSeparator(description) {
-		return "", errors.New("frontmatter scalars contain a Unicode line or paragraph separator")
+	if containsDisallowedUnicodeScalar(name) || containsDisallowedUnicodeScalar(description) {
+		return "", errors.New("frontmatter scalars contain a Unicode line, paragraph, or format control")
 	}
 	if !validSkillNameValue(name) {
 		return "", fmt.Errorf("invalid frontmatter name %q", name)
@@ -169,9 +169,9 @@ func parseFrontmatterName(contents []byte) (string, error) {
 	return name, nil
 }
 
-func containsUnicodeLineOrParagraphSeparator(value string) bool {
+func containsDisallowedUnicodeScalar(value string) bool {
 	for _, character := range value {
-		if unicode.Is(unicode.Zl, character) || unicode.Is(unicode.Zp, character) {
+		if unicode.Is(unicode.Zl, character) || unicode.Is(unicode.Zp, character) || unicode.Is(unicode.Cf, character) {
 			return true
 		}
 	}
