@@ -200,6 +200,62 @@ func TestPostRoastReviewRetriesExactBodyAndKeyAndAcceptsReplay(t *testing.T) {
 	}
 }
 
+func TestPostRoastReviewCurrentFailedRevisionPostsOnlyAsReplayCandidate(t *testing.T) {
+	failedDetail := strings.Replace(strings.Replace(validRoastDetailJSON(), `"state":"parsed"`, `"state":"parse_failed"`, 1), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1)
+	tests := []struct {
+		name       string
+		post       func(http.ResponseWriter)
+		wantReplay bool
+		wantCode   string
+	}{
+		{name: "completed slot replays", wantReplay: true, post: func(w http.ResponseWriter) {
+			writeReviewResponse(w, true, "Earlier completed review")
+		}},
+		{name: "creation response is incoherent", wantCode: "invalid_server_response", post: func(w http.ResponseWriter) {
+			writeReviewResponse(w, false, validReviewBody)
+		}},
+		{name: "unclaimed slot maps revision conflict", wantCode: "roast_revision_changed", post: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":{"code":"roast_revision_changed","message":"stale"}}`)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					writeRoastJSON(w, failedDetail)
+				case http.MethodPost:
+					posts.Add(1)
+					test.post(w)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer server.Close()
+
+			client, _ := NewClient(server.URL, "failed-current-secret", time.Second)
+			result, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+				Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+			})
+			if posts.Load() != 1 {
+				t.Fatalf("posts = %d, want 1", posts.Load())
+			}
+			if test.wantCode != "" {
+				if failure == nil || failure.Code != test.wantCode {
+					t.Fatalf("result = %#v, failure = %+v; want %s", result, failure, test.wantCode)
+				}
+				return
+			}
+			if failure != nil || result.IdempotentReplay != test.wantReplay || result.Comment.Body == nil || *result.Comment.Body != "Earlier completed review" {
+				t.Fatalf("result = %#v, failure = %+v", result, failure)
+			}
+		})
+	}
+}
+
 func TestPostRoastReviewReplaysCompletedOldRevisionAfterCurrentAdvancesAndParseStateChanges(t *testing.T) {
 	newSHA := strings.Repeat("e", 64)
 	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
@@ -398,7 +454,6 @@ func TestPostRoastReviewRejectsInvalidInputBeforePost(t *testing.T) {
 	}{
 		{name: "bad body marker", detail: validRoastDetailJSON(), request: RoastReviewRequest{Body: "wrong", RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion}, code: "invalid_review"},
 		{name: "bad template", detail: validRoastDetailJSON(), request: RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: "other"}, code: "invalid_review"},
-		{name: "not parsed", detail: strings.Replace(strings.Replace(validRoastDetailJSON(), `"state":"parsed"`, `"state":"parse_failed"`, 1), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1), request: RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion}, code: "roast_revision_changed"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -781,6 +836,16 @@ func TestPostRoastReviewRejectsPartialAndSegmentedBodyReflection(t *testing.T) {
 			w.Header().Set("Server", "Meas")
 			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"ured"`, 1)
 		}},
+		{name: "three-way nonadjacent header and comment segmentation", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "Mea")
+			w.Header().Set("X-Request-ID", "sur")
+			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"ed"`, 1)
+		}},
+		{name: "reverse-order three-way header and comment segmentation", requestBody: validReviewBody, mutate: func(w http.ResponseWriter, body string) string {
+			w.Header().Set("Server", "ed")
+			w.Header().Set("X-Request-ID", "sur")
+			return strings.Replace(activeCommentJSON(body), `"author_nickname":"Member"`, `"author_nickname":"Mea"`, 1)
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -803,6 +868,87 @@ func TestPostRoastReviewRejectsPartialAndSegmentedBodyReflection(t *testing.T) {
 			})
 			if failure == nil || failure.Code != "invalid_server_response" {
 				t.Fatalf("failure = %+v, want invalid_server_response", failure)
+			}
+		})
+	}
+}
+
+func TestRoastReviewReflectionReconstructionIsOrderIndependentAndBounded(t *testing.T) {
+	key, failure := CanonicalRoastReviewKey(roastUUID, roastSHA256, ReviewTemplateVersion)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	token := "segmented-token-value"
+	serverURL := "https://trusted.example.test:8443"
+	maximumBenignFields := make([]string, maxRoastReviewReflectionFields)
+	for index := range maximumBenignFields {
+		maximumBenignFields[index] = strings.Repeat(string(rune('A'+index)), maxRoastReviewReflectionFieldBytes)
+	}
+	tests := []struct {
+		name      string
+		fields    []string
+		body      string
+		forbidden []string
+		want      bool
+	}{
+		{name: "three-way body window", fields: []string{"abc", "def", "gh"}, body: "prefix-abcdefgh-suffix", want: true},
+		{name: "reverse-order body window", fields: []string{"gh", "def", "abc"}, body: "prefix-abcdefgh-suffix", want: true},
+		{name: "eight-way body window", fields: []string{"a", "b", "c", "d", "e", "f", "g", "h"}, body: "prefix-abcdefgh-suffix", want: true},
+		{name: "canonical key segmented", fields: splitReflectionValue(key, 4), forbidden: []string{key}, want: true},
+		{name: "token segmented", fields: splitReflectionValue(token, 3), forbidden: []string{token}, want: true},
+		{name: "server URL segmented in reverse", fields: reverseStrings(splitReflectionValue(serverURL, 4)), forbidden: []string{serverURL}, want: true},
+		{name: "benign fragments", fields: []string{"abc", "xyz", "proxy"}, body: "Measured evidence.", forbidden: []string{key, token, serverURL}, want: false},
+		{name: "bounded maximum benign input", fields: maximumBenignFields, body: strings.Repeat("😀", maxRoastReviewRunes), forbidden: []string{key, token, serverURL}, want: false},
+		{name: "field count fails closed", fields: make([]string, maxRoastReviewReflectionFields+1), body: "unrelated", want: true},
+		{name: "field length fails closed", fields: []string{strings.Repeat("x", maxRoastReviewReflectionFieldBytes+1)}, body: "unrelated", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := roastReviewFieldsReflectSensitiveData(test.fields, test.body, test.forbidden...); got != test.want {
+				t.Fatalf("roastReviewFieldsReflectSensitiveData() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPostRoastReviewRejectsSegmentedForbiddenValuesAcrossHeadersAndComment(t *testing.T) {
+	key, failure := CanonicalRoastReviewKey(roastUUID, roastSHA256, ReviewTemplateVersion)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	for _, test := range []struct {
+		name   string
+		token  string
+		target func(*httptest.Server) string
+	}{
+		{name: "canonical key", token: "segmented-key-control", target: func(*httptest.Server) string { return key }},
+		{name: "bearer token", token: "segmented-token-value", target: func(*httptest.Server) string { return "segmented-token-value" }},
+		{name: "server URL", token: "segmented-url-control", target: func(server *httptest.Server) string { return server.URL }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					writeRoastJSON(w, validRoastDetailJSON())
+					return
+				}
+				parts := splitReflectionValue(test.target(server), 3)
+				setReviewHeaders(w, false)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Server", parts[0])
+				w.Header().Set("X-Request-ID", parts[1])
+				response := strings.Replace(activeCommentJSON(validReviewBody), `"author_nickname":"Member"`, `"author_nickname":"`+parts[2]+`"`, 1)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+
+			client, _ := NewClient(server.URL, test.token, time.Second)
+			_, gotFailure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+				Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+			})
+			if gotFailure == nil || gotFailure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %+v, want invalid_server_response", gotFailure)
 			}
 		})
 	}
@@ -846,6 +992,76 @@ func TestPostRoastReviewRejectsMalformedOrOversizedOptionalResponseMetadata(t *t
 	}
 }
 
+func TestValidTraceparentW3CVectorsAndFutureExtensions(t *testing.T) {
+	base := "-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	largestBounded := "01" + base + strings.Repeat("-ab", (maxRoastReviewTraceparentBytes-55)/3)
+	for _, value := range []string{
+		"00" + base,
+		"01" + base,
+		"01" + base + "-ab",
+		"fe" + base + "-00-ab-cd",
+		largestBounded,
+	} {
+		if !validTraceparent(value) {
+			t.Errorf("validTraceparent(%q) = false", value)
+		}
+	}
+	for _, value := range []string{
+		"ff" + base,
+		"00" + base + "-ab",
+		"00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+		"01" + base + "-a",
+		"01" + base + "-abc",
+		"01" + base + "--ab",
+		"01" + base + "-AG",
+		largestBounded + "-ab",
+	} {
+		if validTraceparent(value) {
+			t.Errorf("validTraceparent(%q) = true", value)
+		}
+	}
+}
+
+func TestValidTracestateW3COWSAndBounds(t *testing.T) {
+	thirtyTwo := make([]string, 32)
+	for index := range thirtyTwo {
+		thirtyTwo[index] = "v" + strconv.Itoa(index) + "=value"
+	}
+	exactly512 := "a=" + strings.Repeat("x", 256) + ",b=" + strings.Repeat("y", 251)
+	for _, value := range []string{
+		"vendor=value",
+		"vendor = value",
+		"vendor\t=\tvalue",
+		"vendor=one, tenant=two",
+		"vendor=one two",
+		"vendor=one\t,\ttenant = two",
+		strings.Join(thirtyTwo, ","),
+		exactly512,
+	} {
+		if !validTracestate(value) {
+			t.Errorf("validTracestate(%q) = false", value)
+		}
+	}
+	for _, value := range []string{
+		" vendor=value",
+		"vendor=value ",
+		"vendor\v=value",
+		"vendor=\vvalue",
+		"vendor=one\ttwo",
+		"vendor=value,\ftenant=two",
+		"vendor=value,\u00a0tenant=two",
+		"vendor = ",
+		"vendor=one, vendor=two",
+		strings.Join(append(thirtyTwo, "overflow=value"), ","),
+		exactly512 + "z",
+	} {
+		if validTracestate(value) {
+			t.Errorf("validTracestate(%q) = true", value)
+		}
+	}
+}
+
 func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *testing.T) {
 	requestBody := validReviewBody + "\n" + ReviewTemplateVersion + "\n" + roastSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -858,8 +1074,8 @@ func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *t
 		w.Header().Set("Server", "trusted-proxy")
 		w.Header().Set("Via", "1.1 gateway")
 		w.Header().Set("X-Request-ID", "8a4f88de7c374172")
-		w.Header().Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
-		w.Header().Set("tracestate", "0tenant@system=opaque,vendor=value")
+		w.Header().Set("traceparent", "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-ab-cd")
+		w.Header().Set("tracestate", "0tenant@system = opaque\t,\tvendor= value")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, activeCommentJSON(requestBody))
 	}))
@@ -950,6 +1166,24 @@ func setReviewHeaders(w http.ResponseWriter, replay bool) {
 func activeCommentJSON(body string) string {
 	encoded, _ := json.Marshal(body)
 	return `{"comment_uuid":"` + commentUUID + `","roast_uuid":"` + roastUUID + `","author_nickname":"Member","body":` + string(encoded) + `,"created_at":"` + roastTimestamp + `","edited_at":null,"deleted_at":null,"is_deleted":false,"can_edit":false,"can_delete":false}`
+}
+
+func splitReflectionValue(value string, count int) []string {
+	parts := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		start := len(value) * index / count
+		end := len(value) * (index + 1) / count
+		parts = append(parts, value[start:end])
+	}
+	return parts
+}
+
+func reverseStrings(values []string) []string {
+	reversed := append([]string(nil), values...)
+	for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
+		reversed[left], reversed[right] = reversed[right], reversed[left]
+	}
+	return reversed
 }
 
 func strconvQuote(value string) string {

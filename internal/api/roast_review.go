@@ -18,9 +18,14 @@ import (
 
 const (
 	// ReviewTemplateVersion is the only supported fixed roast-review contract.
-	ReviewTemplateVersion = "artisan-roast-review-v1"
-	maxRoastReviewBytes   = 16_000
-	maxRoastReviewRunes   = 4_000
+	ReviewTemplateVersion              = "artisan-roast-review-v1"
+	maxRoastReviewBytes                = 16_000
+	maxRoastReviewRunes                = 4_000
+	maxRoastReviewReflectionFields     = 13
+	maxRoastReviewReflectionFieldBytes = 1_024
+	maxRoastReviewReflectionSegments   = 8
+	maxRoastReviewReconstructionStates = 1 << 20
+	maxRoastReviewTraceparentBytes     = 512
 )
 
 var roastReviewRevisionMarker = regexp.MustCompile(`^Profile revision: ([1-9][0-9]*) \(([0-9a-f]{64})\)$`)
@@ -72,7 +77,7 @@ func ReadRoastReviewFile(path, revisionSHA, template string) (RoastReviewRequest
 	return request, nil
 }
 
-// PostRoastReview preflights the current parsed revision and posts one
+// PostRoastReview preflights the current revision identity and posts one
 // replay-safe, canonical review request.
 func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, request RoastReviewRequest) (RoastReviewResult, *output.Error) {
 	var result RoastReviewResult
@@ -93,11 +98,8 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	}
 	requestedIsCurrent := current.CurrentRevision.RevisionNumber == revisionNumber &&
 		current.CurrentRevision.SHA256 == request.RevisionSHA256
-	if requestedIsCurrent {
-		if current.State != "parsed" || current.CurrentRevision.ParseState != "parsed" {
-			return result, reviewRevisionChangedFailure()
-		}
-	} else {
+	replayOnly := !requestedIsCurrent || current.State != "parsed" || current.CurrentRevision.ParseState != "parsed"
+	if !requestedIsCurrent {
 		if revisionNumber >= current.CurrentRevision.RevisionNumber {
 			return result, reviewRevisionChangedFailure()
 		}
@@ -133,7 +135,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 			header, roastUUID, request.RevisionSHA256, request.TemplateVersion, request.Body,
 			key, c.token, c.serverURL.String(),
 		)
-		if !valid || !requestedIsCurrent && !replay {
+		if !valid || replayOnly && !replay {
 			return invalidServerResponse(status)
 		}
 		return nil
@@ -274,7 +276,7 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 		}
 		metadata = append(metadata, value)
 	}
-	if roastReviewMetadataReflectsBody(metadata, body) {
+	if roastReviewFieldsReflectSensitiveData(metadata, body, forbiddenValues...) {
 		return false, "", nil, false
 	}
 	return replay, locationCommentUUID, metadata, true
@@ -324,18 +326,37 @@ func validVisibleRoastReviewMetadata(value string, maximum int) bool {
 }
 
 func validTraceparent(value string) bool {
-	if len(value) != 55 || value[2] != '-' || value[35] != '-' || value[52] != '-' || value[:2] == "ff" {
+	if len(value) < 55 || len(value) > maxRoastReviewTraceparentBytes ||
+		value[2] != '-' || value[35] != '-' || value[52] != '-' || value[:2] == "ff" {
 		return false
 	}
-	for index, character := range value {
+	for index := 0; index < 55; index++ {
 		if index == 2 || index == 35 || index == 52 {
 			continue
 		}
-		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+		if !isLowerHexByte(value[index]) {
 			return false
 		}
 	}
-	return value[3:35] != strings.Repeat("0", 32) && value[36:52] != strings.Repeat("0", 16)
+	if value[3:35] == strings.Repeat("0", 32) || value[36:52] == strings.Repeat("0", 16) {
+		return false
+	}
+	if value[:2] == "00" {
+		return len(value) == 55
+	}
+	if (len(value)-55)%3 != 0 {
+		return false
+	}
+	for index := 55; index < len(value); index += 3 {
+		if value[index] != '-' || !isLowerHexByte(value[index+1]) || !isLowerHexByte(value[index+2]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowerHexByte(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f'
 }
 
 func validTracestate(value string) bool {
@@ -347,20 +368,55 @@ func validTracestate(value string) bool {
 		return false
 	}
 	keys := make(map[string]struct{}, len(members))
-	for _, member := range members {
-		if strings.TrimSpace(member) != member || strings.Count(member, "=") != 1 {
+	for index, rawMember := range members {
+		member := rawMember
+		if index == 0 {
+			if len(member) > 0 && isW3COWS(member[0]) {
+				return false
+			}
+		} else {
+			member = trimLeftW3COWS(member)
+		}
+		if index == len(members)-1 {
+			if len(member) > 0 && isW3COWS(member[len(member)-1]) {
+				return false
+			}
+		} else {
+			member = trimRightW3COWS(member)
+		}
+		if strings.Count(member, "=") != 1 {
 			return false
 		}
 		parts := strings.SplitN(member, "=", 2)
-		if !validTracestateKey(parts[0]) || !validTracestateValue(parts[1]) {
+		key := trimRightW3COWS(parts[0])
+		memberValue := trimLeftW3COWS(parts[1])
+		if !validTracestateKey(key) || !validTracestateValue(memberValue) {
 			return false
 		}
-		if _, duplicate := keys[parts[0]]; duplicate {
+		if _, duplicate := keys[key]; duplicate {
 			return false
 		}
-		keys[parts[0]] = struct{}{}
+		keys[key] = struct{}{}
 	}
 	return true
+}
+
+func isW3COWS(value byte) bool {
+	return value == ' ' || value == '\t'
+}
+
+func trimLeftW3COWS(value string) string {
+	for len(value) > 0 && isW3COWS(value[0]) {
+		value = value[1:]
+	}
+	return value
+}
+
+func trimRightW3COWS(value string) string {
+	for len(value) > 0 && isW3COWS(value[len(value)-1]) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func validTracestateKey(value string) bool {
@@ -415,39 +471,153 @@ func containsCaseInsensitive(value string, forbiddenValues []string) bool {
 	return false
 }
 
-func roastReviewMetadataReflectsBody(values []string, body string) bool {
-	const minimum = 8
-	if len(body) < minimum {
-		return false
+func roastReviewFieldsReflectSensitiveData(fields []string, body string, forbiddenValues ...string) bool {
+	const minimumBodyWindow = 8
+	if len(fields) > maxRoastReviewReflectionFields {
+		return true
 	}
-	bodySubstrings := make(map[string]struct{}, len(body)-minimum+1)
-	for index := 0; index+minimum <= len(body); index++ {
-		bodySubstrings[body[index:index+minimum]] = struct{}{}
-	}
-	reflects := func(value string) bool {
-		for index := 0; index+minimum <= len(value); index++ {
-			if _, exists := bodySubstrings[value[index:index+minimum]]; exists {
-				return true
-			}
-		}
-		return false
-	}
-	for _, value := range values {
-		if reflects(value) {
+	for _, field := range fields {
+		if len(field) > maxRoastReviewReflectionFieldBytes || containsAny(field, forbiddenValues) {
 			return true
 		}
 	}
-	if len(values) > 1 && reflects(strings.Join(values, "")) {
-		return true
+	for _, forbidden := range forbiddenValues {
+		if forbidden != "" && roastReviewTargetReconstructed(forbidden, fields, len(fields)) {
+			return true
+		}
 	}
-	for first := 0; first < len(values); first++ {
-		for second := first + 1; second < len(values); second++ {
-			if reflects(values[first]+values[second]) || reflects(values[second]+values[first]) {
+	if len(body) < minimumBodyWindow {
+		return false
+	}
+
+	bodyPrefixes := make([]map[string]struct{}, minimumBodyWindow+1)
+	for length := 1; length <= minimumBodyWindow; length++ {
+		bodyPrefixes[length] = make(map[string]struct{}, len(body)-minimumBodyWindow+1)
+	}
+	for start := 0; start+minimumBodyWindow <= len(body); start++ {
+		window := body[start : start+minimumBodyWindow]
+		for length := 1; length <= minimumBodyWindow; length++ {
+			bodyPrefixes[length][window[:length]] = struct{}{}
+		}
+	}
+	for _, field := range fields {
+		for start := 0; start+minimumBodyWindow <= len(field); start++ {
+			if _, exists := bodyPrefixes[minimumBodyWindow][field[start:start+minimumBodyWindow]]; exists {
 				return true
 			}
 		}
 	}
-	return false
+
+	type reconstructionState struct {
+		mask  uint16
+		value string
+	}
+	visited := make(map[reconstructionState]struct{})
+	states := 0
+	var reconstructs func(mask uint16, value string, segments int) bool
+	reconstructs = func(mask uint16, value string, segments int) bool {
+		if len(value) == minimumBodyWindow {
+			return true
+		}
+		if segments == maxRoastReviewReflectionSegments {
+			return false
+		}
+		state := reconstructionState{mask: mask, value: value}
+		if _, exists := visited[state]; exists {
+			return false
+		}
+		visited[state] = struct{}{}
+		states++
+		if states > maxRoastReviewReconstructionStates {
+			return true
+		}
+		for index, field := range fields {
+			bit := uint16(1) << index
+			if mask&bit != 0 || len(field) == 0 {
+				continue
+			}
+			if value == "" {
+				first := len(field) - minimumBodyWindow
+				if first < 0 {
+					first = 0
+				}
+				for start := first; start < len(field); start++ {
+					candidate := field[start:]
+					if _, exists := bodyPrefixes[len(candidate)][candidate]; exists && reconstructs(mask|bit, candidate, segments+1) {
+						return true
+					}
+				}
+				continue
+			}
+			remaining := minimumBodyWindow - len(value)
+			piece := field
+			if len(piece) > remaining {
+				piece = piece[:remaining]
+			}
+			candidate := value + piece
+			if _, exists := bodyPrefixes[len(candidate)][candidate]; exists && reconstructs(mask|bit, candidate, segments+1) {
+				return true
+			}
+		}
+		return false
+	}
+	return reconstructs(0, "", 0)
+}
+
+func roastReviewTargetReconstructed(target string, fields []string, maximumSegments int) bool {
+	type reconstructionState struct {
+		mask   uint16
+		offset int
+	}
+	visited := make(map[reconstructionState]struct{})
+	states := 0
+	var reconstructs func(mask uint16, offset, segments int) bool
+	reconstructs = func(mask uint16, offset, segments int) bool {
+		if offset == len(target) {
+			return segments > 1
+		}
+		if segments == maximumSegments {
+			return false
+		}
+		state := reconstructionState{mask: mask, offset: offset}
+		if _, exists := visited[state]; exists {
+			return false
+		}
+		visited[state] = struct{}{}
+		states++
+		if states > maxRoastReviewReconstructionStates {
+			return true
+		}
+		for index, field := range fields {
+			bit := uint16(1) << index
+			if mask&bit != 0 || field == "" {
+				continue
+			}
+			if offset == 0 {
+				first := len(field) - len(target)
+				if first < 0 {
+					first = 0
+				}
+				for start := first; start < len(field); start++ {
+					piece := field[start:]
+					if strings.HasPrefix(target, piece) && reconstructs(mask|bit, len(piece), segments+1) {
+						return true
+					}
+				}
+				continue
+			}
+			remaining := len(target) - offset
+			piece := field
+			if len(piece) > remaining {
+				piece = piece[:remaining]
+			}
+			if strings.HasPrefix(target[offset:], piece) && reconstructs(mask|bit, offset+len(piece), segments+1) {
+				return true
+			}
+		}
+		return false
+	}
+	return reconstructs(0, 0, 0)
 }
 
 func roastReviewCommentReflectsForbidden(comment CommentView, responseMetadata []string, requestBody, key, token, serverURL string) bool {
@@ -461,13 +631,8 @@ func roastReviewCommentReflectsForbidden(comment CommentView, responseMetadata [
 	if comment.DeletedAt != nil {
 		bodyIndependentFields = append(bodyIndependentFields, *comment.DeletedAt)
 	}
-	for _, value := range bodyIndependentFields {
-		if containsAny(value, forbidden) {
-			return true
-		}
-	}
 	combinedMetadata := append(append([]string(nil), responseMetadata...), bodyIndependentFields...)
-	if roastReviewMetadataReflectsBody(combinedMetadata, requestBody) {
+	if roastReviewFieldsReflectSensitiveData(combinedMetadata, requestBody, forbidden...) {
 		return true
 	}
 	return comment.Body != nil && containsAny(*comment.Body, forbidden)
