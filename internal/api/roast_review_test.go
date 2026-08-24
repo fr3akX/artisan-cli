@@ -818,6 +818,8 @@ func TestPostRoastReviewRejectsMalformedOrOversizedOptionalResponseMetadata(t *t
 		{name: "malformed Via", mutate: func(w http.ResponseWriter) { w.Header().Set("Via", "gateway-only") }},
 		{name: "malformed request ID", mutate: func(w http.ResponseWriter) { w.Header().Set("X-Request-ID", "has spaces") }},
 		{name: "malformed traceparent", mutate: func(w http.ResponseWriter) { w.Header().Set("traceparent", "00-short") }},
+		{name: "malformed tracestate key", mutate: func(w http.ResponseWriter) { w.Header().Set("tracestate", "tenant@=opaque") }},
+		{name: "duplicate tracestate key", mutate: func(w http.ResponseWriter) { w.Header().Set("tracestate", "vendor=one,vendor=two") }},
 		{name: "oversized tracestate", mutate: func(w http.ResponseWriter) { w.Header().Set("tracestate", "vendor="+strings.Repeat("a", 506)) }},
 	}
 	for _, test := range tests {
@@ -857,7 +859,7 @@ func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *t
 		w.Header().Set("Via", "1.1 gateway")
 		w.Header().Set("X-Request-ID", "8a4f88de7c374172")
 		w.Header().Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
-		w.Header().Set("tracestate", "vendor=opaque")
+		w.Header().Set("tracestate", "0tenant@system=opaque,vendor=value")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, activeCommentJSON(requestBody))
 	}))

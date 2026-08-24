@@ -346,6 +346,7 @@ func validTracestate(value string) bool {
 	if len(members) > 32 {
 		return false
 	}
+	keys := make(map[string]struct{}, len(members))
 	for _, member := range members {
 		if strings.TrimSpace(member) != member || strings.Count(member, "=") != 1 {
 			return false
@@ -354,16 +355,37 @@ func validTracestate(value string) bool {
 		if !validTracestateKey(parts[0]) || !validTracestateValue(parts[1]) {
 			return false
 		}
+		if _, duplicate := keys[parts[0]]; duplicate {
+			return false
+		}
+		keys[parts[0]] = struct{}{}
 	}
 	return true
 }
 
 func validTracestateKey(value string) bool {
-	if len(value) == 0 || len(value) > 256 || value[0] < 'a' || value[0] > 'z' {
+	if len(value) == 0 || len(value) > 256 {
+		return false
+	}
+	parts := strings.Split(value, "@")
+	switch len(parts) {
+	case 1:
+		return len(parts[0]) <= 256 && validTracestateKeyPart(parts[0], false, 256)
+	case 2:
+		return validTracestateKeyPart(parts[0], true, 241) &&
+			validTracestateKeyPart(parts[1], false, 14)
+	default:
+		return false
+	}
+}
+
+func validTracestateKeyPart(value string, digitFirst bool, maximum int) bool {
+	if len(value) == 0 || len(value) > maximum ||
+		(value[0] < 'a' || value[0] > 'z') && (!digitFirst || value[0] < '0' || value[0] > '9') {
 		return false
 	}
 	for _, character := range value[1:] {
-		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("_@*-/", character) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("_*-/", character) {
 			continue
 		}
 		return false
