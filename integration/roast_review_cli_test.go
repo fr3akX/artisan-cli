@@ -119,6 +119,30 @@ func intPointer(value int) *int {
 	return &value
 }
 
+func TestBrowserRoastUUIDMatchesCompactIdentityOnlyForCanonicalDashedForm(t *testing.T) {
+	const compact = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
+	if !browserRoastUUIDMatchesCompactIdentity("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", compact) {
+		t.Fatal("matching canonical dashed browser UUID was rejected")
+	}
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{"compact browser form", compact},
+		{"uppercase browser form", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"},
+		{"malformed hyphens", "aaaaaaaaa-aaa-4aaa-8aaa-aaaaaaaaaaaa"},
+		{"invalid version", "aaaaaaaa-aaaa-0aaa-8aaa-aaaaaaaaaaaa"},
+		{"invalid variant", "aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa"},
+		{"different UUID", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if browserRoastUUIDMatchesCompactIdentity(test.value, compact) {
+				t.Fatalf("invalid or different browser UUID %q was accepted", test.value)
+			}
+		})
+	}
+}
+
 func TestDisposableProvisioningIncludesForeignTenantAdministratorCredential(t *testing.T) {
 	contents, err := os.ReadFile("provision_member.py")
 	if err != nil {
@@ -1204,6 +1228,15 @@ func assertForeignTenantHidden(t *testing.T, config liveConfig, roastUUID, sha, 
 	doBoundedBearerRequest(t, request, config.foreignToken, http.StatusNotFound)
 }
 
+func browserRoastUUIDMatchesCompactIdentity(browserUUID, expectedCompact string) bool {
+	if len(browserUUID) != 36 || browserUUID != strings.ToLower(browserUUID) ||
+		browserUUID[8] != '-' || browserUUID[13] != '-' || browserUUID[18] != '-' || browserUUID[23] != '-' {
+		return false
+	}
+	normalized, failure := api.NormalizeRoastUUID(browserUUID)
+	return failure == nil && normalized == expectedCompact
+}
+
 func trashRoast(t *testing.T, client *http.Client, config liveConfig, csrf, roastUUID string) {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodDelete, config.baseURL+"/api/v1/browser/roasts/"+roastUUID, nil)
@@ -1220,7 +1253,7 @@ func trashRoast(t *testing.T, client *http.Client, config liveConfig, csrf, roas
 		RoastUUID string `json:"roast_uuid"`
 		Trashed   bool   `json:"trashed"`
 	}
-	if err := readBoundedJSON(response.Body, maxBrowserJSONBytes, "", &result); err != nil || response.StatusCode != http.StatusOK || result.RoastUUID != roastUUID || !result.Trashed {
+	if err := readBoundedJSON(response.Body, maxBrowserJSONBytes, "", &result); err != nil || response.StatusCode != http.StatusOK || !browserRoastUUIDMatchesCompactIdentity(result.RoastUUID, roastUUID) || !result.Trashed {
 		t.Fatalf("trash response = HTTP %d %+v", response.StatusCode, result)
 	}
 }
