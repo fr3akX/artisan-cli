@@ -205,6 +205,71 @@ func TestRoastReviewInspectorContract(t *testing.T) {
 	}
 }
 
+func TestInspectionProcessResultAcceptsBoundedComposeProgress(t *testing.T) {
+	result := inspectionProcessResult{
+		stderr: "Creating artisan-server-e2e-api-run ... done\n",
+	}
+	if err := validateInspectionProcessResult(result, []string{"admin-password", "member-password", "admin-token", "member-token", "review-member-token", "foreign-token"}); err != nil {
+		t.Fatalf("ordinary bounded Compose progress was rejected: %v", err)
+	}
+}
+
+func TestInspectionProcessResultRejectsEachProcessAndBoundFailure(t *testing.T) {
+	failures := []struct {
+		name   string
+		mutate func(*inspectionProcessResult)
+	}{
+		{"wait failure", func(result *inspectionProcessResult) { result.waitErr = errors.New("wait failed") }},
+		{"containment close failure", func(result *inspectionProcessResult) { result.closeErr = errors.New("close failed") }},
+		{"context deadline", func(result *inspectionProcessResult) { result.contextErr = context.DeadlineExceeded }},
+		{"stdout overflow", func(result *inspectionProcessResult) { result.stdoutOverflow = true }},
+		{"stderr overflow", func(result *inspectionProcessResult) { result.stderrOverflow = true }},
+	}
+	for _, failure := range failures {
+		t.Run(failure.name, func(t *testing.T) {
+			result := inspectionProcessResult{stderr: "ordinary Compose progress"}
+			failure.mutate(&result)
+			err := validateInspectionProcessResult(result, []string{"disposable-secret"})
+			if err == nil {
+				t.Fatal("failed inspection process result was accepted")
+			}
+			if strings.Contains(err.Error(), result.stderr) {
+				t.Fatal("inspection failure included captured stderr")
+			}
+		})
+	}
+}
+
+func TestInspectionProcessResultRejectsEveryDisposableSecretClass(t *testing.T) {
+	secrets := []struct {
+		name  string
+		value string
+	}{
+		{"admin password", "admin-password-secret"},
+		{"member password", "member-password-secret"},
+		{"admin bearer token", "admin-bearer-secret"},
+		{"member bearer token", "member-bearer-secret"},
+		{"review-member bearer token", "review-member-bearer-secret"},
+		{"foreign bearer token", "foreign-bearer-secret"},
+	}
+	allSecrets := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		allSecrets = append(allSecrets, secret.value)
+	}
+	for _, reflected := range secrets {
+		t.Run(reflected.name, func(t *testing.T) {
+			stderr := "ordinary Compose progress\n" + reflected.value + "\n"
+			err := validateInspectionProcessResult(inspectionProcessResult{stderr: stderr}, allSecrets)
+			if err == nil {
+				t.Fatal("inspection stderr reflecting a disposable secret was accepted")
+			}
+			if strings.Contains(err.Error(), stderr) || strings.Contains(err.Error(), reflected.value) {
+				t.Fatal("inspection failure included captured stderr or the reflected secret")
+			}
+		})
+	}
+}
+
 func TestIndependentChartRepresentationIsBoundedAndAuthenticated(t *testing.T) {
 	compressed := gzipBytes(t, []byte(`{"schema_version":1}`))
 	token := "independent-chart-token"
@@ -390,6 +455,42 @@ type roastReviewInspection struct {
 	SlotCount      int      `json:"slot_count"`
 }
 
+type inspectionProcessResult struct {
+	waitErr        error
+	closeErr       error
+	contextErr     error
+	stdoutOverflow bool
+	stderrOverflow bool
+	stderr         string
+}
+
+func validateInspectionProcessResult(result inspectionProcessResult, disposableSecrets []string) error {
+	if result.waitErr != nil {
+		return errors.New("review inspection process wait failed")
+	}
+	if result.closeErr != nil {
+		return errors.New("review inspection process containment close failed")
+	}
+	if result.contextErr != nil {
+		return errors.New("review inspection process context failed")
+	}
+	if result.stdoutOverflow {
+		return errors.New("review inspection stdout exceeded its bound")
+	}
+	if result.stderrOverflow {
+		return errors.New("review inspection stderr exceeded its bound")
+	}
+	for _, secret := range disposableSecrets {
+		if secret == "" {
+			return errors.New("review inspection disposable secret was empty")
+		}
+		if strings.Contains(result.stderr, secret) {
+			return errors.New("review inspection stderr reflected a disposable secret")
+		}
+	}
+	return nil
+}
+
 func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	config, configured, err := loadLiveConfig(os.Getenv)
 	if err != nil {
@@ -428,6 +529,14 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	foreignHTTP, foreignCSRF := loginBrowserSession(t, config.baseURL, config.foreignEmail, config.memberPassword, config.foreignOrganizationSlug)
 	adminRunner.forbiddenToken = adminToken
 	memberRunner.forbiddenToken = config.reviewMemberToken
+	inspectionSecrets := []string{
+		config.adminPassword,
+		config.memberPassword,
+		adminToken,
+		config.memberToken,
+		config.reviewMemberToken,
+		config.foreignToken,
+	}
 	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, adminCredentialID, adminToken)
 	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, config.reviewMemberCredential, config.reviewMemberToken)
 	defer revokeCredentialAndAssertRejected(t, foreignHTTP, config.baseURL, foreignCSRF, config.foreignCredential, config.foreignToken)
@@ -494,7 +603,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		"--revision-sha256", revisionOneSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", adminBodyPath)
 	assertReviewPair(t, memberCreated, adminReplayed, roastUUID, revisionOneSHA, memberBody)
 	assertReviewComments(t, memberRunner, roastUUID, []integrationReviewResult{memberCreated})
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID), []string{memberCreated.Comment.CommentUUID})
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID})
 
 	uploadRoastRevision(t, config, adminToken, roastUUID, revisionTwo, "review-"+runID+"-revision-2")
 	var oldReplay integrationReviewResult
@@ -508,7 +617,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	staleBodyPath := writeReviewBody(t, memberPaths[len(memberPaths)-1], "stale-review.txt", reviewBody(1, staleSHA, "Never-posted stale analysis"))
 	runCLIError(t, memberRunner, 7, "roast_revision_changed", 0, "roast", "review", "post", roastUUID,
 		"--revision-sha256", staleSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", staleBodyPath)
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID), []string{memberCreated.Comment.CommentUUID})
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID})
 
 	adminRevisionTwoBody := reviewBody(2, revisionTwoSHA, "Administrator revision-two analysis")
 	memberRevisionTwoBody := reviewBody(2, revisionTwoSHA, "Member alternate revision-two analysis")
@@ -521,7 +630,7 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 		"--revision-sha256", revisionTwoSHA, "--template-version", api.ReviewTemplateVersion, "--body-file", memberRevisionTwoPath)
 	assertReviewPair(t, adminRevisionTwo, memberRevisionTwoReplay, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
 	assertReviewComments(t, adminRunner, roastUUID, []integrationReviewResult{adminRevisionTwo, memberCreated})
-	assertInspection(t, inspectRoastReviews(t, config, roastUUID), []string{memberCreated.Comment.CommentUUID, adminRevisionTwo.Comment.CommentUUID})
+	assertInspection(t, inspectRoastReviews(t, config, roastUUID, inspectionSecrets), []string{memberCreated.Comment.CommentUUID, adminRevisionTwo.Comment.CommentUUID})
 
 	assertCookieOnlyReviewRejected(t, adminHTTP, config, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
 	assertForeignTenantHidden(t, config, roastUUID, revisionTwoSHA, adminRevisionTwoBody)
@@ -924,7 +1033,7 @@ func assertReviewComments(t *testing.T, runner *cliRunner, roastUUID string, rev
 	}
 }
 
-func inspectRoastReviews(t *testing.T, config liveConfig, roastUUID string) roastReviewInspection {
+func inspectRoastReviews(t *testing.T, config liveConfig, roastUUID string, disposableSecrets []string) roastReviewInspection {
 	t.Helper()
 	serverRoot, err := filepath.Abs(config.serverRoot)
 	if err != nil {
@@ -1003,8 +1112,16 @@ func inspectRoastReviews(t *testing.T, config liveConfig, roastUUID string) roas
 	}
 	waitErr := command.Wait()
 	closeErr := tree.close(cliCommandWaitDelay)
-	if waitErr != nil || closeErr != nil || ctx.Err() != nil || stdout.overflow || stderr.overflow || stderr.String() != "" {
-		t.Fatalf("bounded review inspection failed")
+	processResult := inspectionProcessResult{
+		waitErr:        waitErr,
+		closeErr:       closeErr,
+		contextErr:     ctx.Err(),
+		stdoutOverflow: stdout.overflow,
+		stderrOverflow: stderr.overflow,
+		stderr:         stderr.String(),
+	}
+	if err := validateInspectionProcessResult(processResult, disposableSecrets); err != nil {
+		t.Fatal(err)
 	}
 	var result roastReviewInspection
 	if err := decodeExactlyOneJSON(stdout.Bytes(), &result, true); err != nil || result.CommentIDs == nil || result.SlotCommentIDs == nil {
