@@ -1279,6 +1279,62 @@ func TestValidateRoastReviewSuccessHeadersAcceptsExactDeployedSecurityMetadata(t
 	}
 }
 
+func TestValidateRoastReviewSuccessHeadersAcceptsOnlyExactOptionalConnection(t *testing.T) {
+	validate := func(header http.Header, body string, forbiddenValues ...string) bool {
+		_, _, _, valid := validateRoastReviewSuccessHeaders(
+			header, roastUUID, roastSHA256, ReviewTemplateVersion, body,
+			forbiddenValues...,
+		)
+		return valid
+	}
+
+	if !validate(deployedRoastReviewHeaders(), validReviewBody) {
+		t.Fatal("HTTP/2-compatible response without Connection was rejected")
+	}
+	withConnection := deployedRoastReviewHeaders()
+	withConnection.Set("Connection", "keep-alive")
+	if !validate(withConnection, validReviewBody) {
+		t.Fatal("exact deployed Connection value was rejected")
+	}
+
+	for _, test := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "duplicate", values: []string{"keep-alive", "keep-alive"}},
+		{name: "close", values: []string{"close"}},
+		{name: "mutated", values: []string{"keep-alive-mutated"}},
+		{name: "case mutated", values: []string{"Keep-Alive"}},
+		{name: "token list", values: []string{"keep-alive, upgrade"}},
+		{name: "empty", values: []string{""}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := deployedRoastReviewHeaders()
+			header["Connection"] = test.values
+			if validate(header, validReviewBody) {
+				t.Fatal("non-exact Connection value was accepted")
+			}
+		})
+	}
+
+	for _, name := range []string{"Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		t.Run("unexpected "+name, func(t *testing.T) {
+			header := deployedRoastReviewHeaders()
+			header.Set(name, "unexpected")
+			if validate(header, validReviewBody) {
+				t.Fatal("unexpected hop-by-hop header bypassed the closed allowlist")
+			}
+		})
+	}
+
+	if validate(withConnection, validReviewBody, "keep-alive") {
+		t.Fatal("sensitive value reflected in Connection was accepted")
+	}
+	if validate(withConnection, validReviewBody+"\nkeep-alive") {
+		t.Fatal("review-body reflection in Connection was accepted")
+	}
+}
+
 func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *testing.T) {
 	requestBody := validReviewBody + "\n" + ReviewTemplateVersion + "\n" + roastSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

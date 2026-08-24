@@ -21,7 +21,7 @@ const (
 	ReviewTemplateVersion              = "artisan-roast-review-v1"
 	maxRoastReviewBytes                = 16_000
 	maxRoastReviewRunes                = 4_000
-	maxRoastReviewReflectionFields     = 17
+	maxRoastReviewReflectionFields     = 18
 	maxRoastReviewReflectionFieldBytes = 1_024
 	maxRoastReviewReflectionSegments   = 8
 	maxRoastReviewReconstructionStates = 1 << 20
@@ -212,6 +212,7 @@ var roastReviewSuccessHeaderNames = map[string]struct{}{
 	"referrer-policy":           {},
 	"x-frame-options":           {},
 	"content-security-policy":   {},
+	"connection":                {},
 }
 
 var roastReviewRequiredSecurityHeaders = []struct {
@@ -225,6 +226,7 @@ var roastReviewRequiredSecurityHeaders = []struct {
 }
 
 var roastReviewOptionalHeaderNames = []string{
+	"Connection",
 	"Content-Length",
 	"Date",
 	"Server",
@@ -311,6 +313,8 @@ func validateRoastReviewSuccessHeaders(header http.Header, roastUUID, revisionSH
 
 func validRoastReviewOptionalHeader(name, value string) bool {
 	switch name {
+	case "Connection":
+		return value == "keep-alive"
 	case "Content-Length":
 		parsed, err := strconv.ParseUint(value, 10, 63)
 		return err == nil && strconv.FormatUint(parsed, 10) == value && parsed <= maxResponseBodyBytes
