@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func installPlatform(rootPath string, force bool, hooks installHooks) (InstallResult, error) {
+func installPlatform(rootPath string, definition Definition, force bool, hooks installHooks) (InstallResult, error) {
 	result := InstallResult{}
 	root, err := openUnixRootNoFollow(rootPath, hooks)
 	if err != nil {
@@ -30,7 +30,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	}
 
 	createdDirectory := false
-	if err := unix.Mkdirat(rootFD, Name, 0o755); err != nil {
+	if err := unix.Mkdirat(rootFD, definition.Name, 0o755); err != nil {
 		if !errors.Is(err, unix.EEXIST) {
 			return result, fmt.Errorf("create skill directory: %w", err)
 		}
@@ -43,11 +43,11 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		}
 	}
 
-	skillFD, err := unix.Openat(rootFD, Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	skillFD, err := unix.Openat(rootFD, definition.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return result, ErrUnsafeTarget
 	}
-	directory := os.NewFile(uintptr(skillFD), Name)
+	directory := os.NewFile(uintptr(skillFD), definition.Name)
 	defer directory.Close()
 	if err := verifyDirectory(directory); err != nil {
 		return result, err
@@ -56,16 +56,16 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		return result, err
 	}
 
-	exists, identical, err := inspectTargetAt(skillFD)
+	exists, identical, err := inspectTargetAt(skillFD, definition)
 	if err != nil {
 		return result, err
 	}
 	if exists && identical {
-		if err := syncExistingAt(skillFD, directory, hooks); err != nil {
+		if err := syncExistingAt(skillFD, directory, definition, hooks); err != nil {
 			return result, err
 		}
 		result.Unchanged = true
-		if !unixInstallLocationMatches(rootPath, root, directory) {
+		if !unixInstallLocationMatches(rootPath, root, directory, definition) {
 			return result, installLocationChanged(false)
 		}
 		return result, nil
@@ -82,7 +82,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		_ = temporary.Close()
 		_ = unix.Unlinkat(skillFD, temporaryName, 0)
 	}()
-	if _, err := temporary.Write(Content); err != nil {
+	if _, err := temporary.Write(definition.Content); err != nil {
 		return result, fmt.Errorf("write temporary skill: %w", err)
 	}
 	if err := temporary.Chmod(0o644); err != nil {
@@ -105,7 +105,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 		err = renameNoReplaceAt(skillFD, temporaryName, FileName)
 	}
 	if errors.Is(err, unix.EEXIST) {
-		exists, identical, inspectErr := inspectTargetAt(skillFD)
+		exists, identical, inspectErr := inspectTargetAt(skillFD, definition)
 		if inspectErr != nil {
 			return result, inspectErr
 		}
@@ -113,11 +113,11 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 			if cleanupErr := unix.Unlinkat(skillFD, temporaryName, 0); cleanupErr != nil && !errors.Is(cleanupErr, unix.ENOENT) {
 				return result, fmt.Errorf("clean raced temporary skill: %w", cleanupErr)
 			}
-			if err := syncExistingAt(skillFD, directory, hooks); err != nil {
+			if err := syncExistingAt(skillFD, directory, definition, hooks); err != nil {
 				return result, err
 			}
 			result.Unchanged = true
-			if !unixInstallLocationMatches(rootPath, root, directory) {
+			if !unixInstallLocationMatches(rootPath, root, directory, definition) {
 				return result, installLocationChanged(false)
 			}
 			return result, nil
@@ -143,7 +143,7 @@ func installPlatform(rootPath string, force bool, hooks installHooks) (InstallRe
 	if cleanupErr != nil {
 		return result, &securefile.ReplacementError{Err: fmt.Errorf("clean committed temporary skill: %w", cleanupErr)}
 	}
-	if !unixInstallLocationMatches(rootPath, root, directory) {
+	if !unixInstallLocationMatches(rootPath, root, directory, definition) {
 		return result, installLocationChanged(true)
 	}
 	return result, nil
@@ -199,7 +199,7 @@ func verifyDirectory(file *os.File) error {
 	return nil
 }
 
-func inspectTargetAt(directoryFD int) (exists, identical bool, returnedErr error) {
+func inspectTargetAt(directoryFD int, definition Definition) (exists, identical bool, returnedErr error) {
 	exists, err := preflightUnixRegularAt(directoryFD)
 	if err != nil || !exists {
 		return exists, false, err
@@ -223,14 +223,14 @@ func inspectTargetAt(directoryFD int) (exists, identical bool, returnedErr error
 	if !info.Mode().IsRegular() {
 		return false, false, ErrUnsafeTarget
 	}
-	contents, err := io.ReadAll(io.LimitReader(file, int64(len(Content)+1)))
+	contents, err := io.ReadAll(io.LimitReader(file, int64(len(definition.Content)+1)))
 	if err != nil {
 		return false, false, fmt.Errorf("read installed skill: %w", err)
 	}
-	return true, bytes.Equal(contents, Content), nil
+	return true, bytes.Equal(contents, definition.Content), nil
 }
 
-func syncExistingAt(directoryFD int, directory *os.File, hooks installHooks) error {
+func syncExistingAt(directoryFD int, directory *os.File, definition Definition, hooks installHooks) error {
 	exists, err := preflightUnixRegularAt(directoryFD)
 	if err != nil {
 		return err
@@ -251,11 +251,11 @@ func syncExistingAt(directoryFD int, directory *os.File, hooks installHooks) err
 	if err != nil || !info.Mode().IsRegular() {
 		return ErrUnsafeTarget
 	}
-	contents, err := io.ReadAll(io.LimitReader(file, int64(len(Content)+1)))
+	contents, err := io.ReadAll(io.LimitReader(file, int64(len(definition.Content)+1)))
 	if err != nil {
 		return fmt.Errorf("reread installed skill: %w", err)
 	}
-	if !bytes.Equal(contents, Content) {
+	if !bytes.Equal(contents, definition.Content) {
 		return ErrDifferentContent
 	}
 	if err := syncOpenedFile(file, hooks); err != nil {
@@ -285,7 +285,7 @@ func preflightUnixRegularAt(directoryFD int) (bool, error) {
 	return true, nil
 }
 
-func unixInstallLocationMatches(rootPath string, root, directory *os.File) bool {
+func unixInstallLocationMatches(rootPath string, root, directory *os.File, definition Definition) bool {
 	requestedRootFD, err := unix.Open(rootPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return false
@@ -300,11 +300,11 @@ func unixInstallLocationMatches(rootPath string, root, directory *os.File) bool 
 	if err != nil || !os.SameFile(openedRootInfo, requestedRootInfo) {
 		return false
 	}
-	requestedDirectoryFD, err := unix.Openat(requestedRootFD, Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	requestedDirectoryFD, err := unix.Openat(requestedRootFD, definition.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return false
 	}
-	requestedDirectory := os.NewFile(uintptr(requestedDirectoryFD), Name)
+	requestedDirectory := os.NewFile(uintptr(requestedDirectoryFD), definition.Name)
 	defer requestedDirectory.Close()
 	openedDirectoryInfo, err := directory.Stat()
 	if err != nil {

@@ -71,7 +71,7 @@ func TestInstallWalksRootComponentsHandleRelativelyWithoutFollowingSwap(t *testi
 		t.Fatal(err)
 	}
 
-	result, err := installWithHooks(root, false, installHooks{afterRootComponentOpen: func(component string) error {
+	result, err := installWithHooks(root, Name, false, installHooks{afterRootComponentOpen: func(component string) error {
 		if component != "container" {
 			return nil
 		}
@@ -96,7 +96,7 @@ func TestInstallAnchorsOpenedRootAcrossPathSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := installWithHooks(root, false, installHooks{afterRootOpen: func() error {
+	result, err := installWithHooks(root, Name, false, installHooks{afterRootOpen: func() error {
 		if err := os.Rename(root, moved); err != nil {
 			return err
 		}
@@ -118,7 +118,7 @@ func TestInstallAnchorsOpenedSkillDirectoryAcrossPathSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := installWithHooks(root, false, installHooks{afterSkillDirOpen: func() error {
+	result, err := installWithHooks(root, Name, false, installHooks{afterSkillDirOpen: func() error {
 		if err := os.Rename(visible, original); err != nil {
 			return err
 		}
@@ -141,7 +141,7 @@ func TestInstallRejectsDirectoryAndSocketTargets(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(directory, FileName), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Install(root, true); !errors.Is(err, ErrUnsafeTarget) {
+		if _, err := Install(root, Name, true); !errors.Is(err, ErrUnsafeTarget) {
 			t.Fatalf("Install() error = %v, want ErrUnsafeTarget", err)
 		}
 	})
@@ -156,7 +156,7 @@ func TestInstallRejectsDirectoryAndSocketTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer listener.Close()
-		if _, err := Install(root, true); !errors.Is(err, ErrUnsafeTarget) {
+		if _, err := Install(root, Name, true); !errors.Is(err, ErrUnsafeTarget) {
 			t.Fatalf("Install() error = %v, want ErrUnsafeTarget", err)
 		}
 	})
@@ -167,7 +167,7 @@ func TestInstallRejectsFIFOWithoutBlocking(t *testing.T) {
 		root := os.Getenv("ARTISAN_TEST_FIFO_ROOT")
 		var err error
 		if mode == "install" {
-			_, err = Install(root, false)
+			_, err = Install(root, Name, false)
 		} else {
 			fd, openErr := unix.Open(filepath.Join(root, Name), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 			if openErr != nil {
@@ -175,7 +175,11 @@ func TestInstallRejectsFIFOWithoutBlocking(t *testing.T) {
 			}
 			directory := os.NewFile(uintptr(fd), Name)
 			defer directory.Close()
-			err = syncExistingAt(fd, directory, installHooks{})
+			definition, ok := Lookup(Name)
+			if !ok {
+				t.Fatal("default skill definition is missing")
+			}
+			err = syncExistingAt(fd, directory, definition, installHooks{})
 		}
 		if !errors.Is(err, ErrUnsafeTarget) {
 			t.Fatalf("%s error = %v, want ErrUnsafeTarget", mode, err)
@@ -217,7 +221,7 @@ func TestInstallTargetSymlinkRaceCannotRedirectWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := installWithHooks(root, true, installHooks{beforeCommit: func() error {
+	_, err := installWithHooks(root, Name, true, installHooks{beforeCommit: func() error {
 		return os.Symlink(outside, filepath.Join(skillDirectory, FileName))
 	}})
 	if !errors.Is(err, ErrUnsafeTarget) {
@@ -233,7 +237,7 @@ func TestInstallSyncOrderingAndVisibleFailure(t *testing.T) {
 	}
 	var events []string
 	injected := errors.New("injected directory sync failure")
-	_, err := installWithHooks(root, false, installHooks{
+	_, err := installWithHooks(root, Name, false, installHooks{
 		onEvent: func(event string) { events = append(events, event) },
 		syncDirectory: func(*os.File) error {
 			return injected
@@ -254,7 +258,7 @@ func TestInstallFileSyncFailureLeavesNoTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected file sync failure")
-	_, err := installWithHooks(root, false, installHooks{syncFile: func(*os.File) error { return injected }})
+	_, err := installWithHooks(root, Name, false, installHooks{syncFile: func(*os.File) error { return injected }})
 	if !errors.Is(err, injected) || securefile.ReplacementVisible(err) {
 		t.Fatalf("Install() error = %v, want non-visible injected failure", err)
 	}

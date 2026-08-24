@@ -14,6 +14,72 @@ import (
 	embeddedskill "github.com/fr3akX/artisan-cli/internal/skill"
 )
 
+func TestSkillListAndNamedShowUseStableRegistryOrder(t *testing.T) {
+	list := runAuthCommand(t, Runtime{}, "skill", "list")
+	if list.code != 0 || list.stderr != "" || list.stdout != "artisan-inventory\nartisan-roast-review\n" {
+		t.Fatalf("human list = %#v", list)
+	}
+	machine := runAuthCommand(t, Runtime{}, "--json", "skill", "list")
+	if machine.code != 0 || machine.stderr != "" || machine.stdout != `{"ok":true,"data":{"names":["artisan-inventory","artisan-roast-review"]}}`+"\n" {
+		t.Fatalf("JSON list = %#v", machine)
+	}
+
+	for _, name := range []string{"artisan-inventory", "artisan-roast-review"} {
+		definition, ok := embeddedskill.Lookup(name)
+		if !ok {
+			t.Fatalf("missing definition %q", name)
+		}
+		human := runAuthCommand(t, Runtime{}, "skill", "show", name)
+		if human.code != 0 || human.stderr != "" || human.stdout != string(definition.Content) {
+			t.Fatalf("show %q = %#v", name, human)
+		}
+		jsonResult := runAuthCommand(t, Runtime{}, "--json", "skill", "show", name)
+		var envelope struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				Name    string `json:"name"`
+				Content string `json:"content"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(jsonResult.stdout), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if jsonResult.code != 0 || jsonResult.stderr != "" || !envelope.OK || envelope.Data.Name != name || envelope.Data.Content != string(definition.Content) {
+			t.Fatalf("JSON show %q = %#v, %#v", name, jsonResult, envelope)
+		}
+	}
+}
+
+func TestSkillNamedInstallAndUnknownName(t *testing.T) {
+	root := canonicalSkillFixtureRoot(t)
+	for _, name := range []string{"artisan-roast-review", "artisan-inventory"} {
+		result := runAuthCommand(t, Runtime{}, "skill", "install", name, "--directory", root)
+		path := filepath.Join(root, name, embeddedskill.FileName)
+		if result.code != 0 || result.stderr != "" || !strings.Contains(result.stdout, name) || !strings.Contains(result.stdout, output.EscapeVisible(path)) {
+			t.Fatalf("named install %q = %#v", name, result)
+		}
+		definition, _ := embeddedskill.Lookup(name)
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != string(definition.Content) {
+			t.Fatalf("named install %q content mismatch: %v", name, err)
+		}
+	}
+
+	missingRoot := filepath.Join(t.TempDir(), "must-not-be-created")
+	for _, args := range [][]string{
+		{"skill", "show", "unknown"},
+		{"skill", "install", "unknown", "--directory", missingRoot},
+	} {
+		result := runAuthCommand(t, Runtime{}, append([]string{"--json"}, args...)...)
+		if result.code != usageExitCode || result.stderr != "" || result.stdout != `{"ok":false,"error":{"code":"unknown_skill","message":"Unknown embedded skill"}}`+"\n" {
+			t.Fatalf("unknown %q = %#v", args, result)
+		}
+	}
+	if _, err := os.Lstat(missingRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown named install mutated filesystem: %v", err)
+	}
+}
+
 func TestSkillShowHumanAndJSON(t *testing.T) {
 	human := runAuthCommand(t, Runtime{}, "skill", "show")
 	if human.code != 0 || human.stderr != "" || !strings.HasPrefix(human.stdout, "---\nname: artisan-inventory\n") {
@@ -100,6 +166,16 @@ func TestSkillInstallAcceptsLegacySingleDashFlags(t *testing.T) {
 	if !strings.HasPrefix(string(got), "---\nname: artisan-inventory\n") {
 		t.Fatal("single-dash force did not install embedded content")
 	}
+
+	namedRoot := canonicalSkillFixtureRoot(t)
+	result = runAuthCommand(t, Runtime{}, "skill", "install", "artisan-roast-review", "-directory", namedRoot)
+	if result.code != 0 || result.stderr != "" {
+		t.Fatalf("named single-dash directory install = %#v", result)
+	}
+	got, err = os.ReadFile(filepath.Join(namedRoot, "artisan-roast-review", embeddedskill.FileName))
+	if err != nil || !strings.HasPrefix(string(got), "---\nname: artisan-roast-review\n") {
+		t.Fatalf("named single-dash install mismatch: %v", err)
+	}
 }
 
 func TestSkillInstallHumanJSONAndNoNetworkConfiguration(t *testing.T) {
@@ -175,7 +251,7 @@ func TestSkillInstallLocationSwapNeverPrintsStalePathHumanOrJSON(t *testing.T) {
 	original := installEmbeddedSkill
 	defer func() { installEmbeddedSkill = original }()
 	stale := filepath.Join(t.TempDir(), "requested", embeddedskill.Name, embeddedskill.FileName)
-	installEmbeddedSkill = func(string, bool) (embeddedskill.InstallResult, error) {
+	installEmbeddedSkill = func(string, string, bool) (embeddedskill.InstallResult, error) {
 		return embeddedskill.InstallResult{Path: stale, Installed: true}, &securefile.ReplacementError{Err: embeddedskill.ErrInstallLocationChanged}
 	}
 
