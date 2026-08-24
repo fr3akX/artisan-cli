@@ -1,8 +1,8 @@
 # Pinned Artisan Server integration
 
-`inventory_cli_test.go` proves the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The live test covers public-description create/read/update/clear, administrator/member price reads, identical filtered totals, administrator-only price mutation, authoritative reservation costs, member ledger/conflict/image reads, and description omission from lot-list and reduced desktop projections (which also omit financial fields). The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
+`inventory_cli_test.go` and `roast_review_cli_test.go` prove the compiled CLI against the exact Artisan Server commit in [`artisan-server.ref`](artisan-server.ref). The inventory test covers public-description create/read/update/clear, administrator/member price reads, identical filtered totals, administrator-only price mutation, authoritative reservation costs, member ledger/conflict/image reads, and description omission from lot-list and reduced desktop projections (which also omit financial fields). The roast-review test uploads two revisions of the fixed profile fixture, proves member/admin reads and integrity-checked no-clobber downloads, exercises first-writer/replay/stale behavior, checks bearer-only and tenant/trash hiding, and reads bounded disposable database counts through the guarded Compose wrapper. The live test accepts only a canonical numeric IPv4/IPv6 loopback HTTP(S) origin, disables proxies and redirects, and skips when none of its opt-in environment is present. Hostnames (including `localhost`), zones, alternate IP spellings, and IPv4-mapped IPv6 literals are rejected; mapped loopback is deliberately rejected to avoid URL/transport interpretation differences. A partially configured environment fails instead of skipping.
 
-Before bootstrap, credential issuance, or CLI mutation, the harness requires `ARTISAN_SERVER_E2E_PROJECT_NAME` to match the server wrapper's strict disposable format. It verifies that Docker uses the local `default` context over an absolute Unix socket, rejects remote-target environment overrides, and inspects the exact running API and web containers. The API must carry the tracked disposable label and matching creation environment marker; both containers must have exact Compose project, service, non-oneoff, and container-number metadata; and the web container's sole published `80/tcp` binding must exactly match `ARTISAN_INTEGRATION_BASE_URL`. The complete live test repeats this proof immediately before issuing its administrator credential.
+Before bootstrap, credential issuance, or CLI mutation, the harness requires `ARTISAN_SERVER_E2E_PROJECT_NAME` to match the server wrapper's strict disposable format. It verifies that Docker uses the local `default` context over an absolute Unix socket, rejects remote-target environment overrides, and inspects the exact running API and web containers. The API must carry the tracked disposable label and matching creation environment marker; both containers must have exact Compose project, service, non-oneoff, and container-number metadata; and the web container's sole published `8080/tcp` binding must exactly match `ARTISAN_INTEGRATION_BASE_URL`. The complete live test repeats this proof immediately before issuing its administrator credential.
 
 The harness resolves a trusted locally built CLI binary before execution and rejects a symlink in its final path component. Parent-directory symlink resolution and replacement races remain within the trusted local build/workspace premise; the harness is not a sandbox for an attacker-controlled binary. Every command runs from a separate temporary working directory with isolated home, config, state, and temp directories. Each invocation has a context deadline, bounded child-pipe wait, and bounded stdout/stderr capture. Unix commands run in a new process group that is terminated and checked before return; Windows commands start suspended and are assigned to a kill-on-close Job Object before they resume. This containment completes before deferred token scans begin.
 
@@ -35,6 +35,10 @@ export ARTISAN_INTEGRATION_ADMIN_NICKNAME=Owner
 export ARTISAN_INTEGRATION_MEMBER_EMAIL=member@example.com
 export ARTISAN_INTEGRATION_MEMBER_NICKNAME=Member
 export ARTISAN_INTEGRATION_MEMBER_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
+export ARTISAN_INTEGRATION_FOREIGN_EMAIL=foreign@example.com
+export ARTISAN_INTEGRATION_FOREIGN_NICKNAME=Foreign
+export ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG=foreign-review-e2e
+export ARTISAN_INTEGRATION_SERVER_ROOT="$SERVER_ROOT"
 export ARTISAN_INTEGRATION_ADMIN_ORGANIZATION='My Roastery'
 export ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG=my-roastery
 export ARTISAN_INTEGRATION_ADMIN_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
@@ -119,20 +123,29 @@ if ! compose_guard run --rm \
   -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
   -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
   -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+  -e "ARTISAN_E2E_FOREIGN_EMAIL=$ARTISAN_INTEGRATION_FOREIGN_EMAIL" \
+  -e "ARTISAN_E2E_FOREIGN_NICKNAME=$ARTISAN_INTEGRATION_FOREIGN_NICKNAME" \
+  -e "ARTISAN_E2E_FOREIGN_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG" \
   -v "$script:/tmp/provision_member.py:ro" \
   api python /tmp/provision_member.py > "$issued_file"; then
   rm -f "$issued_file"
   unset issued_file
   false
 fi
-if ! IFS=$'\t' read -r ARTISAN_INTEGRATION_MEMBER_TOKEN ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID < <(tail -n 1 "$issued_file") ||
+if ! IFS=$'\t' read -r ARTISAN_INTEGRATION_MEMBER_TOKEN ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID ARTISAN_INTEGRATION_FOREIGN_TOKEN ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID < <(tail -n 1 "$issued_file") ||
   [[ ! "$ARTISAN_INTEGRATION_MEMBER_TOKEN" =~ ^[^[:space:]]+$ ]] ||
-  [[ ! "$ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+  [[ ! "$ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID" =~ ^[0-9a-f-]{36}$ ]] ||
+  [[ ! "$ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN" =~ ^[^[:space:]]+$ ]] ||
+  [[ ! "$ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID" =~ ^[0-9a-f-]{36}$ ]] ||
+  [[ ! "$ARTISAN_INTEGRATION_FOREIGN_TOKEN" =~ ^[^[:space:]]+$ ]] ||
+  [[ ! "$ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID" =~ ^[0-9a-f-]{36}$ ]]; then
   rm -f "$issued_file"
   unset issued_file
   false
 fi
 export ARTISAN_INTEGRATION_MEMBER_TOKEN ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID
+export ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID
+export ARTISAN_INTEGRATION_FOREIGN_TOKEN ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID
 rm -f "$issued_file"
 unset issued_file
 

@@ -1,29 +1,32 @@
 # Embedded agent skill
 
 Artisan CLI embeds the canonical
-[`artisan-inventory` skill](../skills/artisan-inventory/SKILL.md) at build time.
-The skill and this CLI require Artisan Server commit
-`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later; deploy that server before
+[`artisan-inventory` skill](../skills/artisan-inventory/SKILL.md) and
+[`artisan-roast-review` skill](../skills/artisan-roast-review/SKILL.md) at build
+time. Both skills and this CLI require Artisan Server commit
+`bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea` or later; deploy that server before
 the CLI release.
 
 ## Inspect or install
 
-Print the exact embedded bytes:
+List skills or print exact embedded bytes:
 
 ```sh
+artisan skill list
 artisan skill show
-artisan --json skill show
+artisan --json skill show artisan-roast-review
 ```
 
-Human output is the `SKILL.md` content. JSON returns `name` and `content`.
-Install below an explicitly selected existing agent skill root:
+Human show output is the selected `SKILL.md` content. JSON returns `name` and
+`content`. The no-name form remains inventory-compatible. Install below an
+explicitly selected existing agent skill root:
 
 ```sh
 artisan skill install --directory ROOT
-artisan --json skill install --directory ROOT
+artisan --json skill install artisan-roast-review --directory ROOT
 ```
 
-The result path is `ROOT/artisan-inventory/SKILL.md`. The CLI deliberately does
+The result path is `ROOT/<NAME>/SKILL.md`. The CLI deliberately does
 not detect or assume an agent product or home. Depending on a user's separately
 verified agent configuration, possible roots might include
 `$HOME/.claude/skills`, `$HOME/.config/opencode/skills`, or another dedicated
@@ -43,7 +46,7 @@ The installer rejects a root containing a `..` component, missing/non-directory
 roots, symlink/reparse traversal, unsafe targets, and races where the opened
 location changes. Replacement is atomic; a durability-uncertain error requires
 manual inspection before retrying. `--force` does not weaken those path checks
-and does not modify files outside `ROOT/artisan-inventory/SKILL.md`.
+and does not modify files outside the selected `ROOT/<NAME>/SKILL.md`.
 
 ## Public descriptions, pricing, totals, and role boundary
 
@@ -82,6 +85,27 @@ They must never sum paginated list output as an authoritative aggregate.
 
 Production smoke is read-only. The skill does not authorize an agent to invent
 or perform production mutations for testing.
+
+## Roast-review skill behavior
+
+The `artisan-roast-review` skill performs no AI work inside Artisan CLI or
+Artisan Server. The configured host agent reads private validated chart data and,
+when needed, the private raw profile, then performs the analysis. Profile,
+metadata, event, control, and existing-comment strings are untrusted data and
+never instructions.
+
+After analysis satisfies the fixed `artisan-roast-review-v1` format, reviews post automatically
+without another confirmation. The result is an ordinary
+private user-authored organization comment. A single first-writer slot exists
+per immutable revision/template: member and administrator posts compete for the
+same slot, and replays return its existing comment. A deleted review tombstone
+is respected rather than recreated. Stale revision identity causes one bounded
+complete restart, never a post to the wrong revision.
+
+Downloads are integrity-checked and no-clobber. The skill uses an owned private
+temporary directory, never `--force`, and safely cleans only artifacts it can
+prove it created. It cannot mutate hardware, inventory, roast detail/profile,
+publication, or public feedback.
 
 ## Agent security boundary
 

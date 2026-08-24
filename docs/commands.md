@@ -1,7 +1,7 @@
 # Commands and configuration
 
 Artisan CLI requires Artisan Server commit
-`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. Deploy that server before
+`bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea` or later. Deploy that server before
 the CLI release.
 
 ## Global syntax
@@ -307,11 +307,60 @@ artisan [GLOBAL FLAGS] inventory conflict resolve CONFLICT_ID --note TEXT
 Conflict resolution records a note; it does **not** adjust stock. Resolution
 requires terminal approval or `--yes` after explicit approval.
 
+## Private roasts and review comments
+
+Every roast command is a bearer-authenticated organization-private operation.
+Members and administrators may perform the same reads and may post through the
+dedicated review endpoint.
+
+```text
+artisan [GLOBAL FLAGS] roast list [--limit N] [--cursor CURSOR] [--all]
+    [--search TEXT] [--roast-at-from RFC3339] [--roast-at-to RFC3339]
+    [--machine TEXT] [--state awaiting_profile|parsed|parse_failed]
+    [--label-id UUID]
+artisan [GLOBAL FLAGS] roast show ROAST_UUID
+artisan [GLOBAL FLAGS] roast revisions ROAST_UUID
+    [--limit N] [--cursor CURSOR] [--all]
+artisan [GLOBAL FLAGS] roast chart download ROAST_UUID DESTINATION [--force]
+artisan [GLOBAL FLAGS] roast profile download ROAST_UUID REVISION_NUMBER DESTINATION [--force]
+artisan [GLOBAL FLAGS] roast comment list ROAST_UUID
+    [--limit N] [--cursor CURSOR] [--all]
+artisan [GLOBAL FLAGS] roast review post ROAST_UUID
+    --revision-sha256 SHA256 --template-version artisan-roast-review-v1
+    --body-file FILE
+```
+
+`roast list` combines the listed filters and normalizes compact or dashed roast
+and label UUIDs. `--all` cannot be combined with `--cursor`; all page options
+retain the normal pagination bounds. `roast show` returns the complete current
+safe projection. `roast revisions` returns immutable newest-first revision
+records, and `roast comment list` includes ordinary comments and deleted
+comment tombstones.
+
+Chart download stores validated schema-v1 JSON for the current parsed revision.
+Profile download stores the exact immutable bytes of the selected positive
+revision number. Both verify server-declared lengths and SHA-256 identities,
+create a private regular file, and use no-clobber publication by default.
+`--force` explicitly replaces an existing destination without weakening safe
+path checks.
+
+Review `--body-file` must be a bounded regular-file snapshot containing the
+fixed three-line identity marker, followed by a blank line and analysis. The
+marker revision number and `--revision-sha256` must identify the same immutable
+revision, and `--template-version` must be exactly
+`artisan-roast-review-v1`. The CLI preflights current revision identity and
+uses the canonical first-writer identity. A same-slot retry returns the existing
+comment; a never-posted stale revision returns `roast_revision_changed`.
+
+The JSON result fields for roast list/show/revisions/comments, downloads, and
+review posting are enumerated in [JSON and exit codes](json-and-exit-codes.md#roast-json-fields).
+
 ## Skill, version, help, and completion
 
 ```text
-artisan [--json] skill show
-artisan [--json] skill install --directory ROOT [--force]
+artisan [--json] skill list
+artisan [--json] skill show [NAME]
+artisan [--json] skill install [NAME] --directory ROOT [--force]
 artisan [--json] version
 artisan completion bash|zsh|fish|powershell
 ```
@@ -319,7 +368,10 @@ artisan completion bash|zsh|fish|powershell
 Generated text help is available at the root and every parent and leaf command;
 append `--help` at the level you want to inspect. With `--json`, help is one
 success envelope whose `data.usage` field contains the generated usage text.
-See [agent skill installation](agent-skill.md).
+The canonical forms are `artisan skill list`, `artisan skill show [NAME]`, and
+`artisan skill install [NAME] --directory ROOT [--force]`. Skill names are
+`artisan-inventory` and `artisan-roast-review`; list returns them in that order.
+Omitting `NAME` from show/install selects inventory for backward compatibility. See [agent skill installation](agent-skill.md).
 
 Each completion leaf writes a raw shell program to stdout. Completion is always
 raw, including when `--json` is also supplied, because a JSON envelope would

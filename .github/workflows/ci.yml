@@ -28,11 +28,11 @@ jobs:
         run: go test ./...
       - name: Race test
         run: go test ./... -race -timeout=20m
-      - name: Check generated skill
+      - name: Check generated skills
         shell: bash
         run: |
           go generate ./internal/skill
-          git diff --exit-code
+          git diff --exit-code -- skills/artisan-inventory/SKILL.md skills/artisan-roast-review/SKILL.md internal/skill/content_generated.go
 
   native-build-smoke:
     timeout-minutes: 20

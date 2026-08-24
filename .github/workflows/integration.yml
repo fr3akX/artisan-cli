@@ -17,6 +17,10 @@ jobs:
       ARTISAN_INTEGRATION_ADMIN_NICKNAME: Owner
       ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com
       ARTISAN_INTEGRATION_MEMBER_NICKNAME: Member
+      ARTISAN_INTEGRATION_FOREIGN_EMAIL: foreign@example.com
+      ARTISAN_INTEGRATION_FOREIGN_NICKNAME: Foreign
+      ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG: foreign-review-e2e
+      ARTISAN_INTEGRATION_SERVER_ROOT: ${{ github.workspace }}/artisan-server
       ARTISAN_INTEGRATION_ADMIN_ORGANIZATION: My Roastery
       ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG: my-roastery
       ARTISAN_SERVER_HTTP_PORT: "127.0.0.1:18080"
@@ -34,13 +38,13 @@ jobs:
           set -euo pipefail
           grep -Eq '^[0-9a-f]{40}$' integration/artisan-server.ref
           test "$(wc -l < integration/artisan-server.ref)" -eq 1
-          test "$(cat integration/artisan-server.ref)" = "436ffff581fd01e3b356a8fda188593cbf1cf60b"
+          test "$(cat integration/artisan-server.ref)" = "bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea"
 
       - name: Check out pinned Artisan Server
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: fr3akX/artisan-server
-          ref: 436ffff581fd01e3b356a8fda188593cbf1cf60b
+          ref: bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea
           path: artisan-server
           token: ${{ secrets.ARTISAN_SERVER_REPOSITORY_TOKEN }}
 
@@ -165,15 +169,28 @@ jobs:
             -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
             -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
             -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+            -e "ARTISAN_E2E_FOREIGN_EMAIL=$ARTISAN_INTEGRATION_FOREIGN_EMAIL" \
+            -e "ARTISAN_E2E_FOREIGN_NICKNAME=$ARTISAN_INTEGRATION_FOREIGN_NICKNAME" \
+            -e "ARTISAN_E2E_FOREIGN_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG" \
             -v "$script:/tmp/provision_member.py:ro" \
             api python /tmp/provision_member.py > "$issued_file"
-          IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
+          IFS=$'\t' read -r member_token member_credential_id review_member_token review_member_credential_id foreign_token foreign_credential_id < <(tail -n 1 "$issued_file")
           [[ "$member_token" =~ ^[^[:space:]]+$ ]]
           [[ "$member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+          [[ "$review_member_token" =~ ^[^[:space:]]+$ ]]
+          [[ "$review_member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+          [[ "$foreign_token" =~ ^[^[:space:]]+$ ]]
+          [[ "$foreign_credential_id" =~ ^[0-9a-f-]{36}$ ]]
           echo "::add-mask::$member_token"
+          echo "::add-mask::$review_member_token"
+          echo "::add-mask::$foreign_token"
           {
             echo "ARTISAN_INTEGRATION_MEMBER_TOKEN=$member_token"
             echo "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID=$member_credential_id"
+            echo "ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN=$review_member_token"
+            echo "ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID=$review_member_credential_id"
+            echo "ARTISAN_INTEGRATION_FOREIGN_TOKEN=$foreign_token"
+            echo "ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID=$foreign_credential_id"
           } >> "$GITHUB_ENV"
           rm -f "$issued_file"
           trap - EXIT

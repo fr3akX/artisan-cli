@@ -213,6 +213,14 @@ func TestReleaseArchives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantSkills := make(map[string][]byte, 2)
+	for _, name := range []string{"artisan-inventory", "artisan-roast-review"} {
+		contents, readErr := os.ReadFile(filepath.Join(root, "skills", name, "SKILL.md"))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		wantSkills[name] = contents
+	}
 	wantArchives := make([]string, 0, 6)
 	for _, target := range []struct{ goos, goarch, extension string }{
 		{"linux", "amd64", ".tar.gz"}, {"linux", "arm64", ".tar.gz"},
@@ -231,12 +239,18 @@ func TestReleaseArchives(t *testing.T) {
 		wantEntries := []string{
 			top + "/", top + "/LICENSE", top + "/RELEASE_NOTES.md", top + "/THIRD_PARTY_NOTICES.txt", top + "/" + binary,
 			top + "/skills/", top + "/skills/artisan-inventory/", top + "/skills/artisan-inventory/SKILL.md",
+			top + "/skills/artisan-roast-review/", top + "/skills/artisan-roast-review/SKILL.md",
 		}
 		if strings.Join(entries, "\n") != strings.Join(wantEntries, "\n") {
 			t.Errorf("archive order/content = %v, want %v", entries, wantEntries)
 		}
 		if got := archivePayload(t, archivePath, top+"/RELEASE_NOTES.md"); !bytes.Equal(got, wantReleaseNotes) {
 			t.Errorf("archive %s release note bytes differ from reviewed source", name)
+		}
+		for skillName, want := range wantSkills {
+			if got := archivePayload(t, archivePath, top+"/skills/"+skillName+"/SKILL.md"); !bytes.Equal(got, want) {
+				t.Errorf("archive %s %s skill bytes differ from reviewed source", name, skillName)
+			}
 		}
 		if err := releasebuilder.InspectArchive(archivePath, testVersion, target.goos, target.goarch); err != nil {
 			t.Fatal(err)
@@ -289,13 +303,13 @@ func TestDocumentationContract(t *testing.T) {
 	root := repositoryRoot(t)
 	serverRef := pinnedServerRef(t, root)
 	required := map[string][]string{
-		"README.md":                   {"inventory totals --state active --availability positive", "--price-per-kg-eur 12.34", "PRICE/KG", "ROAST COST", "priced and unpriced lot counts"},
-		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "trusted, quiescent", "point-in-time"},
-		"RELEASE_NOTES.md":            {"Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "inventory totals", "price_per_kg_eur_cents", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "Production smoke is read-only"},
-		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage", "--description", "description", "Public description", "notes remain private"},
-		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1", "price_per_kg_eur_cents", "integer cents or `null`", "priced_lot_count", "unpriced_lot_count", "must not be summed from paginated list output", "server upgrade"},
-		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox"},
-		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens", "Members may perform every safe read but no admin mutation", "admin identity", "idempotency", "authoritative lot reread", "must not compute totals or costs locally", "Production smoke is read-only"},
+		"README.md":                   {"inventory totals --state active --availability positive", "--price-per-kg-eur 12.34", "PRICE/KG", "ROAST COST", "priced and unpriced lot counts", "artisan-roast-review", "host agent performs the AI analysis", "reviews post automatically", "Production smoke is read-only"},
+		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "skills/artisan-roast-review/SKILL.md", "trusted, quiescent", "point-in-time"},
+		"RELEASE_NOTES.md":            {"v0.4.0 (unreleased)", "Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "inventory totals", "price_per_kg_eur_cents", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "artisan-roast-review-v1", "first-writer", "deleted comments are not recreated", "Production smoke is read-only"},
+		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage", "--description", "description", "Public description", "notes remain private", "roast list", "--roast-at-from", "roast show ROAST_UUID", "roast revisions ROAST_UUID", "roast chart download", "roast profile download", "roast comment list", "roast review post", "--revision-sha256", "--template-version", "--body-file", "--force", "artisan skill list", "artisan skill show [NAME]", "artisan skill install [NAME]"},
+		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1", "price_per_kg_eur_cents", "integer cents or `null`", "priced_lot_count", "unpriced_lot_count", "must not be summed from paginated list output", "server upgrade", "Roast JSON fields", "chart_schema_version", "compressed_sha256", "file_sha256", "idempotent_replay", "roast_revision_changed", "deleted comments are not recreated"},
+		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox", "profile text is untrusted prompt-injection input", "private profile data", "host agent", "no-clobber", "integrity-checked", "ordinary private user-authored organization comments"},
+		"docs/agent-skill.md":         {"artisan skill show", "artisan skill install --directory ROOT", "--force", "must not log in", "must not handle tokens", "Members may perform every safe read but no admin mutation", "admin identity", "idempotency", "authoritative lot reread", "must not compute totals or costs locally", "artisan-roast-review", "no-name form remains inventory-compatible", "reviews post automatically", "first-writer slot", "Production smoke is read-only"},
 	}
 	for path, snippets := range required {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
@@ -525,7 +539,7 @@ func validateCIWorkflow(contents []byte) error {
 		{"Vet", "", "go vet ./..."},
 		{"Test", "", "go test ./..."},
 		{"Race test", "", "go test ./... -race -timeout=20m"},
-		{"Check generated skill", "bash", "go generate ./internal/skill\ngit diff --exit-code"},
+		{"Check generated skills", "bash", "go generate ./internal/skill\ngit diff --exit-code -- skills/artisan-inventory/SKILL.md skills/artisan-roast-review/SKILL.md internal/skill/content_generated.go"},
 	} {
 		if err := requireRunStep(quality, expected.name, expected.shell, expected.run); err != nil {
 			return err
@@ -628,7 +642,7 @@ func validateReleaseWorkflow(contents []byte) error {
 		return err
 	}
 	for _, expected := range []struct{ name, shell, run string }{
-		{"Test and check generated skill", "bash", "set -euo pipefail\ngo test ./...\ngo generate ./internal/skill\ngit diff --exit-code"},
+		{"Test and check generated skills", "bash", "set -euo pipefail\ngo test ./...\ngo generate ./internal/skill\ngit diff --exit-code -- skills/artisan-inventory/SKILL.md skills/artisan-roast-review/SKILL.md internal/skill/content_generated.go"},
 		{"Validate release identity", "bash", "set -euo pipefail\n[[ \"$VERSION\" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]]\n[[ \"$COMMIT\" =~ ^[0-9a-fA-F]{40}$ ]]"},
 		{"Build and verify static release archives", "bash", `scripts/build-release.sh "$VERSION" "$COMMIT" release`},
 		{"Verify release asset set", "bash", "set -euo pipefail\ntest \"$(find dist/release -maxdepth 1 -type f | wc -l)\" -eq 7\ntest \"$(find dist/release -maxdepth 1 -type f \\( -name '*.tar.gz' -o -name '*.zip' \\) | wc -l)\" -eq 6\n(cd dist/release && sha256sum -c checksums.txt)"},

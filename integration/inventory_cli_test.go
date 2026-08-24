@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	pinnedServerRef     = "436ffff581fd01e3b356a8fda188593cbf1cf60b"
+	pinnedServerRef     = "bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea"
 	maxCLIOutputBytes   = 2 << 20
 	maxBrowserJSONBytes = 1 << 20
 	cliCommandTimeout   = 45 * time.Second
@@ -46,19 +46,27 @@ var (
 )
 
 type liveConfig struct {
-	binary           string
-	baseURL          string
-	adminEmail       string
-	adminPassword    string
-	adminNickname    string
-	memberEmail      string
-	memberPassword   string
-	memberNickname   string
-	memberToken      string
-	memberCredential string
-	organization     string
-	organizationSlug string
-	projectName      string
+	binary                  string
+	baseURL                 string
+	adminEmail              string
+	adminPassword           string
+	adminNickname           string
+	memberEmail             string
+	memberPassword          string
+	memberNickname          string
+	memberToken             string
+	memberCredential        string
+	reviewMemberToken       string
+	reviewMemberCredential  string
+	foreignToken            string
+	foreignCredential       string
+	foreignEmail            string
+	foreignNickname         string
+	foreignOrganizationSlug string
+	serverRoot              string
+	organization            string
+	organizationSlug        string
+	projectName             string
 }
 
 type dockerMetadataCommand func(args ...string) ([]byte, error)
@@ -125,6 +133,7 @@ type cliRunner struct {
 	env              []string
 	commandTimeout   time.Duration
 	commandWaitDelay time.Duration
+	commandPace      time.Duration
 	forbiddenToken   string
 	records          []commandRecord
 }
@@ -298,7 +307,7 @@ func TestDisposableTargetGuardRequiresExactLocalComposeMetadata(t *testing.T) {
 	)
 	validInspect := `[
 		{"Id":"` + apiID + `","State":{"Running":true},"Config":{"Env":["PATH=/usr/local/bin:/usr/bin","ARTISAN_SERVER_E2E_DISPOSABLE=artisan-server-e2e-compose-v1"],"Labels":{"com.docker.compose.project":"` + project + `","com.docker.compose.service":"api","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1","io.artisan-server.e2e.disposable":"artisan-server-e2e-compose-v1"}},"NetworkSettings":{"Ports":{}}},
-		{"Id":"` + webID + `","State":{"Running":true},"Config":{"Env":["PATH=/usr/local/bin:/usr/bin"],"Labels":{"com.docker.compose.project":"` + project + `","com.docker.compose.service":"web","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1"}},"NetworkSettings":{"Ports":{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"18080"}]}}}
+		{"Id":"` + webID + `","State":{"Running":true},"Config":{"Env":["PATH=/usr/local/bin:/usr/bin"],"Labels":{"com.docker.compose.project":"` + project + `","com.docker.compose.service":"web","com.docker.compose.oneoff":"False","com.docker.compose.container-number":"1"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"18080"}]}}}
 	]`
 	config := liveConfig{baseURL: "http://127.0.0.1:18080", projectName: project}
 
@@ -741,6 +750,8 @@ func TestIntegrationWorkflowContract(t *testing.T) {
 		"integration/artisan-server.ref", "CGO_ENABLED: \"0\"", "go-version: 1.23.x",
 		"ARTISAN_INTEGRATION_BASE_URL: http://127.0.0.1:18080", `ARTISAN_SERVER_HTTP_PORT: "127.0.0.1:18080"`,
 		"ARTISAN_INTEGRATION_MEMBER_EMAIL: member@example.com", "integration/provision_member.py",
+		"ARTISAN_INTEGRATION_FOREIGN_EMAIL: foreign@example.com", "ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG: foreign-review-e2e",
+		"ARTISAN_INTEGRATION_SERVER_ROOT: ${{ github.workspace }}/artisan-server", "ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN=$review_member_token", "ARTISAN_INTEGRATION_FOREIGN_TOKEN=$foreign_token",
 		"go test ./integration -run '^TestDisposableComposeTargetProof$' -count=1 -v",
 		`if [[ -n "${ARTISAN_SERVER_E2E_PROJECT_NAME:-}" && -d artisan-server ]]; then`,
 	} {
@@ -865,15 +876,28 @@ timeout --signal=TERM --kill-after=10s 2m ./scripts/e2e_compose.py --project "$A
   -e "ARTISAN_E2E_MEMBER_NICKNAME=$ARTISAN_INTEGRATION_MEMBER_NICKNAME" \
   -e "ARTISAN_E2E_MEMBER_PASSWORD=$ARTISAN_INTEGRATION_MEMBER_PASSWORD" \
   -e "ARTISAN_E2E_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG" \
+  -e "ARTISAN_E2E_FOREIGN_EMAIL=$ARTISAN_INTEGRATION_FOREIGN_EMAIL" \
+  -e "ARTISAN_E2E_FOREIGN_NICKNAME=$ARTISAN_INTEGRATION_FOREIGN_NICKNAME" \
+  -e "ARTISAN_E2E_FOREIGN_ORGANIZATION_SLUG=$ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG" \
   -v "$script:/tmp/provision_member.py:ro" \
   api python /tmp/provision_member.py > "$issued_file"
-IFS=$'\t' read -r member_token member_credential_id < <(tail -n 1 "$issued_file")
+IFS=$'\t' read -r member_token member_credential_id review_member_token review_member_credential_id foreign_token foreign_credential_id < <(tail -n 1 "$issued_file")
 [[ "$member_token" =~ ^[^[:space:]]+$ ]]
 [[ "$member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+[[ "$review_member_token" =~ ^[^[:space:]]+$ ]]
+[[ "$review_member_credential_id" =~ ^[0-9a-f-]{36}$ ]]
+[[ "$foreign_token" =~ ^[^[:space:]]+$ ]]
+[[ "$foreign_credential_id" =~ ^[0-9a-f-]{36}$ ]]
 echo "::add-mask::$member_token"
+echo "::add-mask::$review_member_token"
+echo "::add-mask::$foreign_token"
 {
   echo "ARTISAN_INTEGRATION_MEMBER_TOKEN=$member_token"
   echo "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID=$member_credential_id"
+  echo "ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN=$review_member_token"
+  echo "ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID=$review_member_credential_id"
+  echo "ARTISAN_INTEGRATION_FOREIGN_TOKEN=$foreign_token"
+  echo "ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID=$foreign_credential_id"
 } >> "$GITHUB_ENV"
 rm -f "$issued_file"
 trap - EXIT`
@@ -1774,9 +1798,9 @@ func validateDisposableTarget(config liveConfig, getenv func(string) string, run
 			basePort = "80"
 		}
 	}
-	bindings, exists := web.NetworkSettings.Ports["80/tcp"]
+	bindings, exists := web.NetworkSettings.Ports["8080/tcp"]
 	if !exists || len(bindings) != 1 || bindings[0].HostIP != parsedBase.Hostname() || bindings[0].HostPort != basePort {
-		return errors.New("web container 80/tcp binding does not exactly match ARTISAN_INTEGRATION_BASE_URL")
+		return errors.New("web container 8080/tcp binding does not exactly match ARTISAN_INTEGRATION_BASE_URL")
 	}
 	return nil
 }
@@ -1787,6 +1811,10 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 		"ARTISAN_INTEGRATION_ADMIN_PASSWORD", "ARTISAN_INTEGRATION_ADMIN_NICKNAME",
 		"ARTISAN_INTEGRATION_MEMBER_EMAIL", "ARTISAN_INTEGRATION_MEMBER_PASSWORD", "ARTISAN_INTEGRATION_MEMBER_NICKNAME",
 		"ARTISAN_INTEGRATION_MEMBER_TOKEN", "ARTISAN_INTEGRATION_MEMBER_CREDENTIAL_ID",
+		"ARTISAN_INTEGRATION_REVIEW_MEMBER_TOKEN", "ARTISAN_INTEGRATION_REVIEW_MEMBER_CREDENTIAL_ID",
+		"ARTISAN_INTEGRATION_FOREIGN_TOKEN", "ARTISAN_INTEGRATION_FOREIGN_CREDENTIAL_ID",
+		"ARTISAN_INTEGRATION_FOREIGN_EMAIL", "ARTISAN_INTEGRATION_FOREIGN_NICKNAME",
+		"ARTISAN_INTEGRATION_FOREIGN_ORGANIZATION_SLUG", "ARTISAN_INTEGRATION_SERVER_ROOT",
 		"ARTISAN_INTEGRATION_ADMIN_ORGANIZATION", "ARTISAN_INTEGRATION_ADMIN_ORGANIZATION_SLUG",
 		"ARTISAN_SERVER_E2E_PROJECT_NAME",
 	}
@@ -1817,7 +1845,10 @@ func loadLiveConfig(getenv func(string) string) (liveConfig, bool, error) {
 		binary: values[names[0]], baseURL: baseURL, adminEmail: values[names[2]], adminPassword: values[names[3]],
 		adminNickname: values[names[4]], memberEmail: values[names[5]], memberPassword: values[names[6]],
 		memberNickname: values[names[7]], memberToken: values[names[8]], memberCredential: values[names[9]],
-		organization: values[names[10]], organizationSlug: values[names[11]], projectName: values[names[12]],
+		reviewMemberToken: values[names[10]], reviewMemberCredential: values[names[11]],
+		foreignToken: values[names[12]], foreignCredential: values[names[13]], foreignEmail: values[names[14]],
+		foreignNickname: values[names[15]], foreignOrganizationSlug: values[names[16]], serverRoot: values[names[17]],
+		organization: values[names[18]], organizationSlug: values[names[19]], projectName: values[names[20]],
 	}, true, nil
 }
 
@@ -1940,6 +1971,10 @@ func assertTokenAbsent(token string, records []commandRecord, commandErr error) 
 }
 
 func (runner *cliRunner) execute(stdin string, commandArgs ...string) commandExecution {
+	if runner.commandPace > 0 {
+		timer := time.NewTimer(runner.commandPace)
+		<-timer.C
+	}
 	args := append([]string{"--json", "--server", runner.baseURL}, commandArgs...)
 	timeout := runner.commandTimeout
 	if timeout == 0 {

@@ -1,7 +1,7 @@
 # JSON, output, pagination, and exit codes
 
 This contract applies with Artisan Server commit
-`436ffff581fd01e3b356a8fda188593cbf1cf60b` or later. The compatible server
+`bc62ac3c0f5a54e34119ee2546e0f9dca5f85fea` or later. The compatible server
 must be deployed before the CLI is released.
 
 ## Output streams and envelopes
@@ -173,6 +173,46 @@ They clear the key with JSON null:
 ```json
 {"description":null}
 ```
+
+## Roast JSON fields
+
+`roast list` data has `items` and nullable `next_cursor`. Each item contains
+`roast_uuid`, `state`, nullable `roast_at`, `title`, `batch_prefix`,
+`batch_number`, `batch_position`, `operator`, `machine`, `machine_setup`,
+`temperature_unit`, `duration_seconds`, `green_weight_kg`, and
+`roasted_weight_kg`, plus `revision_count`, `updated_at`, and `labels`. Each
+label has `label_uuid`, `name`, `color`, and `archived`.
+
+`roast show` returns those summary fields plus `current_metadata`, nullable
+`current_revision`, and `links`. Links contain `self`, `chart`, and `revisions`.
+A revision contains `revision_number`, `sha256`, `byte_size`, `parser_version`,
+`parse_state`, nullable `parse_diagnostic_code` and
+`parse_diagnostic_message`, `uploaded_at`, `metadata`, and
+`reparse_recommended`. `roast revisions` returns those objects in `items` with
+nullable `next_cursor`.
+
+`roast comment list` data has `items` and nullable `next_cursor`. Every comment
+contains `comment_uuid`, `roast_uuid`, `author_nickname`, nullable `body`,
+`created_at`, nullable `edited_at` and `deleted_at`, `is_deleted`, `can_edit`,
+and `can_delete`. Deleted comments are tombstones with null body; deleted comments are not recreated
+by review replay.
+
+`roast chart download` returns `path`, `roast_uuid`, `revision_number`,
+`revision_sha256`, `parser_version`, `chart_schema_version`,
+`compressed_bytes`, `compressed_sha256`, `file_bytes`, and `file_sha256`.
+`compressed_sha256` identifies the bounded gzip transfer and `file_sha256`
+identifies the validated JSON written to `path`.
+
+`roast profile download` returns `path`, `roast_uuid`, `revision_number`,
+`bytes`, and `sha256`. `roast review post` returns `comment`,
+`revision_sha256`, `template_version`, and `idempotent_replay`; `comment` has the
+same fields as a comment-list item. `idempotent_replay:false` means this request
+won the slot, while true means the server returned its existing comment. A
+never-posted stale identity fails with `roast_revision_changed` and exit 7.
+
+`skill list` returns `items`, each containing `name`; `skill show` returns
+`name` and exact `content`; `skill install` returns `name`, `path`, `installed`,
+and `unchanged`.
 
 ## Financial JSON and totals invariants
 
