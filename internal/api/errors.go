@@ -33,6 +33,18 @@ type apiErrorBody struct {
 	Details json.RawMessage `json:"details"`
 }
 
+func isUnstructuredRouteNotFound(body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
+	}
+	var object map[string]json.RawMessage
+	if err := decodeOneJSON(body, &object); err != nil || object == nil {
+		return false
+	}
+	_, hasError := object["error"]
+	return !hasError
+}
+
 func decodeAPIError(status int, body []byte, forbiddenValues ...string) *output.Error {
 	var envelope errorEnvelope
 	if err := decodeOneJSON(body, &envelope); err != nil || envelope.Error == nil || !validAPIError(envelope.Error, forbiddenValues) {

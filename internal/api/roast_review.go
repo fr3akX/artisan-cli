@@ -103,7 +103,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	var replay bool
 	var locationCommentUUID string
 	validator := func(status int, header http.Header) *output.Error {
-		if status != http.StatusCreated || responseHeaderReflectsReviewBody(header, request.Body) {
+		if status != http.StatusCreated || responseHeaderReflectsForbidden(header, key, c.token, c.serverURL.String()) || responseHeaderReflectsReviewBody(header, request.Body, roastUUID, request.RevisionSHA256, request.TemplateVersion) {
 			return invalidServerResponse(status)
 		}
 		if !singleHeaderEquals(header, "Cache-Control", "no-store") ||
@@ -129,16 +129,16 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	}
 
 	var comment CommentView
-	failure = c.Do(ctx, Request{
+	failure = c.do(ctx, Request{
 		Method: http.MethodPost,
 		Path:   roastAPIRoot + "/" + roastUUID + "/comments/ai-review",
 		Body:   body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated,
 		ValidateResponse: validator,
-	}, &comment)
+	}, &comment, true)
 	if failure != nil {
-		return result, sanitizeRoastReviewPostFailure(classifyRoastAPIFailure(failure, true), request.Body)
+		return result, sanitizeRoastReviewPostFailure(failure)
 	}
-	if comment.RoastUUID != roastUUID || comment.CommentUUID != locationCommentUUID || (!replay && (comment.IsDeleted || comment.Body == nil || *comment.Body != request.Body)) {
+	if roastReviewCommentReflectsForbidden(comment, request.Body, key, c.token, c.serverURL.String()) || comment.RoastUUID != roastUUID || comment.CommentUUID != locationCommentUUID || (!replay && (comment.IsDeleted || comment.Body == nil || *comment.Body != request.Body)) {
 		return result, invalidServerResponse(http.StatusCreated)
 	}
 	return RoastReviewResult{
@@ -179,23 +179,104 @@ func singleHeaderEquals(header http.Header, name, expected string) bool {
 	return len(values) == 1 && values[0] == expected && !strings.Contains(values[0], ",")
 }
 
-func responseHeaderReflectsReviewBody(header http.Header, body string) bool {
-	allowed := map[string]struct{}{
-		"Cache-Control": {}, "Content-Type": {}, "Content-Length": {}, "Date": {},
-		"Location": {}, "X-Idempotent-Replay": {}, "X-Roast-Revision-Sha256": {},
-		"X-Review-Template-Version": {},
-	}
+func responseHeaderReflectsForbidden(header http.Header, forbiddenValues ...string) bool {
 	for name, values := range header {
-		if _, ok := allowed[http.CanonicalHeaderKey(name)]; ok {
-			continue
+		lowerName := strings.ToLower(name)
+		for _, forbidden := range forbiddenValues {
+			if forbidden != "" && strings.Contains(lowerName, strings.ToLower(forbidden)) {
+				return true
+			}
 		}
 		for _, value := range values {
-			if len(value) >= 8 && strings.Contains(body, value) {
+			if containsAny(value, forbiddenValues) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func responseHeaderReflectsReviewBody(header http.Header, body, roastUUID, revisionSHA, template string) bool {
+	for name, values := range header {
+		canonicalName := http.CanonicalHeaderKey(name)
+		allValuesAllowlisted := len(values) > 0
+		for _, value := range values {
+			if !allowlistedRoastReviewHeaderValue(canonicalName, value, roastUUID, revisionSHA, template) {
+				allValuesAllowlisted = false
+				break
+			}
+		}
+		if allValuesAllowlisted {
+			continue
+		}
+		if hasCommonByteSubstring(name, body, 8) {
+			return true
+		}
+		for _, value := range values {
+			if hasCommonByteSubstring(value, body, 8) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func allowlistedRoastReviewHeaderValue(name, value, roastUUID, revisionSHA, template string) bool {
+	switch name {
+	case "Cache-Control":
+		return value == "no-store"
+	case "Content-Type":
+		return value == "application/json" || value == "application/json; charset=utf-8"
+	case "Content-Length":
+		_, err := strconv.ParseUint(value, 10, 63)
+		return err == nil
+	case "Date":
+		_, err := http.ParseTime(value)
+		return err == nil
+	case "Location":
+		prefix := roastAPIRoot + "/" + roastUUID + "/comments/"
+		commentUUID := strings.TrimPrefix(value, prefix)
+		return value == prefix+commentUUID && validRoastUUID(commentUUID)
+	case "X-Idempotent-Replay":
+		return value == "true" || value == "false"
+	case "X-Roast-Revision-Sha256":
+		return value == revisionSHA
+	case "X-Review-Template-Version":
+		return value == template
+	default:
+		return false
+	}
+}
+
+func hasCommonByteSubstring(value, source string, minimum int) bool {
+	if minimum <= 0 || len(value) < minimum || len(source) < minimum {
+		return false
+	}
+	for index := 0; index+minimum <= len(source); index++ {
+		if strings.Contains(value, source[index:index+minimum]) {
+			return true
+		}
+	}
+	return false
+}
+
+func roastReviewCommentReflectsForbidden(comment CommentView, requestBody, key, token, serverURL string) bool {
+	forbidden := []string{key, token, serverURL}
+	bodyIndependentFields := []string{
+		comment.CommentUUID, comment.RoastUUID, comment.AuthorNickname, comment.CreatedAt,
+	}
+	if comment.EditedAt != nil {
+		bodyIndependentFields = append(bodyIndependentFields, *comment.EditedAt)
+	}
+	if comment.DeletedAt != nil {
+		bodyIndependentFields = append(bodyIndependentFields, *comment.DeletedAt)
+	}
+	for _, value := range bodyIndependentFields {
+		if containsAny(value, forbidden) || hasCommonByteSubstring(value, requestBody, 8) {
+			return true
+		}
+	}
+	return comment.Body != nil && containsAny(*comment.Body, forbidden)
 }
 
 func invalidReviewFailure() *output.Error {
@@ -210,13 +291,21 @@ func reviewRevisionChangedFailure() *output.Error {
 	return &output.Error{ExitCode: 7, Code: "roast_revision_changed", Message: "The roast revision changed before the review could be posted"}
 }
 
-func sanitizeRoastReviewPostFailure(failure *output.Error, requestBody string) *output.Error {
-	if failure == nil {
-		return nil
+func sanitizeRoastReviewPostFailure(failure *output.Error) *output.Error {
+	if failure == nil || failure.HTTPStatus == nil {
+		return failure
 	}
-	if failure.HTTPStatus != nil && strings.Contains(requestBody, failure.Code) && !knownRoastReviewFailureCode(failure.Code) {
-		return invalidServerResponse(*failure.HTTPStatus)
+	status := *failure.HTTPStatus
+	if failure.Code == "server_upgrade_required" && status == http.StatusNotFound {
+		return serverUpgradeRequiredFailure()
 	}
+	if failure.Code == "invalid_server_response" {
+		return invalidServerResponse(status)
+	}
+	if !coherentRoastReviewFailure(status, failure.Code) {
+		return invalidServerResponse(status)
+	}
+
 	sanitized := *failure
 	switch failure.Code {
 	case "roast_revision_changed":
@@ -231,18 +320,22 @@ func sanitizeRoastReviewPostFailure(failure *output.Error, requestBody string) *
 		sanitized.Message = "Permission denied"
 	case "invalid_review":
 		sanitized.Message = "Roast review is invalid"
-	case "server_upgrade_required":
-		sanitized.Message = "The server does not provide the roast archive API; upgrade Artisan Server"
-	default:
-		sanitized.Message = "Review request failed"
 	}
 	return &sanitized
 }
 
-func knownRoastReviewFailureCode(code string) bool {
-	switch code {
-	case "roast_revision_changed", "review_idempotency_conflict", "not_found", "authentication_required", "permission_denied", "invalid_review":
-		return true
+func coherentRoastReviewFailure(status int, code string) bool {
+	switch status {
+	case http.StatusUnauthorized:
+		return code == "authentication_required"
+	case http.StatusForbidden:
+		return code == "permission_denied"
+	case http.StatusNotFound:
+		return code == "not_found"
+	case http.StatusConflict:
+		return code == "roast_revision_changed" || code == "review_idempotency_conflict"
+	case http.StatusUnprocessableEntity:
+		return code == "invalid_review"
 	default:
 		return false
 	}

@@ -179,6 +179,10 @@ func classifyRoastAPIFailure(failure *output.Error, preserveEntityNotFound bool)
 	if preserveEntityNotFound && failure.Code == "not_found" {
 		return failure
 	}
+	return serverUpgradeRequiredFailure()
+}
+
+func serverUpgradeRequiredFailure() *output.Error {
 	return &output.Error{
 		ExitCode: 9, Code: "server_upgrade_required",
 		Message:    "The server does not provide the roast archive API; upgrade Artisan Server",

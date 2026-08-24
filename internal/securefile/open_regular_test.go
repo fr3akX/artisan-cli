@@ -107,13 +107,17 @@ func TestReadRegularSnapshotRejectsReplacementBeforeFinalOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := false
+	var mutationErr error
 	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
 		if event == "before-open:review" && !changed {
 			changed = true
-			return os.Rename(replacement, path)
+			mutationErr = replaceSnapshotPathForTest(replacement, path)
 		}
 		return nil
 	}})
+	if mutationErr != nil {
+		t.Fatalf("pre-open replacement failed: %v", mutationErr)
+	}
 	if !errors.Is(err, ErrInvalidRegularSnapshot) {
 		t.Fatalf("error = %v, want pre-open replacement rejection", err)
 	}
@@ -129,21 +133,53 @@ func TestReadRegularSnapshotRejectsParentReplacementAfterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := false
+	var mutationErr error
 	_, err := readRegularSnapshot(filepath.Join(parent, "review"), 64, snapshotTestHooks{event: func(event string) error {
 		if event == "after-open:parent" && !changed {
 			changed = true
-			if err := os.Rename(parent, filepath.Join(root, "old-parent")); err != nil {
-				return err
+			if mutationErr = os.Rename(parent, filepath.Join(root, "old-parent")); mutationErr != nil {
+				return nil
 			}
-			if err := os.Mkdir(parent, 0o700); err != nil {
-				return err
+			if mutationErr = os.Mkdir(parent, 0o700); mutationErr != nil {
+				return nil
 			}
-			return os.WriteFile(filepath.Join(parent, "review"), []byte("other body"), 0o600)
+			mutationErr = os.WriteFile(filepath.Join(parent, "review"), []byte("other body"), 0o600)
 		}
 		return nil
 	}})
+	if mutationErr != nil {
+		t.Fatalf("parent replacement failed: %v", mutationErr)
+	}
 	if !errors.Is(err, ErrInvalidRegularSnapshot) {
 		t.Fatalf("error = %v, want parent replacement rejection", err)
+	}
+}
+
+func TestReadRegularSnapshotRejectsPathReplacementDuringRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "review")
+	replacement := filepath.Join(root, "replacement")
+	if err := os.WriteFile(path, []byte("first body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("other body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := false
+	var mutationErr error
+	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
+		if event == "during-read" && !changed {
+			changed = true
+			mutationErr = replaceSnapshotPathForTest(replacement, path)
+		}
+		return nil
+	}})
+	if mutationErr != nil {
+		t.Fatalf("during-read replacement failed: %v", mutationErr)
+	}
+	if !errors.Is(err, ErrInvalidRegularSnapshot) {
+		t.Fatalf("error = %v, want during-read replacement rejection", err)
 	}
 }
 
@@ -153,13 +189,17 @@ func TestReadRegularSnapshotRejectsSameSizeChangeDuringRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := false
+	var mutationErr error
 	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
 		if event == "during-read" && !changed {
 			changed = true
-			return os.WriteFile(path, []byte("ABCDEFGH"), 0o600)
+			mutationErr = os.WriteFile(path, []byte("ABCDEFGH"), 0o600)
 		}
 		return nil
 	}})
+	if mutationErr != nil {
+		t.Fatalf("same-size mutation failed: %v", mutationErr)
+	}
 	if !errors.Is(err, ErrInvalidRegularSnapshot) {
 		t.Fatalf("error = %v, want during-read content change rejection", err)
 	}
@@ -171,13 +211,17 @@ func TestReadRegularSnapshotRejectsShortRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := false
+	var mutationErr error
 	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
 		if event == "during-read" && !changed {
 			changed = true
-			return os.Truncate(path, 4)
+			mutationErr = os.Truncate(path, 4)
 		}
 		return nil
 	}})
+	if mutationErr != nil {
+		t.Fatalf("truncate mutation failed: %v", mutationErr)
+	}
 	if !errors.Is(err, ErrInvalidRegularSnapshot) {
 		t.Fatalf("error = %v, want short-read rejection", err)
 	}
@@ -204,13 +248,17 @@ func TestReadRegularSnapshotRejectsPathReplacementAfterOpen(t *testing.T) {
 	}
 
 	changed := false
+	var mutationErr error
 	_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
 		if event == "after-read" && !changed {
 			changed = true
-			return os.Rename(replacement, path)
+			mutationErr = replaceSnapshotPathForTest(replacement, path)
 		}
 		return nil
 	}})
+	if mutationErr != nil {
+		t.Fatalf("post-read replacement failed: %v", mutationErr)
+	}
 	if !errors.Is(err, ErrInvalidRegularSnapshot) {
 		t.Fatalf("error = %v, want changed snapshot rejection", err)
 	}
@@ -235,17 +283,66 @@ func TestReadRegularSnapshotRejectsInPlaceSizeAndModtimeChanges(t *testing.T) {
 			if err := os.WriteFile(path, []byte("stable body"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			var mutationErr error
 			_, err := readRegularSnapshot(path, 64, snapshotTestHooks{event: func(event string) error {
-				if event == "after-read" {
-					return test.change(path)
+				if event == "after-read" && mutationErr == nil {
+					mutationErr = test.change(path)
 				}
 				return nil
 			}})
+			if mutationErr != nil {
+				t.Fatalf("%s mutation failed: %v", test.name, mutationErr)
+			}
 			if !errors.Is(err, ErrInvalidRegularSnapshot) {
 				t.Fatalf("error = %v, want changed snapshot rejection", err)
 			}
 		})
 	}
+}
+
+func TestReadRegularSnapshotRejectsRelativePathWhenCurrentDirectoryChanges(t *testing.T) {
+	originalCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get current directory: %v", err)
+	}
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.WriteFile(filepath.Join(root, "review"), []byte("stable body"), 0o600); err != nil {
+			t.Fatalf("write relative fixture: %v", err)
+		}
+	}
+	if err := os.Chdir(firstRoot); err != nil {
+		t.Fatalf("enter first current directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalCWD); err != nil {
+			t.Errorf("restore current directory: %v", err)
+		}
+	})
+
+	var mutationErr error
+	_, snapshotErr := readRegularSnapshot("review", 64, snapshotTestHooks{event: func(event string) error {
+		if event == "before-recheck" {
+			mutationErr = os.Chdir(secondRoot)
+		}
+		return nil
+	}})
+	if mutationErr != nil {
+		t.Fatalf("current-directory mutation failed: %v", mutationErr)
+	}
+	if !errors.Is(snapshotErr, ErrInvalidRegularSnapshot) {
+		t.Fatalf("error = %v, want current-directory replacement rejection", snapshotErr)
+	}
+}
+
+func replaceSnapshotPathForTest(replacement, path string) error {
+	if runtime.GOOS == "windows" {
+		if err := os.Rename(path, path+".replaced"); err != nil {
+			return err
+		}
+	}
+	return os.Rename(replacement, path)
 }
 
 func TestReadRegularSnapshotErrorsNeverContainPathOrContents(t *testing.T) {

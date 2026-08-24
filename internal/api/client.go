@@ -78,7 +78,11 @@ func NewClient(serverURL, token string, timeout time.Duration) (*Client, error) 
 
 // Do executes an API request, applying bounded retries only to safe reads or
 // replayable idempotent mutations. It returns nil on success.
-func (c *Client) Do(ctx context.Context, request Request, destination any) (failure *output.Error) {
+func (c *Client) Do(ctx context.Context, request Request, destination any) *output.Error {
+	return c.do(ctx, request, destination, false)
+}
+
+func (c *Client) do(ctx context.Context, request Request, destination any, missingEndpointOnUnstructuredNotFound bool) (failure *output.Error) {
 	defer func() {
 		failure = c.failureWithoutSecrets(failure)
 	}()
@@ -108,6 +112,7 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 	}
 
 	canRetry := requestCanRetry(request)
+	forbiddenResponseValues := []string{c.token, c.serverURL.String(), request.IdempotencyKey}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
@@ -156,7 +161,7 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			isExpectedClientError := status >= 400 && status < 500
 			isNonTransientServerError := status >= 500 && status < 600 && !isTransientStatus(status)
 			if isExpectedClientError || isNonTransientServerError {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 			}
 			if canRetry && attempt < maxAttempts-1 && ctx.Err() == nil {
 				if err := waitForRetry(ctx, attempt); err == nil {
@@ -164,22 +169,21 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 				}
 			}
 			if isTransientStatus(status) {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 			}
 			return contextOrNetworkFailure(ctx)
 		}
 		if oversized {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
 		}
-		forbiddenResponseValues := []string{c.token, c.serverURL.String()}
-		if containsExactTokenReflection(responseBody, c.token) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
+		if containsExactTokenReflection(responseBody, c.token) || containsExactTokenReflection(responseBody, request.IdempotencyKey) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
 			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if responseRequiresJSON(responseBody) && !trustedJSONContentType(response.Header) {
-			return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 		}
 		if isTransientStatus(status) && canRetry && attempt < maxAttempts-1 {
 			if err := waitForRetry(ctx, attempt); err != nil {
@@ -189,7 +193,7 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 		}
 		if status >= 200 && status < 300 {
 			if request.ExpectedStatus != 0 && status != request.ExpectedStatus {
-				return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+				return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 			}
 			if request.ValidateResponse != nil {
 				if failure := request.ValidateResponse(status, response.Header.Clone()); failure != nil {
@@ -199,9 +203,12 @@ func (c *Client) Do(ctx context.Context, request Request, destination any) (fail
 			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
 		if status >= 400 && status < 600 {
-			return decodeAPIError(status, responseBody, c.token, c.serverURL.String())
+			if status == http.StatusNotFound && missingEndpointOnUnstructuredNotFound && isUnstructuredRouteNotFound(responseBody) {
+				return serverUpgradeRequiredFailure()
+			}
+			return decodeAPIError(status, responseBody, forbiddenResponseValues...)
 		}
-		return invalidServerResponseAvoiding(status, []string{c.token, c.serverURL.String()})
+		return invalidServerResponseAvoiding(status, forbiddenResponseValues)
 	}
 	return contextOrNetworkFailure(ctx)
 }
@@ -225,6 +232,9 @@ func responseHeaderContainsAny(header http.Header, forbiddenValues []string) boo
 }
 
 func containsExactTokenReflection(body []byte, token string) bool {
+	if token == "" {
+		return false
+	}
 	if bytes.Contains(body, []byte(token)) {
 		return true
 	}
