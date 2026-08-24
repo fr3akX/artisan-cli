@@ -473,6 +473,8 @@ func TestRoastReviewCommandGrammarFailsClosedOnTaskListsAndShellConstructions(t 
 		{name: "unchecked task list", text: "- [ ] Run artisan inventory adjust lot-id 1.\n", want: "artisan inventory adjust lot-id 1"},
 		{name: "checked nested task list", text: "> - [x] Execute `artisan roast publish roast-id`.\n", want: "artisan roast publish roast-id"},
 		{name: "direct task list command", text: "- [ ] artisan inventory adjust lot-id 1.\n", want: "artisan inventory adjust lot-id 1"},
+		{name: "direct task list inline command", text: "- [ ] `artisan auth login`.\n", want: "artisan auth login"},
+		{name: "direct task list tab command", text: "- [ ] artisan\tauth login.\n", want: "artisan\tauth login"},
 		{name: "emphasized task list imperative", text: "- **Run** `artisan auth login`.\n", want: "artisan auth login"},
 		{name: "differently phrased list imperative", text: "- Then run artisan roast publish roast-id.\n", want: "artisan roast publish roast-id"},
 		{name: "task list ANSI C quote", text: "> - [x] art$'i'san auth login.\n", want: "art$'i'san auth login"},
@@ -667,7 +669,7 @@ func proseCommandCandidate(sentence string) (string, bool) {
 		if command, ok := commandAfterImperativeWord(trimmed); ok {
 			return cleanProseCommandCandidate(command)
 		}
-		if first, _, found := strings.Cut(trimmed, " "); found && looksLikeArtisanExecutable(first) {
+		if fields := strings.Fields(trimmed); len(fields) > 0 && looksLikeArtisanExecutable(fields[0]) {
 			return cleanProseCommandCandidate(trimmed)
 		}
 	}
@@ -721,7 +723,7 @@ func isImperativeWord(value string) bool {
 
 func looksLikeArtisanExecutable(value string) bool {
 	normalized := strings.Map(func(character rune) rune {
-		if strings.ContainsRune("'\"\\$", character) {
+		if strings.ContainsRune("'\"`\\$", character) {
 			return -1
 		}
 		return character
