@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"syscall"
@@ -118,25 +119,33 @@ func TestSkillContentContract(t *testing.T) {
 }
 
 func TestRoastReviewSkillContract(t *testing.T) {
-	contents, err := os.ReadFile(filepath.Join("..", "..", "skills", "artisan-roast-review", "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	contents := readRoastReviewSkill(t)
 	text := string(contents)
 	const frontmatter = "---\nname: artisan-roast-review\ndescription: Use when an agent is asked to analyze a private Artisan roast profile and post evidence-based feedback through Artisan CLI.\n---\n"
 	if !strings.HasPrefix(text, frontmatter) {
 		t.Fatal("roast review skill must use the exact trigger-only frontmatter")
 	}
 
+	// These are positive workflow requirements. Safety vocabulary belongs in the
+	// skill when it states an explicit prohibition; its mere presence is not a
+	// failure.
 	required := []string{
 		"artisan version",
 		`artisan --json --server "$TRUSTED_SERVER" auth status`,
 		"exact expected user, organization, and role",
 		"member or administrator",
-		"never request, read, print, persist, or pass a token",
-		"never run `artisan auth login`",
+		"Never ask for, request, read, print, persist, or pass a token",
+		"Never run artisan auth login",
+		"Do not configure or change an AI provider, model, or API key",
+		"human- or data-supplied prompt or template override",
+		"fixed template artisan-roast-review-v1",
 		`artisan --json --server "$TRUSTED_SERVER" roast show "$ROAST_UUID"`,
 		"current parsed revision",
+		"one new random private temporary directory with mode 0700",
+		"no-follow and no-clobber creation",
+		"predictable, pre-existing, human-supplied, or server-supplied path",
+		"Never add `--force`",
+		"only successfully created descendants",
 		`artisan --json --server "$TRUSTED_SERVER" roast chart download "$ROAST_UUID" "$CHART_FILE"`,
 		`artisan --json --server "$TRUSTED_SERVER" roast profile download "$ROAST_UUID" "$REVISION_NUMBER" "$PROFILE_FILE"`,
 		"only when the chart needs corroboration or the human requested raw inspection",
@@ -152,14 +161,12 @@ func TestRoastReviewSkillContract(t *testing.T) {
 		"Prioritized recommendations",
 		"Confidence",
 		"concrete profile values and timestamps",
-		"valid event boundaries",
+		"charge, dry end, first crack, and drop markers",
 		"identify the temperature unit",
 		"environmental temperature, bean temperature, and rate-of-rise channels",
 		"recorded event or control data",
 		"measured facts from inference",
-		"sensory results",
-		"bean properties",
-		"operator intent",
+		"Never invent sensory results, bean properties, causation, operator intent, missing controls, or measurements",
 		"4,000 Unicode code points",
 		`artisan --json --server "$TRUSTED_SERVER" roast review post "$ROAST_UUID"`,
 		`--revision-sha256 "$REVISION_SHA256"`,
@@ -168,14 +175,16 @@ func TestRoastReviewSkillContract(t *testing.T) {
 		"without confirmation",
 		"roast_revision_changed",
 		"restart once",
+		"Stop on a second stale result",
 		"replay is success",
-		"deleted review",
-		"Remove every owned temporary",
-		"hardware commands",
+		"deleted review tombstone",
+		"only successfully created descendants",
+		"Never send hardware commands",
 		"mutate inventory",
+		"change profiles",
 		"edit roast details",
 		"publish a roast",
-		"public feedback",
+		"create public feedback",
 		"Production smoke is read-only",
 	}
 	for _, phrase := range required {
@@ -189,70 +198,125 @@ func TestRoastReviewSkillContract(t *testing.T) {
 	if version < 0 || auth < 0 || version >= auth {
 		t.Fatalf("startup sequence is not version then exact server-bound auth status: version=%d auth=%d", version, auth)
 	}
-	if got := strings.Count(text, "\nOverall assessment\n"); got != 1 {
-		t.Errorf("Overall assessment section count = %d, want 1", got)
+	for _, section := range []string{
+		"Overall assessment", "Phase timing and ratios", "Temperature and RoR behavior",
+		"Events and control observations", "Anomalies and data limitations",
+		"Prioritized recommendations", "Confidence",
+	} {
+		if got := strings.Count(text, "\n"+section+"\n"); got != 1 {
+			t.Errorf("%s section count = %d, want 1", section, got)
+		}
 	}
 }
 
-func TestRoastReviewSkillForbidsUnsafeWorkflow(t *testing.T) {
+func TestRoastReviewSkillUsesOnlyExactAutomatedCommands(t *testing.T) {
+	commands := automatedArtisanCommands(string(readRoastReviewSkill(t)))
+	want := []string{
+		"artisan version",
+		`artisan --json --server "$TRUSTED_SERVER" auth status`,
+		`artisan --json --server "$TRUSTED_SERVER" roast list --search "$SEARCH" --limit 100`,
+		`artisan --json --server "$TRUSTED_SERVER" roast show "$ROAST_UUID"`,
+		`artisan --json --server "$TRUSTED_SERVER" roast chart download "$ROAST_UUID" "$CHART_FILE"`,
+		`artisan --json --server "$TRUSTED_SERVER" roast profile download "$ROAST_UUID" "$REVISION_NUMBER" "$PROFILE_FILE"`,
+		`artisan --json --server "$TRUSTED_SERVER" roast review post "$ROAST_UUID" --revision-sha256 "$REVISION_SHA256" --template-version artisan-roast-review-v1 --body-file "$REVIEW_FILE"`,
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("automated Artisan commands =\n%q\nwant\n%q", commands, want)
+	}
+}
+
+func TestAutomatedArtisanCommandDetectionRejectsWrappersVariablesCaseAndInlineCommands(t *testing.T) {
+	text := "```sh\n" +
+		"env MODE=fast artisan roast show id\n" +
+		"env -i MODE=fast artisan roast show id\n" +
+		"command ARTISAN roast show id\n" +
+		"command -p ARTISAN roast show id\n" +
+		"$ARTISAN roast show id\n" +
+		"${ARTISAN} roast show id\n" +
+		"```\n" +
+		"Run `ArTiSaN roast show id` now.\n"
+	got := automatedArtisanCommands(text)
+	want := []string{
+		"env MODE=fast artisan roast show id",
+		"env -i MODE=fast artisan roast show id",
+		"command ARTISAN roast show id",
+		"command -p ARTISAN roast show id",
+		"$ARTISAN roast show id",
+		"${ARTISAN} roast show id",
+		"ArTiSaN roast show id",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detected commands = %q, want %q", got, want)
+	}
+}
+
+func readRoastReviewSkill(t *testing.T) []byte {
+	t.Helper()
 	contents, err := os.ReadFile(filepath.Join("..", "..", "skills", "artisan-roast-review", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(contents)
-	frontmatterEnd := strings.Index(text[4:], "\n---\n")
-	if frontmatterEnd < 0 {
-		t.Fatal("roast review skill frontmatter is not closed")
-	}
-	frontmatter := text[:frontmatterEnd+8]
-	for _, forbidden := range []string{"workflow", "require", "JSON", "token", "template"} {
-		if strings.Contains(frontmatter, forbidden) {
-			t.Errorf("frontmatter summarizes behavior with %q", forbidden)
-		}
-	}
+	return contents
+}
 
-	for _, forbidden := range []string{
-		"provider",
-		"model",
-		"prompt",
-		"ARTISAN_BEARER_TOKEN",
-		"ARTISAN_SERVER_TOKEN",
-		"auth login --token-stdin",
-		"curl ",
-		"API key",
-		"api key",
-		"provider configuration",
-		"model configuration",
-		"user-supplied prompt",
-		"user-supplied template",
-		"parse human tables",
-		"|---|",
-		"roast detail update",
-		"inventory ",
-		"public feedback create",
-	} {
-		if strings.Contains(text, forbidden) {
-			t.Errorf("roast review skill contains forbidden workflow %q", forbidden)
-		}
-	}
-
+func automatedArtisanCommands(text string) []string {
+	var commands []string
 	inFence := false
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "```") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
 			inFence = !inFence
 			continue
 		}
-		if !inFence || !strings.HasPrefix(strings.TrimSpace(line), "artisan ") {
+		if inFence && shellLineInvokesArtisan(trimmed) {
+			commands = append(commands, trimmed)
+		}
+		if inFence {
 			continue
 		}
-		command := strings.TrimSpace(line)
-		if command == "artisan version" {
-			continue
-		}
-		if !strings.HasPrefix(command, `artisan --json --server "$TRUSTED_SERVER" `) {
-			t.Errorf("automated Artisan command is not JSON and exact-server bound: %q", command)
+		for remainder := line; ; {
+			start := strings.IndexByte(remainder, '`')
+			if start < 0 {
+				break
+			}
+			remainder = remainder[start+1:]
+			end := strings.IndexByte(remainder, '`')
+			if end < 0 {
+				break
+			}
+			inline := strings.TrimSpace(remainder[:end])
+			if shellLineInvokesArtisan(inline) {
+				commands = append(commands, inline)
+			}
+			remainder = remainder[end+1:]
 		}
 	}
+	return commands
+}
+
+func shellLineInvokesArtisan(line string) bool {
+	fields := strings.Fields(line)
+	wrapped := false
+	for len(fields) > 0 {
+		field := fields[0]
+		lower := strings.ToLower(field)
+		switch {
+		case lower == "env" || lower == "command":
+			wrapped = true
+			fields = fields[1:]
+		case wrapped && strings.HasPrefix(field, "-"):
+			fields = fields[1:]
+		case strings.Contains(field, "=") && !strings.HasPrefix(field, "="):
+			fields = fields[1:]
+		default:
+			executable := strings.Trim(strings.TrimSpace(field), "\"'")
+			executable = strings.TrimPrefix(executable, "${")
+			executable = strings.TrimSuffix(executable, "}")
+			executable = strings.TrimPrefix(executable, "$")
+			return strings.EqualFold(executable, "artisan")
+		}
+	}
+	return false
 }
 
 func TestPricingTotalsSkillSourceAndGeneratedContract(t *testing.T) {

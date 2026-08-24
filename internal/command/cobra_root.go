@@ -650,7 +650,7 @@ func writeCobraFailure(runtime Runtime, state *cobraState, args []string, err er
 
 func cobraJSONModeForParseFailure(args []string) bool {
 	command := firstCommandArg(args)
-	if command != "auth" && command != "inventory" && command != "roast" {
+	if command != "auth" && command != "inventory" && command != "roast" && command != "skill" {
 		return jsonModeForParseFailure(args)
 	}
 

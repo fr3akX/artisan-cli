@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fr3akX/artisan-cli/internal/securefile"
 )
@@ -55,7 +57,7 @@ func generateRegistry(sources []sourceSpec) ([]byte, error) {
 	seen := make(map[string]struct{}, len(ordered))
 	contents := make(map[string][]byte, len(ordered))
 	for _, source := range ordered {
-		if !validSkillName.MatchString(source.Name) {
+		if !validSkillNameValue(source.Name) {
 			return nil, fmt.Errorf("invalid skill name %q", source.Name)
 		}
 		if _, duplicate := seen[source.Name]; duplicate {
@@ -97,31 +99,75 @@ func generateRegistry(sources []sourceSpec) ([]byte, error) {
 }
 
 func parseFrontmatterName(contents []byte) (string, error) {
+	if !utf8.Valid(contents) {
+		return "", errors.New("frontmatter must be valid UTF-8")
+	}
 	text := string(contents)
 	if !strings.HasPrefix(text, "---\n") {
-		return "", errors.New("missing frontmatter")
+		return "", errors.New("missing exact frontmatter opening delimiter")
 	}
-	end := strings.Index(text[4:], "\n---\n")
-	if end < 0 {
-		return "", errors.New("unterminated frontmatter")
+	lines := strings.Split(text, "\n")
+	closing := -1
+	for index := 1; index < len(lines); index++ {
+		if lines[index] == "---" {
+			closing = index
+			break
+		}
 	}
-	frontmatter := strings.Split(text[4:4+end], "\n")
-	name := ""
-	foundName := false
-	for _, line := range frontmatter {
-		if !strings.HasPrefix(line, "name:") {
+	if closing < 0 {
+		return "", errors.New("missing exact frontmatter closing delimiter")
+	}
+	if closing != 3 {
+		return "", errors.New("frontmatter must contain exactly name and description scalars")
+	}
+	for _, line := range lines[closing+1:] {
+		if line == "" {
 			continue
 		}
-		if foundName {
-			return "", errors.New("duplicate frontmatter name")
+		if line == "---" || line == "..." {
+			return "", errors.New("extra YAML document is not allowed")
 		}
-		foundName = true
-		name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		break
 	}
-	if name == "" {
-		return "", errors.New("missing frontmatter name")
+
+	values := make(map[string]string, 2)
+	for _, line := range lines[1:closing] {
+		if strings.ContainsAny(line, "\t#") {
+			return "", errors.New("frontmatter tabs and comments are not allowed")
+		}
+		key, value, ok := strings.Cut(line, ": ")
+		if !ok || key == "" || value == "" || strings.Contains(key, ":") || strings.TrimSpace(value) != value {
+			return "", errors.New("frontmatter entries must be nonempty unquoted scalars")
+		}
+		if key != "name" && key != "description" {
+			return "", fmt.Errorf("unknown frontmatter key %q", key)
+		}
+		if _, duplicate := values[key]; duplicate {
+			return "", fmt.Errorf("duplicate frontmatter key %q", key)
+		}
+		values[key] = value
+	}
+	name, hasName := values["name"]
+	description, hasDescription := values["description"]
+	if !hasName || !hasDescription {
+		return "", errors.New("frontmatter requires name and description")
+	}
+	if !validSkillNameValue(name) {
+		return "", fmt.Errorf("invalid frontmatter name %q", name)
+	}
+	if !strings.HasPrefix(description, "Use when ") || strings.Contains(description, ": ") || utf8.RuneCountInString(description) > 1024 {
+		return "", errors.New("frontmatter description must be a bounded Use when trigger")
+	}
+	for _, character := range description {
+		if unicode.IsControl(character) {
+			return "", errors.New("frontmatter description contains a control character")
+		}
 	}
 	return name, nil
+}
+
+func validSkillNameValue(name string) bool {
+	return len(name) <= 64 && validSkillName.MatchString(name)
 }
 
 func atomicWrite(destination string, contents []byte) error {

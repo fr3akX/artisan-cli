@@ -93,6 +93,7 @@ func TestGenerateRegistryIsDeterministicAndValidatesSources(t *testing.T) {
 	}{
 		{name: "duplicate", sources: []sourceSpec{{Name: "artisan-inventory", Path: inventory}, {Name: "artisan-inventory", Path: inventory}}},
 		{name: "invalid name", sources: []sourceSpec{{Name: "../inventory", Path: inventory}}},
+		{name: "overlong registry name", sources: []sourceSpec{{Name: strings.Repeat("a", 65), Path: inventory}}},
 		{name: "missing frontmatter name", sources: []sourceSpec{{Name: "artisan-inventory", Path: missingName}}},
 		{name: "duplicate frontmatter name", sources: []sourceSpec{{Name: "artisan-inventory", Path: duplicateFrontmatterName}}},
 		{name: "source name mismatch", sources: []sourceSpec{{Name: "artisan-roast-review", Path: inventory}}},
@@ -102,6 +103,62 @@ func TestGenerateRegistryIsDeterministicAndValidatesSources(t *testing.T) {
 				t.Fatal("generateRegistry accepted invalid sources")
 			}
 		})
+	}
+}
+
+func TestParseFrontmatterNameRequiresStrictSimpleTwoScalarDocument(t *testing.T) {
+	valid := []byte("---\ndescription: Use when testing strict frontmatter.\nname: artisan-inventory\n---\n\n# Skill\n...\n\n---\n")
+	if got, err := parseFrontmatterName(valid); err != nil || got != "artisan-inventory" {
+		t.Fatalf("valid frontmatter = %q, %v", got, err)
+	}
+
+	longDescription := "Use when " + strings.Repeat("x", 1016)
+	longName := strings.Repeat("a", 65)
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "missing opener", contents: "name: artisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "leading blank before opener", contents: "\n---\nname: artisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "commented opener", contents: "--- # yaml\nname: artisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "crlf delimiters", contents: "---\r\nname: artisan-inventory\r\ndescription: Use when testing.\r\n---\r\n"},
+		{name: "missing closer", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\n"},
+		{name: "malformed closer", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\n--- \n"},
+		{name: "missing name", contents: "---\ndescription: Use when testing.\n---\n"},
+		{name: "missing description", contents: "---\nname: artisan-inventory\n---\n"},
+		{name: "duplicate name", contents: "---\nname: artisan-inventory\nname: artisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "duplicate name alternate spelling", contents: "---\nname: artisan-inventory\nname : artisan-roast-review\ndescription: Use when testing.\n---\n"},
+		{name: "duplicate description", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\ndescription: Use when testing again.\n---\n"},
+		{name: "unknown key", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\nlicense: MIT\n---\n"},
+		{name: "malformed key", contents: "---\nname : artisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "tab", contents: "---\nname:\tartisan-inventory\ndescription: Use when testing.\n---\n"},
+		{name: "comment line", contents: "---\nname: artisan-inventory\n# comment\ndescription: Use when testing.\n---\n"},
+		{name: "inline comment", contents: "---\nname: artisan-inventory # comment\ndescription: Use when testing.\n---\n"},
+		{name: "multiline literal", contents: "---\nname: artisan-inventory\ndescription: |\n  Use when testing.\n---\n"},
+		{name: "multiline folded", contents: "---\nname: artisan-inventory\ndescription: >\n  Use when testing.\n---\n"},
+		{name: "quoted scalar", contents: "---\nname: \"artisan-inventory\"\ndescription: Use when testing.\n---\n"},
+		{name: "blank line", contents: "---\nname: artisan-inventory\n\ndescription: Use when testing.\n---\n"},
+		{name: "extra yaml document", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\n---\n---\nname: other\n"},
+		{name: "extra yaml terminator", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\n---\n...\n"},
+		{name: "invalid uppercase name", contents: "---\nname: Artisan-Inventory\ndescription: Use when testing.\n---\n"},
+		{name: "overlong name", contents: "---\nname: " + longName + "\ndescription: Use when testing.\n---\n"},
+		{name: "empty description", contents: "---\nname: artisan-inventory\ndescription: \n---\n"},
+		{name: "non-trigger description", contents: "---\nname: artisan-inventory\ndescription: Testing helper.\n---\n"},
+		{name: "nested mapping description", contents: "---\nname: artisan-inventory\ndescription: Use when testing: hostile syntax.\n---\n"},
+		{name: "control in description", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\x00\n---\n"},
+		{name: "overlong description", contents: "---\nname: artisan-inventory\ndescription: " + longDescription + "\n---\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if name, err := parseFrontmatterName([]byte(test.contents)); err == nil {
+				t.Fatalf("accepted hostile frontmatter with name %q", name)
+			}
+		})
+	}
+	invalidUTF8 := append([]byte("---\nname: artisan-inventory\ndescription: Use when testing "), 0xff)
+	invalidUTF8 = append(invalidUTF8, []byte(".\n---\n")...)
+	if name, err := parseFrontmatterName(invalidUTF8); err == nil {
+		t.Fatalf("accepted invalid UTF-8 frontmatter with name %q", name)
 	}
 }
 

@@ -139,6 +139,52 @@ func TestSkillHelpAndUsage(t *testing.T) {
 	}
 }
 
+func TestSkillParseFailuresHonorTrailingAndInterspersedJSON(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "trailing after unknown show flag",
+			args: []string{"skill", "show", "--bogus", "--json"},
+			want: "Invalid skill show option",
+		},
+		{
+			name: "interspersed before unknown show flag",
+			args: []string{"skill", "show", "--json", "--bogus"},
+			want: "Invalid skill show option",
+		},
+		{
+			name: "trailing after unknown install flag",
+			args: []string{"skill", "install", "--bogus", "--json"},
+			want: "Invalid skill install option",
+		},
+		{
+			name: "json after malformed force flag",
+			args: []string{"skill", "install", "--force=not-a-bool", "--json"},
+			want: "Invalid skill install option",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := runAuthCommand(t, Runtime{}, test.args...)
+			if result.code != usageExitCode || result.stderr != "" || strings.Count(result.stdout, "\n") != 1 {
+				t.Fatalf("Run(%q) = %#v, want one JSON usage envelope", test.args, result)
+			}
+			var envelope struct {
+				OK    bool         `json:"ok"`
+				Error output.Error `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(result.stdout), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.OK || envelope.Error.Code != "usage" || envelope.Error.Message != test.want {
+				t.Fatalf("envelope = %#v, want usage message %q", envelope, test.want)
+			}
+		})
+	}
+}
+
 func TestSkillInstallAcceptsLegacySingleDashFlags(t *testing.T) {
 	root := canonicalSkillFixtureRoot(t)
 	result := runAuthCommand(t, Runtime{}, "skill", "install", "-directory", root)
