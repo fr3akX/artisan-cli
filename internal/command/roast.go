@@ -2,9 +2,11 @@ package command
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
@@ -151,11 +153,20 @@ func runRoastChartDownload(ctx context.Context, roastUUID, destination string, f
 	if _, failure := api.NormalizeRoastUUID(roastUUID); failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
+	if err := api.PreflightDownloadDestination(destination, force); err != nil {
+		return writeFailure(runtime, jsonMode, roastDownloadPreflightFailure(err, "Roast chart download requires a destination file path", "Unable to store the roast chart safely"))
+	}
 	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
-	result, failure := client.DownloadRoastChart(ctx, roastUUID, destination, force)
+	download := runtime.roastChartDownload
+	if download == nil {
+		download = func(ctx context.Context, client *api.Client, roastUUID, destination string, force bool) (api.RoastChartDownload, *output.Error) {
+			return client.DownloadRoastChart(ctx, roastUUID, destination, force)
+		}
+	}
+	result, failure := download(ctx, client, roastUUID, destination, force)
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
@@ -170,15 +181,35 @@ func runRoastProfileDownload(ctx context.Context, roastUUID, rawRevision, destin
 	if err != nil || revision < 1 || revision > 2_147_483_647 || strconv.FormatInt(revision, 10) != rawRevision {
 		return writeFailure(runtime, jsonMode, output.Error{ExitCode: usageExitCode, Code: "invalid_revision_number", Message: "Roast revision number must be between 1 and 2147483647"})
 	}
+	if err := api.PreflightDownloadDestination(destination, force); err != nil {
+		return writeFailure(runtime, jsonMode, roastDownloadPreflightFailure(err, "Roast profile download requires a destination file path", "Unable to store the roast profile safely"))
+	}
 	client, code := authenticatedClient(ctx, runtime, jsonMode, serverOverride, timeout)
 	if client == nil {
 		return code
 	}
-	result, failure := client.DownloadRoastProfile(ctx, roastUUID, revision, destination, force)
+	download := runtime.roastProfileDownload
+	if download == nil {
+		download = func(ctx context.Context, client *api.Client, roastUUID string, revision int64, destination string, force bool) (api.RoastProfileDownload, *output.Error) {
+			return client.DownloadRoastProfile(ctx, roastUUID, revision, destination, force)
+		}
+	}
+	result, failure := download(ctx, client, roastUUID, revision, destination, force)
 	if failure != nil {
 		return writeFailure(runtime, jsonMode, *failure)
 	}
 	return writeAPISuccess(runtime, jsonMode, result, func(w io.Writer) error { return writeRoastProfileDownload(w, result) })
+}
+
+func roastDownloadPreflightFailure(err error, invalidMessage, storageMessage string) output.Error {
+	switch {
+	case errors.Is(err, api.ErrInvalidDownloadDestination):
+		return output.Error{ExitCode: usageExitCode, Code: "invalid_destination", Message: invalidMessage}
+	case errors.Is(err, os.ErrExist):
+		return output.Error{ExitCode: 3, Code: "local_storage_error", Message: "Destination already exists; use --force to replace it"}
+	default:
+		return output.Error{ExitCode: 3, Code: "local_storage_error", Message: storageMessage}
+	}
 }
 
 func runRoastReviewPost(ctx context.Context, roastUUID, revisionSHA, template, bodyFile string, runtime Runtime, jsonMode bool, serverOverride string, timeout time.Duration) int {

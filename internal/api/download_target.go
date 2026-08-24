@@ -8,10 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var (
-	errInvalidDownloadDestination = errors.New("invalid download destination")
+	// ErrInvalidDownloadDestination identifies a destination that cannot
+	// lexically name a regular download file.
+	ErrInvalidDownloadDestination = errors.New("invalid download destination")
+	errInvalidDownloadDestination = ErrInvalidDownloadDestination
 	errDownloadIdentityAmbiguous  = errors.New("download publication identity is ambiguous")
 	errDownloadDigestMismatch     = errors.New("download held file content does not match the observed stream")
 )
@@ -159,21 +163,59 @@ type downloadTarget struct {
 	preNativeCallback      func() error
 }
 
-func newDownloadTarget(destination string, force bool, operations downloadOperations) (*downloadTarget, error) {
+// PreflightDownloadDestination performs a read-only, point-in-time command
+// preflight. It creates no temporary and does not replace, remove, or protect
+// any path. The held-parent download target repeats authoritative no-follow,
+// race, and publication checks when a download actually starts.
+func PreflightDownloadDestination(destination string, force bool) error {
 	base := filepath.Base(destination)
-	if destination == "" || base == "." || base == ".." || base == string(filepath.Separator) {
-		return nil, errInvalidDownloadDestination
+	if destination == "" || strings.IndexByte(destination, 0) >= 0 || base == "." || base == ".." ||
+		base == string(filepath.Separator) || (len(destination) > 1 && os.IsPathSeparator(destination[len(destination)-1])) {
+		return ErrInvalidDownloadDestination
 	}
 	absolute, err := filepath.Abs(destination)
 	if err != nil {
+		return ErrInvalidDownloadDestination
+	}
+	parentInfo, err := os.Lstat(filepath.Dir(absolute))
+	if err != nil {
+		return err
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
+		return errors.New("download destination parent is not a directory")
+	}
+	info, err := os.Lstat(absolute)
+	if err == nil {
+		if info.IsDir() {
+			return ErrInvalidDownloadDestination
+		}
+		if !force {
+			return os.ErrExist
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func newDownloadTarget(destination string, force bool, operations downloadOperations) (*downloadTarget, error) {
+	if err := PreflightDownloadDestination(destination, force); err != nil {
 		return nil, err
 	}
+	absolute, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, ErrInvalidDownloadDestination
+	}
+	// Repeat the destination observation immediately before holding the parent.
+	// The held publication object remains authoritative for all later races.
 	if info, statErr := os.Lstat(absolute); statErr == nil {
 		if !force {
 			return nil, os.ErrExist
 		}
 		if info.IsDir() {
-			return nil, errInvalidDownloadDestination
+			return nil, ErrInvalidDownloadDestination
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, statErr
