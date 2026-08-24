@@ -33,7 +33,9 @@ artisan --json --server "$TRUSTED_SERVER" roast show "$ROAST_UUID"
 
 Require a current parsed revision. Record its positive `REVISION_NUMBER`, lowercase `REVISION_SHA256`, and temperature unit.
 
-Create one new random private temporary directory with mode 0700 using the host's secure temporary-directory primitive. Create every chart, profile, and review file as a new descendant with no-follow and no-clobber creation. Never use a predictable, pre-existing, human-supplied, or server-supplied path as temporary storage. A path becomes owned only after its creation succeeds. Never add `--force` to a download.
+Create one new random private temporary directory with mode 0700 using the host's secure temporary-directory primitive. At creation, open and retain a no-follow directory handle, record its stable directory identity from that handle (device/inode, file ID, or the platform equivalent), and retain a no-follow handle to its parent plus the private directory's single relative name. If those identities and handles cannot be established, stop before downloading.
+
+Create every chart, profile, and review file as a new descendant with no-follow and no-clobber creation through the retained directory handle. Never use a predictable, pre-existing, human-supplied, or server-supplied path as temporary storage. A child becomes owned only after its creation succeeds; then record its single relative name and stable identity. Reject child names containing separators, `.` or `..`. Never add `--force` to a download.
 
 ```sh
 artisan --json --server "$TRUSTED_SERVER" roast chart download "$ROAST_UUID" "$CHART_FILE"
@@ -102,7 +104,9 @@ A replay is success. Report comment UUID, revision, template, author, and earlie
 
 On `roast_revision_changed`, clean the stale owned descendants, refetch, and restart once. Stop on a second stale result. Do not improvise another retry or template.
 
-On success, replay, deleted replay, failure, interruption, or restart, remove only successfully created descendants beneath the private temporary directory, then remove that directory if its creation succeeded. Never remove any other path.
+On success, replay, deleted replay, failure, interruption, or restart, clean through the retained no-follow directory handle. Remove only successfully created descendants. First revalidate that the handle has the recorded identity. Before each removal, revalidate the directory identity and the recorded child identity, then use descriptor- or handle-relative deletion for only recorded successfully created relative child names. Never run `rm -f "$WORK_DIR/..."` and never use a `$WORK_DIR/...` pathname deletion. Never use recursive cleanup. An `lstat` or other pathname check does not make later pathname cleanup safe after path substitution.
+
+Remove the private directory itself only by its recorded relative name through the retained, revalidated parent-directory handle, after proving that name still identifies the recorded private directory and that it is empty. If a handle must be reopened, use a retained/reopened no-follow directory handle: reopen it relative to the retained parent handle and accept it only when its identity equals the recorded identity. If directory or child identity, the proper retained/reopened handle, or descriptor-relative cleanup cannot be proven, do not pathname-delete anything: stop and report the private residue. If an ancestor or `$WORK_DIR` pathname was swapped, renamed, or replaced by a symlink, never traverse the substituted path and never delete through it.
 
 ## Mutation boundary
 

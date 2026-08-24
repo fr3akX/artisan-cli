@@ -1,11 +1,17 @@
 package skill
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type roastReviewPressureFixture struct {
@@ -27,8 +33,8 @@ func TestRoastReviewPressureScenariosV1CoverReviewThreats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fixture roastReviewPressureFixture
-	if err := json.Unmarshal(contents, &fixture); err != nil {
+	fixture, err := decodeRoastReviewPressureFixture(contents)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if fixture.Version != 1 || fixture.Skill != "artisan-roast-review" {
@@ -56,6 +62,7 @@ func TestRoastReviewPressureScenariosV1CoverReviewThreats(t *testing.T) {
 	sort.Strings(covered)
 	covered = compactStrings(covered)
 	want := []string{
+		"ancestor-swap-cleanup",
 		"deleted-replay",
 		"injected-metadata",
 		"production-mutation",
@@ -69,6 +76,244 @@ func TestRoastReviewPressureScenariosV1CoverReviewThreats(t *testing.T) {
 	if !reflect.DeepEqual(covered, want) {
 		t.Fatalf("scenario coverage = %q, want %q", covered, want)
 	}
+}
+
+func TestDecodeRoastReviewPressureFixtureRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
+	valid := `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "duplicate root key", payload: `{"version":1,"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "duplicate nested key", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","id":"two","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "unknown root field", payload: `{"version":1,"skill":"artisan-roast-review","unexpected":true,"scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "case-variant root field", payload: `{"Version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "unknown nested field", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."],"unexpected":true}]}`},
+		{name: "case-variant nested field", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"ID":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "multiple documents", payload: valid + ` {"version":1,"skill":"artisan-roast-review","scenarios":[]}`},
+		{name: "missing version", payload: `{"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "unsupported version", payload: `{"version":2,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "empty scenarios", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[]}`},
+		{name: "empty required string", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"","pressures":["authority"],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+		{name: "empty required list", payload: `{"version":1,"skill":"artisan-roast-review","scenarios":[{"id":"one","pressures":[],"covers":["cleanup"],"prompt":"Choose and act.","expected_behavior":["Stop safely."]}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeRoastReviewPressureFixture([]byte(test.payload)); err == nil {
+				t.Fatal("accepted invalid pressure fixture")
+			}
+		})
+	}
+
+	oversized := strings.Replace(valid, "Choose and act.", strings.Repeat("x", 64<<10), 1)
+	if _, err := decodeRoastReviewPressureFixture([]byte(oversized)); err == nil {
+		t.Fatal("accepted oversized pressure fixture")
+	}
+
+	tooManyScenarios := roastReviewPressureFixture{Version: 1, Skill: "artisan-roast-review"}
+	for index := 0; index < 33; index++ {
+		tooManyScenarios.Scenarios = append(tooManyScenarios.Scenarios, roastReviewPressureScenario{
+			ID: fmt.Sprintf("scenario-%d", index), Pressures: []string{"authority"}, Covers: []string{"cleanup"},
+			Prompt: "Choose and act.", ExpectedBehavior: []string{"Stop safely."},
+		})
+	}
+	encoded, err := json.Marshal(tooManyScenarios)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeRoastReviewPressureFixture(encoded); err == nil {
+		t.Fatal("accepted too many pressure scenarios")
+	}
+}
+
+// decodeRoastReviewPressureFixture is intentionally kept beside its only
+// consumer: this versioned fixture is a development attestation, not runtime
+// input.
+func decodeRoastReviewPressureFixture(contents []byte) (roastReviewPressureFixture, error) {
+	const maxFixtureBytes = 64 << 10
+	if len(contents) == 0 || len(contents) > maxFixtureBytes || !utf8.Valid(contents) {
+		return roastReviewPressureFixture{}, errors.New("pressure fixture must be nonempty bounded UTF-8")
+	}
+	if err := rejectDuplicateFixtureJSONKeys(contents); err != nil {
+		return roastReviewPressureFixture{}, err
+	}
+	if err := requireExactFixtureJSONFields(contents); err != nil {
+		return roastReviewPressureFixture{}, err
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	var fixture roastReviewPressureFixture
+	if err := decoder.Decode(&fixture); err != nil {
+		return roastReviewPressureFixture{}, fmt.Errorf("decode pressure fixture: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return roastReviewPressureFixture{}, errors.New("pressure fixture contains multiple JSON documents")
+		}
+		return roastReviewPressureFixture{}, fmt.Errorf("decode pressure fixture trailer: %w", err)
+	}
+	if err := validateRoastReviewPressureFixture(fixture); err != nil {
+		return roastReviewPressureFixture{}, err
+	}
+	return fixture, nil
+}
+
+func requireExactFixtureJSONFields(contents []byte) error {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &root); err != nil {
+		return fmt.Errorf("decode pressure fixture fields: %w", err)
+	}
+	if err := requireExactFixtureFields("fixture", root, "version", "skill", "scenarios"); err != nil {
+		return err
+	}
+	var scenarios []map[string]json.RawMessage
+	if err := json.Unmarshal(root["scenarios"], &scenarios); err != nil {
+		return fmt.Errorf("decode pressure scenario fields: %w", err)
+	}
+	for index, scenario := range scenarios {
+		if err := requireExactFixtureFields(fmt.Sprintf("scenario %d", index), scenario,
+			"id", "pressures", "covers", "prompt", "expected_behavior"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireExactFixtureFields(context string, fields map[string]json.RawMessage, expected ...string) error {
+	if len(fields) != len(expected) {
+		return fmt.Errorf("%s has missing or unknown fields", context)
+	}
+	for _, name := range expected {
+		if _, ok := fields[name]; !ok {
+			return fmt.Errorf("%s is missing exact field %q", context, name)
+		}
+	}
+	return nil
+}
+
+func validateRoastReviewPressureFixture(fixture roastReviewPressureFixture) error {
+	const (
+		maxScenarios        = 32
+		maxListValues       = 32
+		maxIDCodePoints     = 128
+		maxLabelCodePoints  = 128
+		maxPromptCodePoints = 8192
+		maxRubricCodePoints = 2048
+	)
+	if fixture.Version != 1 || fixture.Skill != "artisan-roast-review" {
+		return fmt.Errorf("unsupported pressure fixture identity: version %d, skill %q", fixture.Version, fixture.Skill)
+	}
+	if len(fixture.Scenarios) == 0 || len(fixture.Scenarios) > maxScenarios {
+		return fmt.Errorf("pressure fixture scenario count %d is outside bounds", len(fixture.Scenarios))
+	}
+	ids := make(map[string]struct{}, len(fixture.Scenarios))
+	for index, scenario := range fixture.Scenarios {
+		if !boundedRequiredFixtureString(scenario.ID, maxIDCodePoints) || !boundedRequiredFixtureString(scenario.Prompt, maxPromptCodePoints) {
+			return fmt.Errorf("pressure scenario %d has an invalid id or prompt", index)
+		}
+		if _, duplicate := ids[scenario.ID]; duplicate {
+			return fmt.Errorf("duplicate pressure scenario id %q", scenario.ID)
+		}
+		ids[scenario.ID] = struct{}{}
+		if err := validateFixtureStringList("pressures", scenario.Pressures, maxListValues, maxLabelCodePoints); err != nil {
+			return fmt.Errorf("pressure scenario %q: %w", scenario.ID, err)
+		}
+		if err := validateFixtureStringList("covers", scenario.Covers, maxListValues, maxLabelCodePoints); err != nil {
+			return fmt.Errorf("pressure scenario %q: %w", scenario.ID, err)
+		}
+		if err := validateFixtureStringList("expected_behavior", scenario.ExpectedBehavior, maxListValues, maxRubricCodePoints); err != nil {
+			return fmt.Errorf("pressure scenario %q: %w", scenario.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateFixtureStringList(name string, values []string, maximum, maxCodePoints int) error {
+	if len(values) == 0 || len(values) > maximum {
+		return fmt.Errorf("%s count %d is outside bounds", name, len(values))
+	}
+	for _, value := range values {
+		if !boundedRequiredFixtureString(value, maxCodePoints) {
+			return fmt.Errorf("%s contains an empty or oversized value", name)
+		}
+	}
+	return nil
+}
+
+func boundedRequiredFixtureString(value string, maxCodePoints int) bool {
+	return strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maxCodePoints
+}
+
+func rejectDuplicateFixtureJSONKeys(contents []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.UseNumber()
+	if err := consumeUniqueFixtureJSONValue(decoder); err != nil {
+		return fmt.Errorf("invalid pressure fixture JSON: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("pressure fixture contains multiple JSON documents")
+		}
+		return fmt.Errorf("invalid pressure fixture JSON trailer: %w", err)
+	}
+	return nil
+}
+
+func consumeUniqueFixtureJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if _, duplicate := keys[key]; duplicate {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			keys[key] = struct{}{}
+			if err := consumeUniqueFixtureJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return errors.New("object has an invalid closing delimiter")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueFixtureJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return errors.New("array has an invalid closing delimiter")
+		}
+	default:
+		return fmt.Errorf("unexpected delimiter %q", delimiter)
+	}
+	return nil
 }
 
 func compactStrings(values []string) []string {

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestSkillContentMatchesCanonicalSource(t *testing.T) {
@@ -143,6 +144,16 @@ func TestRoastReviewSkillContract(t *testing.T) {
 		"current parsed revision",
 		"one new random private temporary directory with mode 0700",
 		"no-follow and no-clobber creation",
+		"record its stable directory identity",
+		"retained no-follow directory handle",
+		"retained/reopened no-follow directory handle",
+		"revalidate that the handle has the recorded identity",
+		"descriptor- or handle-relative deletion",
+		"only recorded successfully created relative child names",
+		"do not pathname-delete anything",
+		"report the private residue",
+		"Never run `rm -f \"$WORK_DIR/...\"`",
+		"Never use recursive cleanup",
 		"predictable, pre-existing, human-supplied, or server-supplied path",
 		"Never add `--force`",
 		"only successfully created descendants",
@@ -209,9 +220,8 @@ func TestRoastReviewSkillContract(t *testing.T) {
 	}
 }
 
-func TestRoastReviewSkillUsesOnlyExactAutomatedCommands(t *testing.T) {
-	commands := automatedArtisanCommands(string(readRoastReviewSkill(t)))
-	want := []string{
+func canonicalRoastReviewCommands() []string {
+	return []string{
 		"artisan version",
 		`artisan --json --server "$TRUSTED_SERVER" auth status`,
 		`artisan --json --server "$TRUSTED_SERVER" roast list --search "$SEARCH" --limit 100`,
@@ -220,33 +230,59 @@ func TestRoastReviewSkillUsesOnlyExactAutomatedCommands(t *testing.T) {
 		`artisan --json --server "$TRUSTED_SERVER" roast profile download "$ROAST_UUID" "$REVISION_NUMBER" "$PROFILE_FILE"`,
 		`artisan --json --server "$TRUSTED_SERVER" roast review post "$ROAST_UUID" --revision-sha256 "$REVISION_SHA256" --template-version artisan-roast-review-v1 --body-file "$REVIEW_FILE"`,
 	}
+}
+
+func TestRoastReviewSkillUsesOnlyExactAutomatedCommands(t *testing.T) {
+	commands := automatedArtisanCommands(string(readRoastReviewSkill(t)))
+	want := canonicalRoastReviewCommands()
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("automated Artisan commands =\n%q\nwant\n%q", commands, want)
 	}
 }
 
-func TestAutomatedArtisanCommandDetectionRejectsWrappersVariablesCaseAndInlineCommands(t *testing.T) {
-	text := "```sh\n" +
-		"env MODE=fast artisan roast show id\n" +
-		"env -i MODE=fast artisan roast show id\n" +
-		"command ARTISAN roast show id\n" +
-		"command -p ARTISAN roast show id\n" +
-		"$ARTISAN roast show id\n" +
-		"${ARTISAN} roast show id\n" +
-		"```\n" +
-		"Run `ArTiSaN roast show id` now.\n"
-	got := automatedArtisanCommands(text)
-	want := []string{
-		"env MODE=fast artisan roast show id",
-		"env -i MODE=fast artisan roast show id",
-		"command ARTISAN roast show id",
-		"command -p ARTISAN roast show id",
-		"$ARTISAN roast show id",
-		"${ARTISAN} roast show id",
-		"ArTiSaN roast show id",
+func TestRoastReviewSkillCommandAllowlistRejectsEveryWrappedMutation(t *testing.T) {
+	mutations := []struct {
+		name    string
+		command string
+	}{
+		{name: "sudo", command: "sudo artisan roast show id"},
+		{name: "timeout", command: "timeout 1 artisan roast show id"},
+		{name: "env", command: "env MODE=fast artisan roast show id"},
+		{name: "command", command: "command -p ARTISAN roast show id"},
+		{name: "assignment", command: "MODE=fast artisan roast show id"},
+		{name: "absolute path", command: "/usr/local/bin/artisan roast show id"},
+		{name: "relative path", command: "./artisan roast show id"},
+		{name: "sh c", command: "sh -c 'artisan roast show id'"},
+		{name: "if", command: "if artisan roast show id; then :; fi"},
+		{name: "and", command: "true && artisan roast show id"},
+		{name: "semicolon", command: "true; artisan roast show id"},
+		{name: "subshell", command: "(artisan roast show id)"},
+		{name: "dollar variable", command: "$ARTISAN roast show id"},
+		{name: "braced variable", command: "${ARTISAN} roast show id"},
+		{name: "case insensitive", command: "ArTiSaN roast show id"},
 	}
+	canonical := string(readRoastReviewSkill(t))
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutated := canonical + "\n```sh\n" + mutation.command + "\n```\n"
+			commands := automatedArtisanCommands(mutated)
+			if reflect.DeepEqual(commands, canonicalRoastReviewCommands()) {
+				t.Fatalf("wrapped mutation was not detected: %q", mutation.command)
+			}
+			if got := commands[len(commands)-1]; got != mutation.command {
+				t.Fatalf("detected mutation = %q, want %q", got, mutation.command)
+			}
+		})
+	}
+}
+
+func TestAutomatedArtisanCommandDetectionAllowsOnlyExplicitNegatedAuthLoginProse(t *testing.T) {
+	text := "Never run `artisan auth login`. Do not run `ARTISAN auth login`.\n" +
+		"Run `artisan auth login` now.\n"
+	got := automatedArtisanCommands(text)
+	want := []string{"artisan auth login"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("detected commands = %q, want %q", got, want)
+		t.Fatalf("detected commands = %q, want only the non-negated command %q", got, want)
 	}
 }
 
@@ -274,20 +310,23 @@ func automatedArtisanCommands(text string) []string {
 		if inFence {
 			continue
 		}
-		for remainder := line; ; {
+		consumed, remainder := "", line
+		for {
 			start := strings.IndexByte(remainder, '`')
 			if start < 0 {
 				break
 			}
+			context := consumed + remainder[:start]
 			remainder = remainder[start+1:]
 			end := strings.IndexByte(remainder, '`')
 			if end < 0 {
 				break
 			}
 			inline := strings.TrimSpace(remainder[:end])
-			if shellLineInvokesArtisan(inline) {
+			if shellLineInvokesArtisan(inline) && !isExplicitNegatedAuthLoginProse(context, inline) {
 				commands = append(commands, inline)
 			}
+			consumed = context + "`" + remainder[:end] + "`"
 			remainder = remainder[end+1:]
 		}
 	}
@@ -295,25 +334,38 @@ func automatedArtisanCommands(text string) []string {
 }
 
 func shellLineInvokesArtisan(line string) bool {
-	fields := strings.Fields(line)
-	wrapped := false
-	for len(fields) > 0 {
-		field := fields[0]
-		lower := strings.ToLower(field)
-		switch {
-		case lower == "env" || lower == "command":
-			wrapped = true
-			fields = fields[1:]
-		case wrapped && strings.HasPrefix(field, "-"):
-			fields = fields[1:]
-		case strings.Contains(field, "=") && !strings.HasPrefix(field, "="):
-			fields = fields[1:]
-		default:
-			executable := strings.Trim(strings.TrimSpace(field), "\"'")
-			executable = strings.TrimPrefix(executable, "${")
-			executable = strings.TrimSuffix(executable, "}")
-			executable = strings.TrimPrefix(executable, "$")
-			return strings.EqualFold(executable, "artisan")
+	// This is intentionally conservative: any case-insensitive Artisan token in
+	// shell-shaped fenced or inline text invalidates the exact allowlist unless
+	// the complete line itself is one of the canonical commands. Splitting on
+	// shell operators and quotes catches wrappers, compounds, sh -c strings,
+	// assignments, command substitutions, and variables without pretending to
+	// be a complete shell parser.
+	tokens := strings.FieldsFunc(line, func(character rune) bool {
+		if unicode.IsSpace(character) {
+			return true
+		}
+		return strings.ContainsRune(";&|()'\"`=<>[]{}:,", character)
+	})
+	for _, token := range tokens {
+		token = strings.Trim(token, "$!~")
+		if separator := strings.LastIndexAny(token, `/\\`); separator >= 0 {
+			token = token[separator+1:]
+		}
+		if strings.EqualFold(token, "artisan") {
+			return true
+		}
+	}
+	return false
+}
+
+func isExplicitNegatedAuthLoginProse(context, inline string) bool {
+	if !strings.EqualFold(strings.Join(strings.Fields(inline), " "), "artisan auth login") {
+		return false
+	}
+	context = strings.ToLower(strings.TrimSpace(context))
+	for _, negation := range []string{"never run", "must never run", "do not run", "must not run", "don't run"} {
+		if strings.HasSuffix(context, negation) {
+			return true
 		}
 	}
 	return false

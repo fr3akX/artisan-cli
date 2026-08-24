@@ -146,6 +146,8 @@ func TestParseFrontmatterNameRequiresStrictSimpleTwoScalarDocument(t *testing.T)
 		{name: "non-trigger description", contents: "---\nname: artisan-inventory\ndescription: Testing helper.\n---\n"},
 		{name: "nested mapping description", contents: "---\nname: artisan-inventory\ndescription: Use when testing: hostile syntax.\n---\n"},
 		{name: "control in description", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\x00\n---\n"},
+		{name: "unicode line separator extra document", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\u2028...\u2028---\u2028hostile\n---\n"},
+		{name: "unicode paragraph separator extra document", contents: "---\nname: artisan-inventory\ndescription: Use when testing.\u2029...\u2029---\u2029hostile\n---\n"},
 		{name: "overlong description", contents: "---\nname: artisan-inventory\ndescription: " + longDescription + "\n---\n"},
 	}
 	for _, test := range tests {
