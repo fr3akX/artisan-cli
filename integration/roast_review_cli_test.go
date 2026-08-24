@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,8 +26,6 @@ import (
 )
 
 const reviewProfileFixtureSHA256 = "c7f4771917845c69dee2b1ae4788a37c02e43cdf5614f2afc93faddb57681aa7"
-
-var canonicalDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func TestCLIRunnerOptionalPaceIsBoundedAndNotResponseDriven(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -85,6 +85,126 @@ func TestRoastReviewInspectorContract(t *testing.T) {
 			t.Errorf("review inspector contains forbidden output material %q", forbidden)
 		}
 	}
+}
+
+func TestIndependentChartRepresentationIsBoundedAndAuthenticated(t *testing.T) {
+	compressed := gzipBytes(t, []byte(`{"schema_version":1}`))
+	token := "independent-chart-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/roasts/"+strings.Repeat("a", 32)+"/chart" {
+			t.Errorf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer "+token || request.Header.Get("Accept-Encoding") != "gzip" {
+			t.Errorf("request headers = %v", request.Header)
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(compressed)
+	}))
+	defer server.Close()
+
+	got, err := readBoundedChartRepresentation(server.URL, token, strings.Repeat("a", 32))
+	if err != nil || !bytes.Equal(got, compressed) {
+		t.Fatalf("independent chart representation: bytes=%d err=%v", len(got), err)
+	}
+
+	oversized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", fmt.Sprint(maxIndependentChartRepresentationBytes+1))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer oversized.Close()
+	if _, err := readBoundedChartRepresentation(oversized.URL, token, strings.Repeat("a", 32)); err == nil {
+		t.Fatal("oversized independent chart representation was accepted")
+	}
+}
+
+func TestPrivateFileSnapshotDetectsNoClobberChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "download")
+	original := []byte("private download")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := snapshotPrivateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := privateFileMatchesSnapshot(path, snapshot); err != nil {
+		t.Fatalf("unchanged file rejected: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("changed download"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := privateFileMatchesSnapshot(path, snapshot); err == nil {
+		t.Fatal("changed bytes were accepted")
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := privateFileMatchesSnapshot(path, snapshot); err == nil {
+			t.Fatal("changed private mode was accepted")
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	moved := path + ".moved"
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := privateFileMatchesSnapshot(path, snapshot); err == nil {
+		t.Fatal("replacement file identity was accepted")
+	}
+}
+
+func TestRevokedCredentialCheckIsBoundedAndAuthenticated(t *testing.T) {
+	token := "revoked-check-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/auth/me" {
+			t.Errorf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_credentials"}}`)
+	}))
+	defer server.Close()
+
+	if err := revokedCredentialRejected(newBrowserClient(nil), server.URL, token); err != nil {
+		t.Fatal(err)
+	}
+
+	oversized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(maxBrowserJSONBytes+1))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer oversized.Close()
+	if err := revokedCredentialRejected(newBrowserClient(nil), oversized.URL, token); err == nil {
+		t.Fatal("oversized revoked-credential response was accepted")
+	}
+}
+
+func gzipBytes(t *testing.T, contents []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(contents); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
 }
 
 func TestReviewProfileFixtureContract(t *testing.T) {
@@ -235,9 +355,9 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	adminHTTP, csrf, adminToken, adminCredentialID := issueCredential(t, config, config.adminEmail, config.adminPassword)
 	adminRunner.forbiddenToken = adminToken
 	memberRunner.forbiddenToken = config.reviewMemberToken
-	defer revokeCredential(t, adminHTTP, config.baseURL, csrf, adminCredentialID, adminToken)
-	defer revokeCredential(t, adminHTTP, config.baseURL, csrf, config.reviewMemberCredential, config.reviewMemberToken)
-	defer revokeCredential(t, adminHTTP, config.baseURL, csrf, config.foreignCredential, config.foreignToken)
+	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, adminCredentialID, adminToken)
+	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, config.reviewMemberCredential, config.reviewMemberToken)
+	defer revokeCredentialAndAssertRejected(t, adminHTTP, config.baseURL, csrf, config.foreignCredential, config.foreignToken)
 	defer func() {
 		for _, check := range []struct {
 			token  string
@@ -278,14 +398,15 @@ func TestRoastReviewCLIAgainstArtisanServer(t *testing.T) {
 	uploadRoastRevision(t, config, config.reviewMemberToken, roastUUID, revisionOne, "review-"+runID+"-revision-1")
 	for _, role := range []struct {
 		name   string
+		token  string
 		runner *cliRunner
 		paths  []string
 	}{
-		{"admin", adminRunner, adminPaths},
-		{"member", memberRunner, memberPaths},
+		{"admin", adminToken, adminRunner, adminPaths},
+		{"member", config.reviewMemberToken, memberRunner, memberPaths},
 	} {
 		t.Run(role.name+" read and download", func(t *testing.T) {
-			assertRoastReadsAndDownloads(t, role.runner, role.paths[len(role.paths)-1], role.name, roastUUID, title, revisionOne, revisionOneSHA)
+			assertRoastReadsAndDownloads(t, role.runner, role.paths[len(role.paths)-1], role.name, config.baseURL, role.token, roastUUID, title, revisionOne, revisionOneSHA)
 		})
 	}
 
@@ -432,6 +553,81 @@ func uploadRoastRevision(t *testing.T, config liveConfig, token, roastUUID strin
 	return result.Revision
 }
 
+const maxIndependentChartRepresentationBytes = int64(64 << 20)
+
+func readBoundedChartRepresentation(baseURL, token, roastUUID string) ([]byte, error) {
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/roasts/"+roastUUID+"/chart", nil)
+	if err != nil {
+		return nil, errors.New("construct independent chart request")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	// An explicit Accept-Encoding preserves the compressed transfer bytes.
+	request.Header.Set("Accept-Encoding", "gzip")
+	response, err := newBrowserClient(nil).Do(request)
+	if err != nil {
+		return nil, errors.New("independent chart request failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("independent chart request returned HTTP %d", response.StatusCode)
+	}
+	if encodings := response.Header.Values("Content-Encoding"); len(encodings) != 1 || encodings[0] != "gzip" {
+		return nil, errors.New("independent chart response was not one gzip representation")
+	}
+	if response.ContentLength > maxIndependentChartRepresentationBytes {
+		return nil, errors.New("independent chart response exceeded its bound")
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, maxIndependentChartRepresentationBytes+1))
+	if err != nil {
+		return nil, errors.New("independent chart response could not be read")
+	}
+	if int64(len(contents)) > maxIndependentChartRepresentationBytes {
+		return nil, errors.New("independent chart response exceeded its bound")
+	}
+	if token != "" && bytes.Contains(contents, []byte(token)) {
+		return nil, errBrowserTokenExposure
+	}
+	return contents, nil
+}
+
+func revokedCredentialRejected(client *http.Client, baseURL, token string) error {
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/auth/me", nil)
+	if err != nil {
+		return errors.New("construct revoked credential check")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		return errors.New("revoked credential check failed")
+	}
+	defer response.Body.Close()
+	if response.ContentLength > maxBrowserJSONBytes {
+		return errors.New("revoked credential response exceeded its bound")
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, maxBrowserJSONBytes+1))
+	if err != nil {
+		return errors.New("revoked credential response could not be read")
+	}
+	if len(contents) > maxBrowserJSONBytes {
+		return errors.New("revoked credential response exceeded its bound")
+	}
+	if token != "" && bytes.Contains(contents, []byte(token)) {
+		return errBrowserTokenExposure
+	}
+	if response.StatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("revoked credential was not rejected: HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func revokeCredentialAndAssertRejected(t *testing.T, client *http.Client, baseURL, csrf, credentialID, token string) {
+	t.Helper()
+	revokeCredential(t, client, baseURL, csrf, credentialID, token)
+	if err := revokedCredentialRejected(newBrowserClient(nil), baseURL, token); err != nil {
+		t.Error(err)
+	}
+}
+
 func doBoundedBearerRequest(t *testing.T, request *http.Request, forbiddenToken string, expectedStatus int) []byte {
 	t.Helper()
 	client := newBrowserClient(nil)
@@ -453,7 +649,7 @@ func doBoundedBearerRequest(t *testing.T, request *http.Request, forbiddenToken 
 	return contents
 }
 
-func assertRoastReadsAndDownloads(t *testing.T, runner *cliRunner, runDirectory, role, roastUUID, title string, expectedProfile []byte, expectedSHA string) {
+func assertRoastReadsAndDownloads(t *testing.T, runner *cliRunner, runDirectory, role, baseURL, token, roastUUID, title string, expectedProfile []byte, expectedSHA string) {
 	t.Helper()
 	var page integrationRoastPage
 	runner.runJSON(t, "", &page, "roast", "list", "--search", title)
@@ -483,12 +679,21 @@ func assertRoastReadsAndDownloads(t *testing.T, runner *cliRunner, runDirectory,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if chart.Path != chartPath || chart.RoastUUID != roastUUID || chart.RevisionNumber != 1 || chart.RevisionSHA256 != expectedSHA || chart.ChartSchemaVersion != 1 || chart.FileBytes != int64(len(chartBytes)) || chart.FileSHA256 != digestHex(chartBytes) || !canonicalDigest.MatchString(chart.CompressedSHA256) || chart.CompressedBytes < 1 {
+	compressedChart, err := readBoundedChartRepresentation(baseURL, token, roastUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chart.Path != chartPath || chart.RoastUUID != roastUUID || chart.RevisionNumber != 1 || chart.RevisionSHA256 != expectedSHA || chart.ChartSchemaVersion != 1 || chart.FileBytes != int64(len(chartBytes)) || chart.FileSHA256 != digestHex(chartBytes) || chart.CompressedBytes != int64(len(compressedChart)) || chart.CompressedSHA256 != digestHex(compressedChart) {
 		t.Fatalf("%s chart result = %+v", role, chart)
 	}
 	assertChartCoreCoverage(t, chartBytes, chart.ParserVersion)
 	assertPrivateRegularFile(t, chartPath)
+	chartSnapshot, err := snapshotPrivateFile(chartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runCLIError(t, runner, 3, "local_storage_error", 0, "roast", "chart", "download", roastUUID, chartPath)
+	assertPrivateFileMatchesSnapshot(t, chartPath, chartSnapshot)
 
 	profilePath := filepath.Join(runDirectory, role+"-profile.alog")
 	var profile integrationProfileDownload
@@ -501,7 +706,12 @@ func assertRoastReadsAndDownloads(t *testing.T, runner *cliRunner, runDirectory,
 		t.Fatalf("%s profile download identity mismatch", role)
 	}
 	assertPrivateRegularFile(t, profilePath)
+	profileSnapshot, err := snapshotPrivateFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runCLIError(t, runner, 3, "local_storage_error", 0, "roast", "profile", "download", roastUUID, "1", profilePath)
+	assertPrivateFileMatchesSnapshot(t, profilePath, profileSnapshot)
 }
 
 func assertChartCoreCoverage(t *testing.T, contents []byte, parserVersion string) {
@@ -531,14 +741,68 @@ func assertChartCoreCoverage(t *testing.T, contents []byte, parserVersion string
 	}
 }
 
-func assertPrivateRegularFile(t *testing.T, path string) {
-	t.Helper()
+type privateFileSnapshot struct {
+	contents []byte
+	info     os.FileInfo
+	mode     os.FileMode
+}
+
+func snapshotPrivateFile(path string) (privateFileSnapshot, error) {
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("download is not a regular file: %v", err)
+	if err != nil {
+		return privateFileSnapshot{}, fmt.Errorf("download could not be inspected: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return privateFileSnapshot{}, errors.New("download is not a regular file")
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("download mode = %04o, want 0600", info.Mode().Perm())
+		return privateFileSnapshot{}, fmt.Errorf("download mode = %04o, want 0600", info.Mode().Perm())
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return privateFileSnapshot{}, errors.New("download contents could not be snapshotted")
+	}
+	return privateFileSnapshot{contents: contents, info: info, mode: info.Mode()}, nil
+}
+
+func privateFileMatchesSnapshot(path string, snapshot privateFileSnapshot) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("download could not be reinspected: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("download is not the snapshotted regular file")
+	}
+	if !os.SameFile(snapshot.info, info) {
+		return errors.New("download file identity changed")
+	}
+	if info.Mode() != snapshot.mode {
+		return fmt.Errorf("download mode changed from %s to %s", snapshot.mode, info.Mode())
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("download mode = %04o, want 0600", info.Mode().Perm())
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("download contents could not be compared")
+	}
+	if !bytes.Equal(contents, snapshot.contents) {
+		return errors.New("download contents changed")
+	}
+	return nil
+}
+
+func assertPrivateFileMatchesSnapshot(t *testing.T, path string, snapshot privateFileSnapshot) {
+	t.Helper()
+	if err := privateFileMatchesSnapshot(path, snapshot); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPrivateRegularFile(t *testing.T, path string) {
+	t.Helper()
+	if _, err := snapshotPrivateFile(path); err != nil {
+		t.Fatal(err)
 	}
 }
 
