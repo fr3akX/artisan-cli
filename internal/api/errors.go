@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -33,16 +34,63 @@ type apiErrorBody struct {
 	Details json.RawMessage `json:"details"`
 }
 
-func isUnstructuredRouteNotFound(body []byte) bool {
-	if len(bytes.TrimSpace(body)) == 0 {
+func isUnstructuredRouteNotFound(body []byte, header http.Header) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
 		return true
 	}
-	var object map[string]json.RawMessage
-	if err := decodeOneJSON(body, &object); err != nil || object == nil {
+	if exactFrameworkNotFound(trimmed) {
+		return trustedJSONContentType(header)
+	}
+	if json.Valid(trimmed) || bytes.ContainsAny(trimmed[:1], `{["`) || !validRouteNotFoundText(trimmed) {
 		return false
 	}
-	_, hasError := object["error"]
-	return !hasError
+	return trustedRouteNotFoundTextContentType(header)
+}
+
+func validRouteNotFoundText(body []byte) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
+	for _, character := range string(body) {
+		if (character < 0x20 && character != '\t' && character != '\n' && character != '\r') || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func trustedRouteNotFoundTextContentType(header http.Header) bool {
+	values := header.Values("Content-Type")
+	if len(values) != 1 || strings.Contains(values[0], ",") {
+		return false
+	}
+	mediaType, parameters, err := mime.ParseMediaType(values[0])
+	if err != nil || mediaType != "text/plain" && mediaType != "text/html" {
+		return false
+	}
+	for name, value := range parameters {
+		if !strings.EqualFold(name, "charset") || !strings.EqualFold(value, "utf-8") {
+			return false
+		}
+	}
+	return true
+}
+
+func exactFrameworkNotFound(body []byte) bool {
+	if rejectDuplicateJSONKeys(body) != nil {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if decodeOneJSON(body, &object) != nil || len(object) != 1 {
+		return false
+	}
+	raw, exists := object["detail"]
+	if !exists {
+		return false
+	}
+	var detail string
+	return decodeOneJSON(raw, &detail) == nil && detail == "Not Found"
 }
 
 func decodeAPIError(status int, body []byte, forbiddenValues ...string) *output.Error {

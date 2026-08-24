@@ -16,6 +16,29 @@ import (
 	"github.com/fr3akX/artisan-cli/internal/release"
 )
 
+func TestClientUnrelatedShortIdempotencyKeyDoesNotBecomeAResponseSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Inventory-Result", "available")
+		_, _ = io.WriteString(w, `{"status":"available"}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "short-key-control-token", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Status string `json:"status"`
+	}
+	failure := client.Do(context.Background(), Request{
+		Method: http.MethodPost, Path: "/unrelated-mutation", IdempotencyKey: "a",
+	}, &response)
+	if failure != nil || response.Status != "available" {
+		t.Fatalf("response = %#v, failure = %#v", response, failure)
+	}
+}
+
 func TestClientResponseValidatorReceivesClonedHeadersBeforeSuccessDecode(t *testing.T) {
 	const token = "response-validator-secret-token"
 	const serverURL = "http://127.0.0.1"

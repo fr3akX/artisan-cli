@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,15 +200,163 @@ func TestPostRoastReviewRetriesExactBodyAndKeyAndAcceptsReplay(t *testing.T) {
 	}
 }
 
-func TestPostRoastReviewRejectsStaleOrInvalidInputBeforePost(t *testing.T) {
-	changedSHA := strings.Repeat("e", 64)
+func TestPostRoastReviewReplaysCompletedOldRevisionAfterCurrentAdvances(t *testing.T) {
+	newSHA := strings.Repeat("e", 64)
+	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
+	var revisionReads, posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/roasts/" + roastUUID:
+			writeRoastJSON(w, detail)
+		case "GET /api/v1/roasts/" + roastUUID + "/revisions":
+			revisionReads.Add(1)
+			writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":null}`)
+		case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
+			posts.Add(1)
+			writeReviewResponse(w, true, "Earlier completed review")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL, "old-replay-secret", time.Second)
+	result, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+		Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+	})
+	if failure != nil || !result.IdempotentReplay || result.Comment.Body == nil || *result.Comment.Body != "Earlier completed review" {
+		t.Fatalf("result = %#v, failure = %+v", result, failure)
+	}
+	if revisionReads.Load() != 1 || posts.Load() != 1 {
+		t.Fatalf("revision reads = %d, posts = %d", revisionReads.Load(), posts.Load())
+	}
+}
+
+func TestPostRoastReviewPostsVerifiedOldUnclaimedSlotAndMapsRevisionConflict(t *testing.T) {
+	newSHA := strings.Repeat("e", 64)
+	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/roasts/" + roastUUID:
+			writeRoastJSON(w, detail)
+		case "GET /api/v1/roasts/" + roastUUID + "/revisions":
+			writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":null}`)
+		case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
+			posts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":{"code":"roast_revision_changed","message":"stale"}}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL, "old-unclaimed-secret", time.Second)
+	_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+		Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+	})
+	if failure == nil || failure.Code != "roast_revision_changed" || failure.HTTPStatus == nil || *failure.HTTPStatus != http.StatusConflict || posts.Load() != 1 {
+		t.Fatalf("failure = %+v, posts = %d", failure, posts.Load())
+	}
+}
+
+func TestPostRoastReviewRejectsUnknownMismatchedOrNonparsedOldRevisionBeforePost(t *testing.T) {
+	newSHA := strings.Repeat("e", 64)
+	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
+	failedRevision := strings.Replace(validRoastRevisionJSON(), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1)
+	mismatchedRevision := strings.Replace(validRoastRevisionJSON(), roastSHA256, strings.Repeat("c", 64), 1)
+	thirdRevision := strings.Replace(validRoastRevisionJSON(), `"revision_number":1`, `"revision_number":3`, 1)
+	tests := []struct {
+		name      string
+		page      string
+		wantCode  string
+		wantReads int32
+	}{
+		{name: "unknown revision number", page: `{"items":[],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
+		{name: "revision SHA mismatch", page: `{"items":[` + mismatchedRevision + `],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
+		{name: "revision was not parsed", page: `{"items":[` + failedRevision + `],"next_cursor":null}`, wantCode: "roast_revision_changed", wantReads: 1},
+		{name: "repeated cursor is bounded", page: `{"items":[` + thirdRevision + `],"next_cursor":"same"}`, wantCode: "invalid_server_response", wantReads: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var revisionReads, posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /api/v1/roasts/" + roastUUID:
+					writeRoastJSON(w, detail)
+				case "GET /api/v1/roasts/" + roastUUID + "/revisions":
+					revisionReads.Add(1)
+					writeRoastJSON(w, test.page)
+				case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
+					posts.Add(1)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "old-invalid-secret", time.Second)
+			_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+				Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+			})
+			if failure == nil || failure.Code != test.wantCode || revisionReads.Load() != test.wantReads || posts.Load() != 0 {
+				t.Fatalf("failure = %+v, revision reads = %d, posts = %d", failure, revisionReads.Load(), posts.Load())
+			}
+		})
+	}
+}
+
+func TestPostRoastReviewUsesBoundedRevisionPaginationForOldSlots(t *testing.T) {
+	newSHA := strings.Repeat("e", 64)
+	detail := roastDetailWithCurrentRevision(t, 2, newSHA)
+	thirdRevision := strings.Replace(strings.Replace(validRoastRevisionJSON(), `"revision_number":1`, `"revision_number":3`, 1), roastSHA256, strings.Repeat("d", 64), 1)
+	var revisionReads, posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/roasts/" + roastUUID:
+			writeRoastJSON(w, detail)
+		case "GET /api/v1/roasts/" + roastUUID + "/revisions":
+			read := revisionReads.Add(1)
+			if r.URL.Query().Get("limit") != "100" {
+				t.Fatalf("revision limit = %q", r.URL.Query().Get("limit"))
+			}
+			if read == 1 {
+				if r.URL.Query().Get("cursor") != "" {
+					t.Fatalf("first cursor = %q", r.URL.Query().Get("cursor"))
+				}
+				writeRoastJSON(w, `{"items":[`+thirdRevision+`],"next_cursor":"next"}`)
+				return
+			}
+			if read != 2 || r.URL.Query().Get("cursor") != "next" {
+				t.Fatalf("revision request %d cursor = %q", read, r.URL.Query().Get("cursor"))
+			}
+			writeRoastJSON(w, `{"items":[`+validRoastRevisionJSON()+`],"next_cursor":null}`)
+		case "POST /api/v1/roasts/" + roastUUID + "/comments/ai-review":
+			posts.Add(1)
+			writeReviewResponse(w, true, validReviewBody)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL, "bounded-old-secret", time.Second)
+	_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{
+		Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion,
+	})
+	if failure != nil || revisionReads.Load() != 2 || posts.Load() != 1 {
+		t.Fatalf("failure = %+v, revision reads = %d, posts = %d", failure, revisionReads.Load(), posts.Load())
+	}
+}
+
+func TestPostRoastReviewRejectsInvalidInputBeforePost(t *testing.T) {
 	tests := []struct {
 		name    string
 		detail  string
 		request RoastReviewRequest
 		code    string
 	}{
-		{name: "stale SHA", detail: validRoastDetailJSON(), request: RoastReviewRequest{Body: strings.Replace(validReviewBody, roastSHA256, changedSHA, 1), RevisionSHA256: changedSHA, TemplateVersion: ReviewTemplateVersion}, code: "roast_revision_changed"},
 		{name: "bad body marker", detail: validRoastDetailJSON(), request: RoastReviewRequest{Body: "wrong", RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion}, code: "invalid_review"},
 		{name: "bad template", detail: validRoastDetailJSON(), request: RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: "other"}, code: "invalid_review"},
 		{name: "not parsed", detail: strings.Replace(strings.Replace(validRoastDetailJSON(), `"state":"parsed"`, `"state":"parse_failed"`, 1), `"parse_state":"parsed"`, `"parse_state":"failed"`, 1), request: RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion}, code: "roast_revision_changed"},
@@ -277,18 +426,26 @@ func TestPostRoastReviewRequiresExactSecurityHeadersAndCoherentComment(t *testin
 
 func TestPostRoastReviewMapsAPIAndMissingEndpointErrors(t *testing.T) {
 	for _, test := range []struct {
-		name, code string
-		status     int
-		want       string
-		malformed  bool
+		name, code, body, contentType string
+		status                        int
+		want                          string
 	}{
 		{name: "stale", code: "roast_revision_changed", status: http.StatusConflict, want: "roast_revision_changed"},
 		{name: "conflict", code: "review_idempotency_conflict", status: http.StatusConflict, want: "review_idempotency_conflict"},
-		{name: "not found", code: "not_found", status: http.StatusNotFound, want: "not_found"},
+		{name: "structured entity not found", code: "not_found", status: http.StatusNotFound, want: "not_found"},
 		{name: "auth", code: "authentication_required", status: http.StatusUnauthorized, want: "authentication_required"},
 		{name: "permission", code: "permission_denied", status: http.StatusForbidden, want: "permission_denied"},
 		{name: "invalid review", code: "invalid_review", status: http.StatusUnprocessableEntity, want: "invalid_review"},
-		{name: "missing endpoint", status: http.StatusNotFound, want: "server_upgrade_required", malformed: true},
+		{name: "missing endpoint empty", status: http.StatusNotFound, body: "", want: "server_upgrade_required"},
+		{name: "missing endpoint plain text", status: http.StatusNotFound, body: "404 page not found", contentType: "text/plain", want: "server_upgrade_required"},
+		{name: "missing endpoint HTML", status: http.StatusNotFound, body: "<html><body>Not Found</body></html>", contentType: "text/html", want: "server_upgrade_required"},
+		{name: "plain text mislabeled as JSON", status: http.StatusNotFound, body: "404 page not found", contentType: "application/json", want: "invalid_server_response"},
+		{name: "framework detail not found", status: http.StatusNotFound, body: `{"detail":"Not Found"}`, contentType: "application/json", want: "server_upgrade_required"},
+		{name: "framework detail with extra field", status: http.StatusNotFound, body: `{"detail":"Not Found","extra":true}`, contentType: "application/json", want: "invalid_server_response"},
+		{name: "duplicate framework detail", status: http.StatusNotFound, body: `{"detail":"Not Found","detail":"Not Found"}`, contentType: "application/json", want: "invalid_server_response"},
+		{name: "malformed JSON looking", status: http.StatusNotFound, body: `{`, contentType: "application/json", want: "invalid_server_response"},
+		{name: "arbitrary JSON object", status: http.StatusNotFound, body: `{"message":"maintenance"}`, contentType: "application/json", want: "invalid_server_response"},
+		{name: "empty JSON object", status: http.StatusNotFound, body: `{}`, contentType: "application/json", want: "invalid_server_response"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,13 +453,17 @@ func TestPostRoastReviewMapsAPIAndMissingEndpointErrors(t *testing.T) {
 					writeRoastJSON(w, validRoastDetailJSON())
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(test.status)
-				if test.malformed {
-					_, _ = io.WriteString(w, `{}`)
-				} else {
-					_, _ = io.WriteString(w, `{"error":{"code":"`+test.code+`","message":"safe"}}`)
+				body := test.body
+				contentType := test.contentType
+				if test.code != "" {
+					body = `{"error":{"code":"` + test.code + `","message":"safe"}}`
+					contentType = "application/json"
 				}
+				if contentType != "" {
+					w.Header().Set("Content-Type", contentType)
+				}
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, body)
 			}))
 			defer server.Close()
 			client, _ := NewClient(server.URL, "secret", time.Second)
@@ -458,6 +619,15 @@ func TestPostRoastReviewRejectsSensitiveSuccessHeadersAndCommentFields(t *testin
 		token       string
 		mutate      func(http.ResponseWriter, *http.Request, string) string
 	}{
+		{name: "unknown header without reflection", requestBody: validReviewBody, token: "unknown-header-secret", mutate: func(w http.ResponseWriter, _ *http.Request, body string) string {
+			w.Header().Set("X-Custom-Metadata", "generic")
+			return activeCommentJSON(body)
+		}},
+		{name: "segmented body across unknown headers", requestBody: validReviewBody, token: "segmented-header-secret", mutate: func(w http.ResponseWriter, _ *http.Request, body string) string {
+			w.Header().Set("X-Review-Part-One", "Measured")
+			w.Header().Set("X-Review-Part-Two", "evidence.")
+			return activeCommentJSON(body)
+		}},
 		{name: "wrapped body excerpt in header value", requestBody: validReviewBody, token: "header-body-secret", mutate: func(w http.ResponseWriter, _ *http.Request, body string) string {
 			w.Header().Set("X-Hostile", "prefix-Measured evidence.-suffix")
 			return activeCommentJSON(body)
@@ -519,23 +689,65 @@ func TestPostRoastReviewRejectsSensitiveSuccessHeadersAndCommentFields(t *testin
 	}
 }
 
-func TestPostRoastReviewAcceptsBenignUnknownResponseHeader(t *testing.T) {
+func TestPostRoastReviewAcceptsOnlyStandardTransportAndProxyResponseHeaders(t *testing.T) {
+	requestBody := validReviewBody + "\n" + ReviewTemplateVersion + "\n" + roastSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			writeRoastJSON(w, validRoastDetailJSON())
 			return
 		}
 		setReviewHeaders(w, false)
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Request-Trace", "trace-z9y8x7w6")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Server", "trusted-proxy")
+		w.Header().Set("Via", "1.1 gateway")
+		w.Header().Set("X-Request-ID", "8a4f88de7c374172")
+		w.Header().Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+		w.Header().Set("tracestate", "vendor=opaque")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, activeCommentJSON(validReviewBody))
+		_, _ = io.WriteString(w, activeCommentJSON(requestBody))
 	}))
 	defer server.Close()
-	client, _ := NewClient(server.URL, "benign-header-secret", time.Second)
-	result, gotFailure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion})
+	client, _ := NewClient(server.URL, "standard-header-secret", time.Second)
+	result, gotFailure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{Body: requestBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion})
 	if gotFailure != nil || result.Comment.CommentUUID != commentUUID {
 		t.Fatalf("result = %#v, failure = %+v", result, gotFailure)
+	}
+}
+
+func TestPostRoastReviewRejectsReflectionsInAllowedStandardHeaders(t *testing.T) {
+	key, _ := CanonicalRoastReviewKey(roastUUID, roastSHA256, ReviewTemplateVersion)
+	for _, test := range []struct {
+		name, value string
+	}{
+		{name: "canonical key", value: "proxy " + key},
+		{name: "token", value: "allowed-header-token"},
+		{name: "server URL", value: "SERVER_URL"},
+		{name: "review body line", value: "prefix Measured evidence. suffix"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					writeRoastJSON(w, validRoastDetailJSON())
+					return
+				}
+				setReviewHeaders(w, false)
+				w.Header().Set("Content-Type", "application/json")
+				value := test.value
+				if value == "SERVER_URL" {
+					value = server.URL
+				}
+				w.Header().Set("Server", value)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, activeCommentJSON(validReviewBody))
+			}))
+			defer server.Close()
+			client, _ := NewClient(server.URL, "allowed-header-token", time.Second)
+			_, failure := client.PostRoastReview(context.Background(), roastUUID, RoastReviewRequest{Body: validReviewBody, RevisionSHA256: roastSHA256, TemplateVersion: ReviewTemplateVersion})
+			if failure == nil || failure.Code != "invalid_server_response" {
+				t.Fatalf("failure = %+v", failure)
+			}
+		})
 	}
 }
 
@@ -550,6 +762,15 @@ func TestRoastReviewPublicTypesHaveExactJSONContract(t *testing.T) {
 			t.Fatalf("field %d JSON name = %q, want %q", index, got, jsonName)
 		}
 	}
+}
+
+func roastDetailWithCurrentRevision(t *testing.T, revisionNumber int64, sha string) string {
+	t.Helper()
+	detail := strings.Replace(validRoastDetailJSON(), `"revision_count":1`, `"revision_count":`+strconv.FormatInt(revisionNumber, 10), 1)
+	current := strings.Replace(validRoastRevisionJSON(), `"revision_number":1`, `"revision_number":`+strconv.FormatInt(revisionNumber, 10), 1)
+	current = strings.Replace(current, roastSHA256, sha, 1)
+	detail = strings.Replace(detail, validRoastRevisionJSON(), current, 1)
+	return detail
 }
 
 func writeReviewResponse(w http.ResponseWriter, replay bool, body string) {

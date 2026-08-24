@@ -88,8 +88,24 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	if failure != nil {
 		return result, failure
 	}
-	if current.State != "parsed" || current.CurrentRevision == nil || current.CurrentRevision.ParseState != "parsed" || current.CurrentRevision.SHA256 != request.RevisionSHA256 || current.CurrentRevision.RevisionNumber != revisionNumber {
-		return result, reviewRevisionChangedFailure()
+	requestedIsCurrent := current.CurrentRevision != nil &&
+		current.CurrentRevision.RevisionNumber == revisionNumber &&
+		current.CurrentRevision.SHA256 == request.RevisionSHA256
+	if requestedIsCurrent {
+		if current.State != "parsed" || current.CurrentRevision.ParseState != "parsed" {
+			return result, reviewRevisionChangedFailure()
+		}
+	} else {
+		revision, lookupFailure := c.findRoastRevision(ctx, roastUUID, revisionNumber)
+		if lookupFailure != nil {
+			if lookupFailure.Code == "not_found" && lookupFailure.HTTPStatus == nil {
+				return result, reviewRevisionChangedFailure()
+			}
+			return result, lookupFailure
+		}
+		if revision.SHA256 != request.RevisionSHA256 || revision.ParseState != "parsed" {
+			return result, reviewRevisionChangedFailure()
+		}
 	}
 	key, failure := CanonicalRoastReviewKey(roastUUID, request.RevisionSHA256, request.TemplateVersion)
 	if failure != nil {
@@ -103,7 +119,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	var replay bool
 	var locationCommentUUID string
 	validator := func(status int, header http.Header) *output.Error {
-		if status != http.StatusCreated || responseHeaderReflectsForbidden(header, key, c.token, c.serverURL.String()) || responseHeaderReflectsReviewBody(header, request.Body, roastUUID, request.RevisionSHA256, request.TemplateVersion) {
+		if status != http.StatusCreated || !validRoastReviewSuccessHeaders(header, request.Body, key, c.token, c.serverURL.String()) {
 			return invalidServerResponse(status)
 		}
 		if !singleHeaderEquals(header, "Cache-Control", "no-store") ||
@@ -116,6 +132,9 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 			return invalidServerResponse(status)
 		}
 		replay = replayValues[0] == "true"
+		if !requestedIsCurrent && !replay {
+			return invalidServerResponse(status)
+		}
 		locationValues := header.Values("Location")
 		prefix := roastAPIRoot + "/" + roastUUID + "/comments/"
 		if len(locationValues) != 1 || !strings.HasPrefix(locationValues[0], prefix) {
@@ -133,7 +152,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 		Method: http.MethodPost,
 		Path:   roastAPIRoot + "/" + roastUUID + "/comments/ai-review",
 		Body:   body, IdempotencyKey: key, ExpectedStatus: http.StatusCreated,
-		ValidateResponse: validator,
+		ValidateResponse: validator, ForbiddenResponseValues: []string{key},
 	}, &comment, true)
 	if failure != nil {
 		return result, sanitizeRoastReviewPostFailure(failure)
@@ -179,81 +198,89 @@ func singleHeaderEquals(header http.Header, name, expected string) bool {
 	return len(values) == 1 && values[0] == expected && !strings.Contains(values[0], ",")
 }
 
-func responseHeaderReflectsForbidden(header http.Header, forbiddenValues ...string) bool {
+// Review responses allow only endpoint contract metadata, net/http framing
+// metadata, and ubiquitous proxy/trace metadata. Application-specific custom
+// headers require an explicit client update so reflected data cannot be split
+// across newly invented names or values.
+var roastReviewSuccessHeaderNames = map[string]struct{}{
+	"cache-control":             {},
+	"location":                  {},
+	"x-idempotent-replay":       {},
+	"x-roast-revision-sha256":   {},
+	"x-review-template-version": {},
+	"content-type":              {},
+	"content-length":            {},
+	"date":                      {},
+	"server":                    {},
+	"via":                       {},
+	"x-request-id":              {},
+	"traceparent":               {},
+	"tracestate":                {},
+}
+
+// Values for these headers are checked against their exact endpoint contract
+// below, so marker text that necessarily contains the same fixed values is not
+// mistaken for response reflection.
+var roastReviewFixedValueHeaderNames = map[string]struct{}{
+	"cache-control":             {},
+	"location":                  {},
+	"x-idempotent-replay":       {},
+	"x-roast-revision-sha256":   {},
+	"x-review-template-version": {},
+	"content-type":              {},
+}
+
+func validRoastReviewSuccessHeaders(header http.Header, body string, forbiddenValues ...string) bool {
 	for name, values := range header {
 		lowerName := strings.ToLower(name)
-		for _, forbidden := range forbiddenValues {
-			if forbidden != "" && strings.Contains(lowerName, strings.ToLower(forbidden)) {
-				return true
-			}
+		if _, allowed := roastReviewSuccessHeaderNames[lowerName]; !allowed || len(values) == 0 {
+			return false
 		}
+		if containsCaseInsensitive(name, forbiddenValues) || containsReviewBodyExcerpt(name, body) {
+			return false
+		}
+		_, hasFixedContractValue := roastReviewFixedValueHeaderNames[lowerName]
 		for _, value := range values {
-			if containsAny(value, forbiddenValues) {
-				return true
+			if containsAny(value, forbiddenValues) || (!hasFixedContractValue && containsReviewBodyExcerpt(value, body)) {
+				return false
 			}
 		}
 	}
-	return false
+	if !singleHeaderEquals(header, "Content-Type", "application/json") &&
+		!singleHeaderEquals(header, "Content-Type", "application/json; charset=utf-8") {
+		return false
+	}
+	if values := header.Values("Content-Length"); len(values) > 1 {
+		return false
+	} else if len(values) == 1 {
+		if _, err := strconv.ParseUint(values[0], 10, 63); err != nil {
+			return false
+		}
+	}
+	if values := header.Values("Date"); len(values) > 1 {
+		return false
+	} else if len(values) == 1 {
+		if _, err := http.ParseTime(values[0]); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
-func responseHeaderReflectsReviewBody(header http.Header, body, roastUUID, revisionSHA, template string) bool {
-	for name, values := range header {
-		canonicalName := http.CanonicalHeaderKey(name)
-		allValuesAllowlisted := len(values) > 0
-		for _, value := range values {
-			if !allowlistedRoastReviewHeaderValue(canonicalName, value, roastUUID, revisionSHA, template) {
-				allValuesAllowlisted = false
-				break
-			}
-		}
-		if allValuesAllowlisted {
-			continue
-		}
-		if hasCommonByteSubstring(name, body, 8) {
+func containsCaseInsensitive(value string, forbiddenValues []string) bool {
+	lowerValue := strings.ToLower(value)
+	for _, forbidden := range forbiddenValues {
+		if forbidden != "" && strings.Contains(lowerValue, strings.ToLower(forbidden)) {
 			return true
 		}
-		for _, value := range values {
-			if hasCommonByteSubstring(value, body, 8) {
-				return true
-			}
-		}
 	}
 	return false
 }
 
-func allowlistedRoastReviewHeaderValue(name, value, roastUUID, revisionSHA, template string) bool {
-	switch name {
-	case "Cache-Control":
-		return value == "no-store"
-	case "Content-Type":
-		return value == "application/json" || value == "application/json; charset=utf-8"
-	case "Content-Length":
-		_, err := strconv.ParseUint(value, 10, 63)
-		return err == nil
-	case "Date":
-		_, err := http.ParseTime(value)
-		return err == nil
-	case "Location":
-		prefix := roastAPIRoot + "/" + roastUUID + "/comments/"
-		commentUUID := strings.TrimPrefix(value, prefix)
-		return value == prefix+commentUUID && validRoastUUID(commentUUID)
-	case "X-Idempotent-Replay":
-		return value == "true" || value == "false"
-	case "X-Roast-Revision-Sha256":
-		return value == revisionSHA
-	case "X-Review-Template-Version":
-		return value == template
-	default:
-		return false
-	}
-}
-
-func hasCommonByteSubstring(value, source string, minimum int) bool {
-	if minimum <= 0 || len(value) < minimum || len(source) < minimum {
-		return false
-	}
-	for index := 0; index+minimum <= len(source); index++ {
-		if strings.Contains(value, source[index:index+minimum]) {
+func containsReviewBodyExcerpt(value, body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) >= 8 && strings.Contains(value, line) {
 			return true
 		}
 	}
@@ -272,7 +299,7 @@ func roastReviewCommentReflectsForbidden(comment CommentView, requestBody, key, 
 		bodyIndependentFields = append(bodyIndependentFields, *comment.DeletedAt)
 	}
 	for _, value := range bodyIndependentFields {
-		if containsAny(value, forbidden) || hasCommonByteSubstring(value, requestBody, 8) {
+		if containsAny(value, forbidden) || containsReviewBodyExcerpt(value, requestBody) {
 			return true
 		}
 	}

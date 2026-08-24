@@ -26,13 +26,14 @@ type ResponseValidator func(status int, header http.Header) *output.Error
 // Request describes one API operation. Body must return a newly opened body on
 // every call so an idempotent mutation can be replayed safely.
 type Request struct {
-	Method           string
-	Path             string
-	Query            url.Values
-	Body             func() (io.ReadCloser, string, error)
-	IdempotencyKey   string
-	ExpectedStatus   int
-	ValidateResponse ResponseValidator
+	Method                  string
+	Path                    string
+	Query                   url.Values
+	Body                    func() (io.ReadCloser, string, error)
+	IdempotencyKey          string
+	ExpectedStatus          int
+	ValidateResponse        ResponseValidator
+	ForbiddenResponseValues []string
 }
 
 // Client is an authenticated Artisan API client.
@@ -112,7 +113,12 @@ func (c *Client) do(ctx context.Context, request Request, destination any, missi
 	}
 
 	canRetry := requestCanRetry(request)
-	forbiddenResponseValues := []string{c.token, c.serverURL.String(), request.IdempotencyKey}
+	forbiddenResponseValues := make([]string, 0, 2+len(request.ForbiddenResponseValues))
+	forbiddenResponseValues = append(forbiddenResponseValues, c.token, c.serverURL.String())
+	forbiddenResponseValues = append(forbiddenResponseValues, request.ForbiddenResponseValues...)
+	forbiddenBodyValues := make([]string, 0, 1+len(request.ForbiddenResponseValues))
+	forbiddenBodyValues = append(forbiddenBodyValues, c.token)
+	forbiddenBodyValues = append(forbiddenBodyValues, request.ForbiddenResponseValues...)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
@@ -179,8 +185,11 @@ func (c *Client) do(ctx context.Context, request Request, destination any, missi
 		if ctx.Err() != nil {
 			return contextOrNetworkFailure(ctx)
 		}
-		if containsExactTokenReflection(responseBody, c.token) || containsExactTokenReflection(responseBody, request.IdempotencyKey) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
+		if responseBodyContainsAnyExactToken(responseBody, forbiddenBodyValues) || responseHeaderContainsAny(response.Header, forbiddenResponseValues) {
 			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
+		}
+		if status == http.StatusNotFound && missingEndpointOnUnstructuredNotFound && isUnstructuredRouteNotFound(responseBody, response.Header) {
+			return serverUpgradeRequiredFailure()
 		}
 		if responseRequiresJSON(responseBody) && !trustedJSONContentType(response.Header) {
 			return invalidServerResponseAvoiding(status, forbiddenResponseValues)
@@ -203,9 +212,6 @@ func (c *Client) do(ctx context.Context, request Request, destination any, missi
 			return decodeSuccess(request.Method, status, responseBody, destination)
 		}
 		if status >= 400 && status < 600 {
-			if status == http.StatusNotFound && missingEndpointOnUnstructuredNotFound && isUnstructuredRouteNotFound(responseBody) {
-				return serverUpgradeRequiredFailure()
-			}
 			return decodeAPIError(status, responseBody, forbiddenResponseValues...)
 		}
 		return invalidServerResponseAvoiding(status, forbiddenResponseValues)
@@ -226,6 +232,15 @@ func responseHeaderContainsAny(header http.Header, forbiddenValues []string) boo
 			if containsAny(value, forbiddenValues) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func responseBodyContainsAnyExactToken(body []byte, forbiddenValues []string) bool {
+	for _, forbidden := range forbiddenValues {
+		if containsExactTokenReflection(body, forbidden) {
+			return true
 		}
 	}
 	return false
