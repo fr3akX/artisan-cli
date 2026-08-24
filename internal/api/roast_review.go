@@ -98,7 +98,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 	}
 	requestedIsCurrent := current.CurrentRevision.RevisionNumber == revisionNumber &&
 		current.CurrentRevision.SHA256 == request.RevisionSHA256
-	replayOnly := !requestedIsCurrent || current.State != "parsed" || current.CurrentRevision.ParseState != "parsed"
+	oldSlot := !requestedIsCurrent
 	if !requestedIsCurrent {
 		if revisionNumber >= current.CurrentRevision.RevisionNumber {
 			return result, reviewRevisionChangedFailure()
@@ -135,7 +135,7 @@ func (c *Client) PostRoastReview(ctx context.Context, rawRoastUUID string, reque
 			header, roastUUID, request.RevisionSHA256, request.TemplateVersion, request.Body,
 			key, c.token, c.serverURL.String(),
 		)
-		if !valid || replayOnly && !replay {
+		if !valid || oldSlot && !replay {
 			return invalidServerResponse(status)
 		}
 		return nil
@@ -344,11 +344,14 @@ func validTraceparent(value string) bool {
 	if value[:2] == "00" {
 		return len(value) == 55
 	}
-	if (len(value)-55)%3 != 0 {
+	if len(value) == 55 {
+		return true
+	}
+	if value[55] != '-' {
 		return false
 	}
-	for index := 55; index < len(value); index += 3 {
-		if value[index] != '-' || !isLowerHexByte(value[index+1]) || !isLowerHexByte(value[index+2]) {
+	for index := 55; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
 			return false
 		}
 	}
@@ -565,12 +568,21 @@ func roastReviewFieldsReflectSensitiveData(fields []string, body string, forbidd
 }
 
 func roastReviewTargetReconstructed(target string, fields []string, maximumSegments int) bool {
+	reconstructed, _, _ := roastReviewTargetReconstructionWithinBudget(
+		target, fields, maximumSegments, maxRoastReviewReconstructionStates,
+	)
+	return reconstructed
+}
+
+// roastReviewTargetReconstructionWithinBudget returns a conservative match on
+// budget exhaustion so response validation fails closed instead of continuing
+// combinatorial reconstruction.
+func roastReviewTargetReconstructionWithinBudget(target string, fields []string, maximumSegments, maximumStates int) (reconstructed bool, states int, exhausted bool) {
 	type reconstructionState struct {
 		mask   uint16
 		offset int
 	}
 	visited := make(map[reconstructionState]struct{})
-	states := 0
 	var reconstructs func(mask uint16, offset, segments int) bool
 	reconstructs = func(mask uint16, offset, segments int) bool {
 		if offset == len(target) {
@@ -585,7 +597,8 @@ func roastReviewTargetReconstructed(target string, fields []string, maximumSegme
 		}
 		visited[state] = struct{}{}
 		states++
-		if states > maxRoastReviewReconstructionStates {
+		if states > maximumStates {
+			exhausted = true
 			return true
 		}
 		for index, field := range fields {
@@ -617,7 +630,8 @@ func roastReviewTargetReconstructed(target string, fields []string, maximumSegme
 		}
 		return false
 	}
-	return reconstructs(0, 0, 0)
+	reconstructed = reconstructs(0, 0, 0)
+	return reconstructed, states, exhausted
 }
 
 func roastReviewCommentReflectsForbidden(comment CommentView, responseMetadata []string, requestBody, key, token, serverURL string) bool {
@@ -635,7 +649,22 @@ func roastReviewCommentReflectsForbidden(comment CommentView, responseMetadata [
 	if roastReviewFieldsReflectSensitiveData(combinedMetadata, requestBody, forbidden...) {
 		return true
 	}
-	return comment.Body != nil && containsAny(*comment.Body, forbidden)
+	if comment.Body == nil {
+		return false
+	}
+	if containsAny(*comment.Body, forbidden) {
+		return true
+	}
+	forbiddenReconstructionFields := append(append([]string(nil), combinedMetadata...), *comment.Body)
+	if len(forbiddenReconstructionFields) > maxRoastReviewReflectionFields+1 {
+		return true
+	}
+	for _, target := range forbidden {
+		if target != "" && roastReviewTargetReconstructed(target, forbiddenReconstructionFields, len(forbiddenReconstructionFields)) {
+			return true
+		}
+	}
+	return false
 }
 
 func invalidReviewFailure() *output.Error {
@@ -671,6 +700,8 @@ func sanitizeRoastReviewPostFailure(failure *output.Error) *output.Error {
 		sanitized.Message = "The roast revision changed before the review could be posted"
 	case "review_idempotency_conflict":
 		sanitized.Message = "The roast review identity conflicts with an existing request"
+	case "chart_unavailable":
+		sanitized.Message = chartUnavailableFailure().Message
 	case "not_found":
 		sanitized.Message = "Roast not found"
 	case "authentication_required":
@@ -692,7 +723,7 @@ func coherentRoastReviewFailure(status int, code string) bool {
 	case http.StatusNotFound:
 		return code == "not_found"
 	case http.StatusConflict:
-		return code == "roast_revision_changed" || code == "review_idempotency_conflict"
+		return code == "roast_revision_changed" || code == "review_idempotency_conflict" || code == "chart_unavailable"
 	case http.StatusUnprocessableEntity:
 		return code == "invalid_review"
 	default:
