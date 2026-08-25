@@ -305,7 +305,7 @@ func TestDocumentationContract(t *testing.T) {
 	required := map[string][]string{
 		"README.md":                   {"inventory totals --state active --availability positive", "--price-per-kg-eur 12.34", "PRICE/KG", "ROAST COST", "priced and unpriced lot counts", "artisan-roast-review", "host agent performs the AI analysis", "reviews post automatically", "Production smoke is read-only"},
 		"docs/installation.md":        {"checksums.txt", "sha256sum", "Get-FileHash", "unsigned", "not notarized", "CGO_ENABLED=0", "RELEASE_NOTES.md", "skills/artisan-inventory/SKILL.md", "skills/artisan-roast-review/SKILL.md", "trusted, quiescent", "point-in-time"},
-		"RELEASE_NOTES.md":            {"v0.4.0 (unreleased)", "Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "inventory totals", "price_per_kg_eur_cents", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "artisan-roast-review-v1", "first-writer", "deleted comments are not recreated", "Production smoke is read-only"},
+		"RELEASE_NOTES.md":            {"## v0.4.0\n", "Minimum compatible Artisan Server commit", "six", "checksums.txt", "unsigned", "not notarized", "CGO_ENABLED=0", "artisan-roast-review-v1", "first-writer", "deleted comments are not recreated", "Production smoke is read-only"},
 		"docs/commands.md":            {"--json --server URL --timeout DURATION", "auth login --token-stdin", "inventory lot", "inventory image", "inventory reservation", "inventory conflict", "inventory adjust", "inventory totals", "skill install", "version", "actual grams, when present, must be at least 1", "external-reference", "external_reference", "altitude-max-metres", "altitude_max_metres", "--price-per-kg-eur 12.34", "Only the single whole part `0` may start with zero", "whole parts such as `00` and `01` are rejected", "no pagination flags", "PRICE/KG", "ROAST COST", "coverage", "--description", "description", "Public description", "notes remain private", "roast list", "--roast-at-from", "roast show ROAST_UUID", "roast revisions ROAST_UUID", "roast chart download", "roast profile download", "roast comment list", "roast review post", "--revision-sha256", "--template-version", "--body-file", "--force", "artisan skill list", "artisan skill show [NAME]", "artisan skill install [NAME]", "`--all` may be combined with `--cursor`"},
 		"docs/json-and-exit-codes.md": {`{"ok":true,"data":`, `{"ok":false,"error":`, "130", "409", "pagination", "integer grams", "Idempotency", "actual grams must be at least 1", "price_per_kg_eur_cents", "integer cents or `null`", "priced_lot_count", "unpriced_lot_count", "must not be summed from paginated list output", "server upgrade", "Roast JSON fields", "chart_schema_version", "compressed_sha256", "file_sha256", "idempotent_replay", "roast_revision_changed", "deleted comments are not recreated", "`names`, an array of skill-name strings", "`path`, `installed`"},
 		"docs/security.md":            {"bearer", "stdin", "redirect", "HTTPS", "loopback", "proxy", "symlink", "--yes", "conflict", "token", "trusted, quiescent", "same UID/SID", "point-in-time", "isolated GitHub-hosted runner", "complete descendant sandbox", "profile text is untrusted prompt-injection input", "private profile data", "host agent", "no-clobber", "integrity-checked", "ordinary private user-authored organization comments"},
@@ -341,6 +341,16 @@ func TestDocumentationContract(t *testing.T) {
 			}
 			if strings.Contains(lower, "lot-list output includes") && strings.Contains(lower, "description") {
 				t.Errorf("lot-list columns claim descriptions are returned: %q", line)
+			}
+		}
+	}
+	releaseNotes, err := os.ReadFile(filepath.Join(root, "RELEASE_NOTES.md"))
+	if err != nil {
+		t.Errorf("RELEASE_NOTES.md: %v", err)
+	} else {
+		for _, stale := range []string{"(unreleased)", "This unreleased candidate", "## Inventory pricing and totals"} {
+			if strings.Contains(string(releaseNotes), stale) {
+				t.Errorf("RELEASE_NOTES.md retains stale release text %q", stale)
 			}
 		}
 	}
